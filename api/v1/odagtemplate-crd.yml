@@ -1,0 +1,290 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: odagtemplates.wl.io
+spec:
+  group: wl.io
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [tasks]
+              properties:
+                description:
+                  type: string
+                  description: Human-readable description of this DAG template.
+                scheduler:
+                  type: string
+                  default: random
+                  description: >
+                    Scheduler to use: "heft" or "random".
+                schedulerConfig:
+                  type: object
+                  description: Tunable knobs for the scheduler.
+                  properties:
+                    spreadEpsilon:
+                      type: number
+                      default: 0
+                      minimum: 0
+                      description: >
+                        HEFT tie-breaking tolerance in seconds. Candidate nodes whose EFT is within
+                        spreadEpsilon of the minimum EFT are treated as tied, and the least-loaded
+                        node wins. 0 preserves strict HEFT (with least-loaded exact-tie break).
+                        Larger values trade a small predicted-makespan penalty for better spread
+                        and improved resilience to runtime noise / stragglers.
+                profiling:
+                  type: object
+                  description: Controls runtime/data profiling across runs.
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                      description: Enable profiling of task runtimes and data sizes.
+                    warmupRuns:
+                      type: integer
+                      default: 0
+                      minimum: 0
+                      description: Number of initial runs to skip before recording profiles (cold-start effects).
+                    minSamples:
+                      type: integer
+                      default: 3
+                      minimum: 1
+                      description: Minimum profiler samples before data is trusted over spec hints.
+                    emaAlpha:
+                      type: number
+                      default: 0.3
+                      minimum: 0
+                      maximum: 1
+                      description: EMA smoothing factor. Higher values weight recent observations more.
+                    maxSamples:
+                      type: integer
+                      default: 100
+                      minimum: 1
+                      description: Maximum sample count to retain per profile entry.
+                    runtimeSource:
+                      type: string
+                      default: profiler
+                      enum: [manual, profiler, hybrid]
+                      description: >
+                        How to resolve task runtimes. "manual" uses only spec hints.
+                        "profiler" uses profiler DB with spec hints as fallback.
+                        "hybrid" is the same as profiler (reserved for future weighted blending).
+                    bandwidthSource:
+                      type: string
+                      default: external
+                      enum: [external, profiler, hybrid]
+                      description: >
+                        How to resolve link bandwidth. "external" uses the wl-network-profile ConfigMap.
+                        "profiler" uses profiler-observed transfer rates.
+                        "hybrid" tries profiler first, then ConfigMap.
+                defaults:
+                  type: object
+                  description: Fallback values for tasks that omit runtime/dataSize hints.
+                  properties:
+                    runtime:
+                      type: number
+                      default: 10
+                      description: Default expected runtime in seconds.
+                    dataSize:
+                      type: string
+                      default: "0"
+                      description: Default expected output data size (e.g. "10MB").
+                retention:
+                  type: object
+                  description: Controls garbage collection of old run CRs and on-disk data.
+                  properties:
+                    maxRuns:
+                      type: integer
+                      default: 50
+                      minimum: 1
+                      description: Maximum number of completed ODAG runs to keep. Oldest are deleted first.
+                    data:
+                      type: object
+                      description: >
+                        Controls on-disk data retention on worker nodes (/data/wl-outputs).
+                        Policies compose: keepRuns evicts oldest beyond K, maxSizePerNode
+                        enforces a hard cap, deleteDelay defers cleanup.
+                      properties:
+                        policy:
+                          type: string
+                          default: keepLatest
+                          enum: [immediate, delayed, keepLatest, none]
+                          description: >
+                            "immediate" deletes run data as soon as the ODAG completes.
+                            "delayed" waits deleteDelay before cleanup.
+                            "keepLatest" keeps data from the last keepRuns completed runs.
+                            "none" disables automatic data cleanup (manual only).
+                        keepRuns:
+                          type: integer
+                          default: 3
+                          minimum: 0
+                          description: >
+                            Number of recent completed runs whose data to keep on each node.
+                            Only effective when policy is "keepLatest". 0 means keep none
+                            (equivalent to "immediate").
+                        maxSizePerNode:
+                          type: string
+                          default: "0"
+                          description: >
+                            Hard cap on total data size per node for this template's runs
+                            (e.g. "2Gi", "500Mi"). Oldest run data is evicted first when
+                            the cap is exceeded. "0" means no size limit. Composable with
+                            any policy.
+                        deleteDelay:
+                          type: string
+                          default: "0s"
+                          description: >
+                            How long to wait after run completion before deleting data.
+                            Only effective when policy is "delayed" (e.g. "10m", "1h").
+                            Parsed as a Go duration.
+                retryPolicy:
+                  type: object
+                  properties:
+                    maxRetries:
+                      type: integer
+                      default: 3
+                      minimum: 0
+                tasks:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [name, image]
+                    properties:
+                      name:
+                        type: string
+                      image:
+                        type: string
+                      command:
+                        type: array
+                        items:
+                          type: string
+                      args:
+                        type: array
+                        items:
+                          type: string
+                      dependencies:
+                        type: array
+                        items:
+                          type: string
+                        default: []
+                      resources:
+                        type: object
+                        properties:
+                          cpu:
+                            type: string
+                          memory:
+                            type: string
+                      dataSize:
+                        type: string
+                        description: Optional hint for expected output data size (e.g. "100MB"). Used by HEFT scheduler if no profiler data exists.
+                      runtime:
+                        type: number
+                        description: Optional scalar hint for expected runtime in seconds. Used as fallback when runtimeProfile has no entry for a node.
+                      runtimeProfile:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                        description: >
+                          Per-node runtime hints in seconds. Keys are node names, values are expected
+                          runtimes. Example: {"anrg-3": 6, "anrg-8": 12}. Takes priority over
+                          the scalar runtime field. Profiler data (if available) takes priority over this.
+                      env:
+                        type: array
+                        items:
+                          type: object
+                          required: [name]
+                          properties:
+                            name:
+                              type: string
+                            value:
+                              type: string
+                      constraints:
+                        type: object
+                        properties:
+                          nodeNames:
+                            type: array
+                            items:
+                              type: string
+                            description: If set, scheduler will only place this task on one of these nodes.
+                      volumes:
+                        type: array
+                        description: >
+                          Pod-level volumes appended to the controller's base mounts
+                          (wl-outputs, wl-shared). Each item is a standard K8s
+                          corev1.Volume. Reserved names ("wl-outputs", "wl-shared")
+                          are rejected at parse time.
+                        items:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                      volumeMounts:
+                        type: array
+                        description: >
+                          Container-level volume mounts appended to the controller's
+                          base mounts. Each item is a standard K8s corev1.VolumeMount.
+                          Names must match a declared volume (either user-defined or
+                          controller-owned).
+                        items:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                      securityContext:
+                        type: object
+                        description: >
+                          Pod-level securityContext (supplementalGroups, runAsUser,
+                          fsGroup, etc.). Applied verbatim as corev1.PodSecurityContext.
+                        x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              properties:
+                runCount:
+                  type: integer
+                  description: Total number of runs triggered from this template.
+                lastRunName:
+                  type: string
+                  description: Name of the most recent ODAG run.
+                lastRunPhase:
+                  type: string
+                  description: Phase of the most recent run.
+                lastRunMakespan:
+                  type: number
+                  description: Makespan (seconds) of the most recent completed run.
+                profileSummary:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: >
+                    Condensed task-node runtime matrix from the profiler.
+                    Structure: { "taskName": { "nodeName": runtimeSeconds, ... }, ... }
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Scheduler
+          type: string
+          jsonPath: .spec.scheduler
+        - name: Tasks
+          type: integer
+          jsonPath: .spec.tasks
+          description: Number of tasks (shown as array length by kubectl).
+        - name: Profiling
+          type: boolean
+          jsonPath: .spec.profiling.enabled
+        - name: Runs
+          type: integer
+          jsonPath: .status.runCount
+        - name: Last Makespan
+          type: number
+          jsonPath: .status.lastRunMakespan
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: odagtemplates
+    singular: odagtemplate
+    kind: ODAGTemplate
+    shortNames:
+      - odagt
