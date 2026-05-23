@@ -46,7 +46,6 @@ var (
 // globals set by persistent / per-command flags
 var (
 	kubeconfig string
-	namespace  string
 	filename   string
 )
 
@@ -103,7 +102,7 @@ func applyCmd() *cobra.Command {
 		RunE: applyFromFile,
 	}
 	cmd.Flags().StringVarP(&filename, "file", "f", "", "path to ODAG/ODAGTemplate YAML (required)")
-	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace (default: from manifest, else 'default')")
+	cmd.Flags().StringP("namespace", "n", "", "namespace (default: from manifest, else 'default')")
 	cmd.MarkFlagRequired("file")
 	return cmd
 }
@@ -131,7 +130,7 @@ func getCmd() *cobra.Command {
 			}
 		},
 	}
-	cmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "namespace")
+	cmd.Flags().StringP("namespace", "n", "default", "namespace")
 	return cmd
 }
 
@@ -144,7 +143,7 @@ func statusCmd() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		RunE:    odagStatus,
 	}
-	cmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "namespace")
+	cmd.Flags().StringP("namespace", "n", "default", "namespace")
 	return cmd
 }
 
@@ -157,7 +156,7 @@ func logsCmd() *cobra.Command {
 		Args:    cobra.ExactArgs(2),
 		RunE:    streamLogs("wl-odag"),
 	}
-	cmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "namespace")
+	cmd.Flags().StringP("namespace", "n", "default", "namespace")
 	return cmd
 }
 
@@ -173,7 +172,7 @@ func deleteCmd() *cobra.Command {
 			if len(args) == 2 {
 				switch args[0] {
 				case "template", "templates", "odagtemplate", "odagtemplates":
-					return deleteTemplate(args[1])
+					return deleteTemplate(cmd, args[1])
 				case "odag", "odags":
 					return deleteResource(odagGVR)(cmd, args[1:])
 				default:
@@ -183,7 +182,7 @@ func deleteCmd() *cobra.Command {
 			return deleteResource(odagGVR)(cmd, args)
 		},
 	}
-	cmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "namespace")
+	cmd.Flags().StringP("namespace", "n", "default", "namespace")
 	return cmd
 }
 
@@ -196,7 +195,7 @@ func runCmd() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		RunE:    odagRunFromTemplate,
 	}
-	cmd.Flags().StringVarP(&namespace, "namespace", "n", "wl-system", "namespace")
+	cmd.Flags().StringP("namespace", "n", "wl-system", "namespace")
 	return cmd
 }
 
@@ -209,7 +208,7 @@ func runsCmd() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		RunE:    odagListRuns,
 	}
-	cmd.Flags().StringVarP(&namespace, "namespace", "n", "wl-system", "namespace")
+	cmd.Flags().StringP("namespace", "n", "wl-system", "namespace")
 	return cmd
 }
 
@@ -222,7 +221,7 @@ func showCmd() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		RunE:    templateShow,
 	}
-	cmd.Flags().StringVarP(&namespace, "namespace", "n", "wl-system", "namespace")
+	cmd.Flags().StringP("namespace", "n", "wl-system", "namespace")
 	return cmd
 }
 
@@ -244,22 +243,22 @@ func odagCmd() *cobra.Command {
 	submit.MarkFlagRequired("file")
 
 	list := &cobra.Command{Use: "list", Short: "List ODAGs", RunE: listResources(odagGVR)}
-	list.Flags().StringVarP(&namespace, "namespace", "n", "default", "namespace")
+	list.Flags().StringP("namespace", "n", "default", "namespace")
 
 	status := &cobra.Command{Use: "status <name>", Short: "Show ODAG status", Args: cobra.ExactArgs(1), RunE: odagStatus}
-	status.Flags().StringVarP(&namespace, "namespace", "n", "default", "namespace")
+	status.Flags().StringP("namespace", "n", "default", "namespace")
 
 	del := &cobra.Command{Use: "delete <name>", Short: "Delete an ODAG and its task resources", Args: cobra.ExactArgs(1), RunE: deleteResource(odagGVR)}
-	del.Flags().StringVarP(&namespace, "namespace", "n", "default", "namespace")
+	del.Flags().StringP("namespace", "n", "default", "namespace")
 
 	logs := &cobra.Command{Use: "logs <odag-name> <task-name>", Short: "Stream logs from an ODAG task pod", Args: cobra.ExactArgs(2), RunE: streamLogs("wl-odag")}
-	logs.Flags().StringVarP(&namespace, "namespace", "n", "default", "namespace")
+	logs.Flags().StringP("namespace", "n", "default", "namespace")
 
 	run := &cobra.Command{Use: "run <template-name>", Short: "Create a new run from an ODAGTemplate", Args: cobra.ExactArgs(1), RunE: odagRunFromTemplate}
-	run.Flags().StringVarP(&namespace, "namespace", "n", "wl-system", "namespace")
+	run.Flags().StringP("namespace", "n", "wl-system", "namespace")
 
 	runs := &cobra.Command{Use: "runs <template-name>", Short: "List all runs of an ODAGTemplate", Args: cobra.ExactArgs(1), RunE: odagListRuns}
-	runs.Flags().StringVarP(&namespace, "namespace", "n", "wl-system", "namespace")
+	runs.Flags().StringP("namespace", "n", "wl-system", "namespace")
 
 	cmd.AddCommand(submit, list, status, del, logs, run, runs)
 	return cmd
@@ -290,7 +289,7 @@ func applyFromFile(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unsupported kind %q (expected ODAG or ODAGTemplate)", obj.GetKind())
 	}
 
-	ns := namespace
+	ns := nsOf(cmd)
 	if ns == "" {
 		ns = obj.GetNamespace()
 	}
@@ -359,7 +358,7 @@ func listResources(gvr schema.GroupVersionResource) func(*cobra.Command, []strin
 		if err != nil {
 			return err
 		}
-		list, err := dc.Resource(gvr).Namespace(namespace).List(context.Background(), metav1.ListOptions{})
+		list, err := dc.Resource(gvr).Namespace(nsOf(cmd)).List(context.Background(), metav1.ListOptions{})
 		if err != nil {
 			return err
 		}
@@ -383,7 +382,7 @@ func odagStatus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	obj, err := dc.Resource(odagGVR).Namespace(namespace).Get(context.Background(), name, metav1.GetOptions{})
+	obj, err := dc.Resource(odagGVR).Namespace(nsOf(cmd)).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -394,7 +393,7 @@ func odagStatus(cmd *cobra.Command, args []string) error {
 	message, _, _ := unstructured.NestedString(obj.Object, "status", "message")
 
 	fmt.Printf("Name:        %s\n", name)
-	fmt.Printf("Namespace:   %s\n", namespace)
+	fmt.Printf("Namespace:   %s\n", nsOf(cmd))
 	fmt.Printf("Phase:       %s\n", phase)
 	if makespan > 0 {
 		fmt.Printf("Makespan:    %.1fs\n", makespan)
@@ -466,7 +465,7 @@ func deleteResource(gvr schema.GroupVersionResource) func(*cobra.Command, []stri
 		if err != nil {
 			return err
 		}
-		if err = dc.Resource(gvr).Namespace(namespace).Delete(context.Background(), name, metav1.DeleteOptions{}); err != nil {
+		if err = dc.Resource(gvr).Namespace(nsOf(cmd)).Delete(context.Background(), name, metav1.DeleteOptions{}); err != nil {
 			return fmt.Errorf("delete %s %s: %w", gvr.Resource, name, err)
 		}
 
@@ -476,10 +475,10 @@ func deleteResource(gvr schema.GroupVersionResource) func(*cobra.Command, []stri
 			return err
 		}
 		sel := fmt.Sprintf("wl-odag=%s", name)
-		_ = kc.CoreV1().Pods(namespace).DeleteCollection(context.Background(), metav1.DeleteOptions{}, metav1.ListOptions{LabelSelector: sel})
-		svcs, _ := kc.CoreV1().Services(namespace).List(context.Background(), metav1.ListOptions{LabelSelector: sel})
+		_ = kc.CoreV1().Pods(nsOf(cmd)).DeleteCollection(context.Background(), metav1.DeleteOptions{}, metav1.ListOptions{LabelSelector: sel})
+		svcs, _ := kc.CoreV1().Services(nsOf(cmd)).List(context.Background(), metav1.ListOptions{LabelSelector: sel})
 		for _, svc := range svcs.Items {
-			_ = kc.CoreV1().Services(namespace).Delete(context.Background(), svc.Name, metav1.DeleteOptions{})
+			_ = kc.CoreV1().Services(nsOf(cmd)).Delete(context.Background(), svc.Name, metav1.DeleteOptions{})
 		}
 
 		fmt.Printf("%s/%s deleted\n", gvr.Resource, name)
@@ -487,12 +486,12 @@ func deleteResource(gvr schema.GroupVersionResource) func(*cobra.Command, []stri
 	}
 }
 
-func deleteTemplate(name string) error {
+func deleteTemplate(cmd *cobra.Command, name string) error {
 	dc, err := dynClient()
 	if err != nil {
 		return err
 	}
-	if err = dc.Resource(odagTemplateGVR).Namespace(namespace).Delete(
+	if err = dc.Resource(odagTemplateGVR).Namespace(nsOf(cmd)).Delete(
 		context.Background(), name, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("delete template %s: %w", name, err)
 	}
@@ -510,14 +509,14 @@ func streamLogs(labelKey string) func(*cobra.Command, []string) error {
 
 		// Find pod: name is {dag-name}-{task-name} or use label selector
 		podName := fmt.Sprintf("%s-%s", dagName, taskName)
-		pods, err := kc.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
+		pods, err := kc.CoreV1().Pods(nsOf(cmd)).List(context.Background(), metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("%s=%s,wl-task=%s", labelKey, dagName, taskName),
 		})
 		if err == nil && len(pods.Items) > 0 {
 			podName = pods.Items[0].Name
 		}
 
-		req := kc.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{Follow: true})
+		req := kc.CoreV1().Pods(nsOf(cmd)).GetLogs(podName, &corev1.PodLogOptions{Follow: true})
 		stream, err := req.Stream(context.Background())
 		if err != nil {
 			return fmt.Errorf("logs for %s: %w", podName, err)
@@ -550,20 +549,20 @@ func templateCmd() *cobra.Command {
 	apply.MarkFlagRequired("file")
 
 	list := &cobra.Command{Use: "list", Short: "List ODAGTemplates", RunE: templateList}
-	list.Flags().StringVarP(&namespace, "namespace", "n", "wl-system", "namespace")
+	list.Flags().StringP("namespace", "n", "wl-system", "namespace")
 
 	show := &cobra.Command{Use: "show <name>", Short: "Show ODAGTemplate detail", Args: cobra.ExactArgs(1), RunE: templateShow}
-	show.Flags().StringVarP(&namespace, "namespace", "n", "wl-system", "namespace")
+	show.Flags().StringP("namespace", "n", "wl-system", "namespace")
 
 	del := &cobra.Command{
 		Use:   "delete <name>",
 		Short: "Delete an ODAGTemplate",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return deleteTemplate(args[0])
+			return deleteTemplate(cmd, args[0])
 		},
 	}
-	del.Flags().StringVarP(&namespace, "namespace", "n", "wl-system", "namespace")
+	del.Flags().StringP("namespace", "n", "wl-system", "namespace")
 
 	cmd.AddCommand(apply, list, show, del)
 	return cmd
@@ -574,7 +573,7 @@ func templateList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	list, err := dc.Resource(odagTemplateGVR).Namespace(namespace).List(
+	list, err := dc.Resource(odagTemplateGVR).Namespace(nsOf(cmd)).List(
 		context.Background(), metav1.ListOptions{})
 	if err != nil {
 		return err
@@ -609,7 +608,7 @@ func templateShow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	obj, err := dc.Resource(odagTemplateGVR).Namespace(namespace).Get(
+	obj, err := dc.Resource(odagTemplateGVR).Namespace(nsOf(cmd)).Get(
 		context.Background(), name, metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -623,7 +622,7 @@ func templateShow(cmd *cobra.Command, args []string) error {
 	lastMakespan, _, _ := unstructured.NestedFloat64(obj.Object, "status", "lastRunMakespan")
 
 	fmt.Printf("Name:         %s\n", name)
-	fmt.Printf("Namespace:    %s\n", namespace)
+	fmt.Printf("Namespace:    %s\n", nsOf(cmd))
 	if desc != "" {
 		fmt.Printf("Description:  %s\n", desc)
 	}
@@ -730,7 +729,7 @@ func odagRunFromTemplate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Fetch the template.
-	tmpl, err := dc.Resource(odagTemplateGVR).Namespace(namespace).Get(
+	tmpl, err := dc.Resource(odagTemplateGVR).Namespace(nsOf(cmd)).Get(
 		context.Background(), templateName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("get template %s: %w", templateName, err)
@@ -758,7 +757,7 @@ func odagRunFromTemplate(cmd *cobra.Command, args []string) error {
 			"kind":       "ODAG",
 			"metadata": map[string]interface{}{
 				"generateName": fmt.Sprintf("%s-run-", templateName),
-				"namespace":    namespace,
+				"namespace":    nsOf(cmd),
 				"labels": map[string]interface{}{
 					"wl.io/template": templateName,
 				},
@@ -767,7 +766,7 @@ func odagRunFromTemplate(cmd *cobra.Command, args []string) error {
 		},
 	}
 
-	created, err := dc.Resource(odagGVR).Namespace(namespace).Create(
+	created, err := dc.Resource(odagGVR).Namespace(nsOf(cmd)).Create(
 		context.Background(), odag, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("create run: %w", err)
@@ -784,7 +783,7 @@ func odagListRuns(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	list, err := dc.Resource(odagGVR).Namespace(namespace).List(
+	list, err := dc.Resource(odagGVR).Namespace(nsOf(cmd)).List(
 		context.Background(), metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("wl.io/template=%s", templateName),
 		})
@@ -793,7 +792,7 @@ func odagListRuns(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(list.Items) == 0 {
-		fmt.Printf("No runs found for template %s in namespace %s\n", templateName, namespace)
+		fmt.Printf("No runs found for template %s in namespace %s\n", templateName, nsOf(cmd))
 		return nil
 	}
 
@@ -867,6 +866,14 @@ func defaultKubeconfig() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".kube", "config")
+}
+
+// nsOf returns the namespace flag value for the invoked command. Each command
+// registers its own "namespace" flag (so per-command defaults don't leak
+// through a shared variable); this reads the one belonging to cmd.
+func nsOf(cmd *cobra.Command) string {
+	v, _ := cmd.Flags().GetString("namespace")
+	return v
 }
 
 func fmtAge(t time.Time) string {
