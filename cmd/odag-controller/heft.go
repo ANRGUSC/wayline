@@ -86,6 +86,19 @@ func (nt *nodeTimeline) canFit(start, end float64, cpuNeed, memNeed int64) bool 
 	return cpuNeed <= nt.totalCPU && memNeed <= nt.totalMem
 }
 
+// lastEnd returns the latest end time across all committed slots (0 if none).
+// Used by classical-HEFT (ExclusivePerNode) mode, where a node is treated as a
+// single sequential processor and a new task must start after every prior one.
+func (nt *nodeTimeline) lastEnd() float64 {
+	end := 0.0
+	for _, s := range nt.slots {
+		if s.end > end {
+			end = s.end
+		}
+	}
+	return end
+}
+
 // cpuUsedAt returns total CPU committed at time t.
 func (nt *nodeTimeline) cpuUsedAt(t float64) int64 {
 	total := int64(0)
@@ -414,8 +427,17 @@ type heftResult struct {
 // Motivation: when profiler-learned runtimes are nearly equal across
 // candidates, classical HEFT's strict EFT comparison concentrates all load
 // on one node, hurting resilience to stragglers and network contention.
+// ExclusivePerNode, when true, switches the scheduler from the resource-aware
+// parallel model to classical-HEFT semantics: a node runs at most one task at
+// a time, so a task cannot start until every task already committed to that
+// node has finished (regardless of leftover CPU/memory). This reproduces the
+// textbook HEFT assumption that a task monopolizes its processor for its whole
+// duration. Used to compare classical vs. resource-aware HEFT under
+// heterogeneity. Execution-side exclusivity is enforced separately by sizing
+// each task's CPU request to its tier's full node capacity.
 type heftOptions struct {
-	SpreadEpsilon float64
+	SpreadEpsilon    float64
+	ExclusivePerNode bool
 }
 
 func heftAssignTasks(tasks []taskSpec, nodeMap map[string]nodeInfo, rtResolver runtimeResolver, dsResolver dataSizeResolver, bwResolver bandwidthResolver, opts heftOptions) heftResult {
@@ -650,6 +672,14 @@ func heftAssignTasks(tasks []taskSpec, nodeMap map[string]nodeInfo, rtResolver r
 			// Find earliest start where node has enough resources.
 			runtime := resolveRuntime(name, nodeName)
 			est := tl.earliestStart(taskCPU, taskMem, runtime, depsReady)
+			if opts.ExclusivePerNode {
+				// Classical HEFT: the node is a single sequential processor, so
+				// this task cannot begin until every task already placed on it
+				// has finished — independent of leftover CPU/memory.
+				if le := tl.lastEnd(); le > est {
+					est = le
+				}
+			}
 			eft := est + runtime
 
 			cands = append(cands, candEval{
