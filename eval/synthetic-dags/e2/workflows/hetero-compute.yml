@@ -1,0 +1,86 @@
+# E2 hetero-compute under scheduler-plugins.
+# Only the endpoints carry hard nodeSelectors (matching the Wayline
+# constraint set's anchor points). Internal tasks have NO node
+# restriction so NetworkOverhead can place them freely based on the
+# AppGroup edge costs.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: e2-hetero
+  namespace: argo
+spec:
+  entrypoint: dag
+  serviceAccountName: argo
+  artifactRepositoryRef:
+    configMap: artifact-repositories
+    key: e0bench-minio
+  podMetadata:
+    labels:
+      appgroup.diktyo.x-k8s.io/name: e2-hetero
+  templates:
+    - name: dag
+      dag:
+        tasks:
+          - { name: preprocess, template: generic-free,
+              arguments: { parameters: [
+                { name: tname, value: preprocess }, { name: dsize, value: "20000000"  }, { name: rtime, value: "8"  } ] } }
+          - { name: train, template: generic-free, dependencies: [ preprocess ],
+              arguments: { parameters: [
+                { name: tname, value: train }, { name: dsize, value: "100000000" }, { name: rtime, value: "20" } ],
+                artifacts: [ { name: in-0, from: "{{tasks.preprocess.outputs.artifacts.payload}}" } ] } }
+          - { name: evaluate, template: generic-free, dependencies: [ train ],
+              arguments: { parameters: [
+                { name: tname, value: evaluate }, { name: dsize, value: "5000000" }, { name: rtime, value: "4" } ],
+                artifacts: [ { name: in-0, from: "{{tasks.train.outputs.artifacts.payload}}" } ] } }
+          - { name: export, template: generic-free, dependencies: [ train ],
+              arguments: { parameters: [
+                { name: tname, value: export }, { name: dsize, value: "50000000" }, { name: rtime, value: "6" } ],
+                artifacts: [ { name: in-0, from: "{{tasks.train.outputs.artifacts.payload}}" } ] } }
+          - { name: report, template: generic-free-2in, dependencies: [ evaluate, export ],
+              arguments: { parameters: [
+                { name: tname, value: report }, { name: dsize, value: "0" }, { name: rtime, value: "3" } ],
+                artifacts: [
+                  { name: in-0, from: "{{tasks.evaluate.outputs.artifacts.payload}}" },
+                  { name: in-1, from: "{{tasks.export.outputs.artifacts.payload}}" } ] } }
+
+    - name: generic-free
+      inputs:
+        parameters: [ { name: tname }, { name: dsize }, { name: rtime } ]
+        artifacts:  [ { name: in-0, optional: true, path: /in/in-0/output } ]
+      schedulerName: scheduler-plugins-scheduler
+      metadata: { labels: { "appgroup.diktyo.x-k8s.io/selector": "{{inputs.parameters.tname}}" } }
+      container:
+        image: 192.168.1.163:5000/e1-argo-tasks:latest
+        imagePullPolicy: Always
+        command: [ python, /app/generic.py ]
+        env:
+          - { name: E1_TASK_NAME, value: "{{inputs.parameters.tname}}" }
+          - { name: E1_DATA_SIZE, value: "{{inputs.parameters.dsize}}" }
+          - { name: E1_RUNTIME,   value: "{{inputs.parameters.rtime}}" }
+          - { name: NODE_NAME,    valueFrom: { fieldRef: { fieldPath: spec.nodeName } } }
+        resources: { requests: { cpu: 200m, memory: 256Mi } }
+      outputs:
+        artifacts:
+          - { name: payload, path: /out/output, archive: { none: {} } }
+
+    - name: generic-free-2in
+      inputs:
+        parameters: [ { name: tname }, { name: dsize }, { name: rtime } ]
+        artifacts:
+          - { name: in-0, path: /in/in-0/output }
+          - { name: in-1, path: /in/in-1/output }
+      schedulerName: scheduler-plugins-scheduler
+      metadata: { labels: { "appgroup.diktyo.x-k8s.io/selector": "{{inputs.parameters.tname}}" } }
+      container:
+        image: 192.168.1.163:5000/e1-argo-tasks:latest
+        imagePullPolicy: Always
+        command: [ python, /app/generic.py ]
+        env:
+          - { name: E1_TASK_NAME, value: "{{inputs.parameters.tname}}" }
+          - { name: E1_DATA_SIZE, value: "{{inputs.parameters.dsize}}" }
+          - { name: E1_RUNTIME,   value: "{{inputs.parameters.rtime}}" }
+          - { name: NODE_NAME,    valueFrom: { fieldRef: { fieldPath: spec.nodeName } } }
+        resources: { requests: { cpu: 200m, memory: 256Mi } }
+      outputs:
+        artifacts:
+          - { name: payload, path: /out/output, archive: { none: {} } }

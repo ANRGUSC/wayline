@@ -315,7 +315,7 @@ sudo systemctl restart k3s-agent    # each worker
 ```
 
 The data-agent DaemonSet binds **hostPort 8082** on every node (chosen so a
-Wayline cluster can coexist with a legacy DSF deployment on 8081). It writes
+Wayline cluster can coexist with a legacy Wayline deployment on 8081). It writes
 node-local intermediates under `/data/wl-outputs`.
 
 ---
@@ -327,14 +327,14 @@ The complete evaluation lives in [`eval/`](eval/); start with
 
 | Directory | Experiment |
 |---|---|
-| `eval/videoedge-mcmt/` | AI City multi-camera tracking head-to-head (Wayline vs Argo+MinIO, distributed MinIO, NFS) |
-| `eval/network-aware/` | HEFT placement under bandwidth-asymmetric `tc` topologies |
-| `eval/two-hop/` | E0 data-plane microbenchmark (same-node vs cross-node, by payload size) |
-| `eval/argo-headtohead/`, `eval/networkoverhead-headtohead/` | Argo/MinIO baselines |
+| `eval/mcmt/` | AI City multi-camera tracking head-to-head (Wayline vs Argo+MinIO, distributed MinIO, NFS) |
+| `eval/synthetic-dags/scheduler/` | HEFT placement under bandwidth-asymmetric `tc` topologies |
+| `eval/e0-microbench/` | E0 data-plane microbenchmark (same-node vs cross-node, by payload size) |
+| `eval/synthetic-dags/e1/`, `eval/synthetic-dags/e2/` | Argo/MinIO baselines |
 | `eval/ray-microbench/`, `eval/scalability/`, `eval/overhead-stress/` | Ray comparison, scaling, overhead |
 
 > The eval harnesses are preserved verbatim as they were run, and therefore still
-> reference the project's original `dsf`/`dsf-system` identifiers.
+> reference the project's original `wayline`/`wl-system` identifiers.
 
 ---
 
@@ -359,9 +359,9 @@ kubectl logs -n wl-system -l app=data-agent --tail=40
 kubectl get pods -l wl-odag=<name>
 ```
 
-**Coexisting with a legacy DSF cluster.** Wayline uses namespace `wl-system`, CRD
+**Coexisting with a legacy Wayline cluster.** Wayline uses namespace `wl-system`, CRD
 group `wl.io`, label `wl-odag`, data dir `/data/wl-outputs`, and data-agent port
-`8082` — all distinct from DSF's — so the two can run side by side.
+`8082` — all distinct from Wayline's — so the two can run side by side.
 
 ---
 

@@ -1,0 +1,975 @@
+apiVersion: wl.io/v1
+kind: ODAG
+metadata:
+  creationTimestamp: "2026-05-14T12:32:40Z"
+  generateName: vemcmt-n4-d120-png-static-run-
+  generation: 1
+  labels:
+    wl.io/run: "4"
+    wl.io/template: vemcmt-n4-d120-png-static
+  name: vemcmt-n4-d120-png-static-run-wvdsm
+  namespace: wl-system
+  resourceVersion: "20593460"
+  uid: a2505ab7-e137-4112-a9ce-dab714810588
+spec:
+  scheduler: heft
+  tasks:
+  - command:
+    - python3
+    - wl_decode_task.py
+    constraints:
+      nodeNames:
+      - anrg-1
+    dataSize: 200MB
+    dependencies: []
+    env:
+    - name: VEMCMT_CAMERA
+      value: cam-1
+    - name: VEMCMT_CLIP_PATH
+      value: /dataset/cam-1/clip_120s.mp4
+    - name: VEMCMT_FPS
+      value: "5"
+    image: 192.168.1.163:5000/vemcmt-decode:latest
+    name: decode-1
+    resources:
+      cpu: "1"
+      memory: 1Gi
+    runtime: 5
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    - mountPath: /dataset
+      name: aicity-dataset
+      readOnly: true
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+    - hostPath:
+        path: /var/lib/wl-workloads/aicity
+        type: Directory
+      name: aicity-dataset
+  - command:
+    - python
+    - wl_preprocess_task.py
+    constraints:
+      nodeNames:
+      - anrg-1
+    dataSize: 100MB
+    dependencies:
+    - decode-1
+    env:
+    - name: VEMCMT_TARGET_SIZE
+      value: "640"
+    - name: VEMCMT_FMT
+      value: png
+    image: 192.168.1.163:5000/vemcmt-preprocess:latest
+    name: preprocess-1
+    resources:
+      cpu: "1"
+      memory: 1Gi
+    runtime: 4
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+  - command:
+    - python3
+    - wl_detect_embed_task.py
+    constraints:
+      nodeNames:
+      - anrg-8
+    dataSize: 10MB
+    dependencies:
+    - preprocess-1
+    env:
+    - name: VEMCMT_DEVICE
+      value: GPU
+    - name: VEMCMT_DET_MODEL
+      value: /models/yolov8n.xml
+    - name: VEMCMT_REID_MODEL
+      value: /models/osnet_x0_25.xml
+    image: 192.168.1.163:5000/vemcmt-detect-embed:latest
+    name: detect-embed-1
+    resources:
+      cpu: "2"
+      memory: 2Gi
+    runtime: 12
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+  - command:
+    - python
+    - wl_track_task.py
+    constraints:
+      nodeNames:
+      - anrg-6
+    dataSize: 2MB
+    dependencies:
+    - detect-embed-1
+    image: 192.168.1.163:5000/vemcmt-track:latest
+    name: track-1
+    resources:
+      cpu: 500m
+      memory: 512Mi
+    runtime: 2
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+  - command:
+    - python3
+    - wl_decode_task.py
+    constraints:
+      nodeNames:
+      - anrg-3
+    dataSize: 200MB
+    dependencies: []
+    env:
+    - name: VEMCMT_CAMERA
+      value: cam-2
+    - name: VEMCMT_CLIP_PATH
+      value: /dataset/cam-2/clip_120s.mp4
+    - name: VEMCMT_FPS
+      value: "5"
+    image: 192.168.1.163:5000/vemcmt-decode:latest
+    name: decode-2
+    resources:
+      cpu: "1"
+      memory: 1Gi
+    runtime: 5
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    - mountPath: /dataset
+      name: aicity-dataset
+      readOnly: true
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+    - hostPath:
+        path: /var/lib/wl-workloads/aicity
+        type: Directory
+      name: aicity-dataset
+  - command:
+    - python
+    - wl_preprocess_task.py
+    constraints:
+      nodeNames:
+      - anrg-3
+    dataSize: 100MB
+    dependencies:
+    - decode-2
+    env:
+    - name: VEMCMT_TARGET_SIZE
+      value: "640"
+    - name: VEMCMT_FMT
+      value: png
+    image: 192.168.1.163:5000/vemcmt-preprocess:latest
+    name: preprocess-2
+    resources:
+      cpu: "1"
+      memory: 1Gi
+    runtime: 4
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+  - command:
+    - python3
+    - wl_detect_embed_task.py
+    constraints:
+      nodeNames:
+      - anrg-8
+    dataSize: 10MB
+    dependencies:
+    - preprocess-2
+    env:
+    - name: VEMCMT_DEVICE
+      value: GPU
+    - name: VEMCMT_DET_MODEL
+      value: /models/yolov8n.xml
+    - name: VEMCMT_REID_MODEL
+      value: /models/osnet_x0_25.xml
+    image: 192.168.1.163:5000/vemcmt-detect-embed:latest
+    name: detect-embed-2
+    resources:
+      cpu: "2"
+      memory: 2Gi
+    runtime: 12
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+  - command:
+    - python
+    - wl_track_task.py
+    constraints:
+      nodeNames:
+      - anrg-6
+    dataSize: 2MB
+    dependencies:
+    - detect-embed-2
+    image: 192.168.1.163:5000/vemcmt-track:latest
+    name: track-2
+    resources:
+      cpu: 500m
+      memory: 512Mi
+    runtime: 2
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+  - command:
+    - python3
+    - wl_decode_task.py
+    constraints:
+      nodeNames:
+      - anrg-4
+    dataSize: 200MB
+    dependencies: []
+    env:
+    - name: VEMCMT_CAMERA
+      value: cam-3
+    - name: VEMCMT_CLIP_PATH
+      value: /dataset/cam-3/clip_120s.mp4
+    - name: VEMCMT_FPS
+      value: "5"
+    image: 192.168.1.163:5000/vemcmt-decode:latest
+    name: decode-3
+    resources:
+      cpu: "1"
+      memory: 1Gi
+    runtime: 5
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    - mountPath: /dataset
+      name: aicity-dataset
+      readOnly: true
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+    - hostPath:
+        path: /var/lib/wl-workloads/aicity
+        type: Directory
+      name: aicity-dataset
+  - command:
+    - python
+    - wl_preprocess_task.py
+    constraints:
+      nodeNames:
+      - anrg-4
+    dataSize: 100MB
+    dependencies:
+    - decode-3
+    env:
+    - name: VEMCMT_TARGET_SIZE
+      value: "640"
+    - name: VEMCMT_FMT
+      value: png
+    image: 192.168.1.163:5000/vemcmt-preprocess:latest
+    name: preprocess-3
+    resources:
+      cpu: "1"
+      memory: 1Gi
+    runtime: 4
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+  - command:
+    - python3
+    - wl_detect_embed_task.py
+    constraints:
+      nodeNames:
+      - anrg-8
+    dataSize: 10MB
+    dependencies:
+    - preprocess-3
+    env:
+    - name: VEMCMT_DEVICE
+      value: GPU
+    - name: VEMCMT_DET_MODEL
+      value: /models/yolov8n.xml
+    - name: VEMCMT_REID_MODEL
+      value: /models/osnet_x0_25.xml
+    image: 192.168.1.163:5000/vemcmt-detect-embed:latest
+    name: detect-embed-3
+    resources:
+      cpu: "2"
+      memory: 2Gi
+    runtime: 12
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+  - command:
+    - python
+    - wl_track_task.py
+    constraints:
+      nodeNames:
+      - anrg-8
+    dataSize: 2MB
+    dependencies:
+    - detect-embed-3
+    image: 192.168.1.163:5000/vemcmt-track:latest
+    name: track-3
+    resources:
+      cpu: 500m
+      memory: 512Mi
+    runtime: 2
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+  - command:
+    - python3
+    - wl_decode_task.py
+    constraints:
+      nodeNames:
+      - anrg-5
+    dataSize: 200MB
+    dependencies: []
+    env:
+    - name: VEMCMT_CAMERA
+      value: cam-4
+    - name: VEMCMT_CLIP_PATH
+      value: /dataset/cam-4/clip_120s.mp4
+    - name: VEMCMT_FPS
+      value: "5"
+    image: 192.168.1.163:5000/vemcmt-decode:latest
+    name: decode-4
+    resources:
+      cpu: "1"
+      memory: 1Gi
+    runtime: 5
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    - mountPath: /dataset
+      name: aicity-dataset
+      readOnly: true
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+    - hostPath:
+        path: /var/lib/wl-workloads/aicity
+        type: Directory
+      name: aicity-dataset
+  - command:
+    - python
+    - wl_preprocess_task.py
+    constraints:
+      nodeNames:
+      - anrg-5
+    dataSize: 100MB
+    dependencies:
+    - decode-4
+    env:
+    - name: VEMCMT_TARGET_SIZE
+      value: "640"
+    - name: VEMCMT_FMT
+      value: png
+    image: 192.168.1.163:5000/vemcmt-preprocess:latest
+    name: preprocess-4
+    resources:
+      cpu: "1"
+      memory: 1Gi
+    runtime: 4
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+  - command:
+    - python3
+    - wl_detect_embed_task.py
+    constraints:
+      nodeNames:
+      - anrg-7
+    dataSize: 10MB
+    dependencies:
+    - preprocess-4
+    env:
+    - name: VEMCMT_DEVICE
+      value: GPU
+    - name: VEMCMT_DET_MODEL
+      value: /models/yolov8n.xml
+    - name: VEMCMT_REID_MODEL
+      value: /models/osnet_x0_25.xml
+    image: 192.168.1.163:5000/vemcmt-detect-embed:latest
+    name: detect-embed-4
+    resources:
+      cpu: "2"
+      memory: 2Gi
+    runtime: 12
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+  - command:
+    - python
+    - wl_track_task.py
+    constraints:
+      nodeNames:
+      - anrg-7
+    dataSize: 2MB
+    dependencies:
+    - detect-embed-4
+    image: 192.168.1.163:5000/vemcmt-track:latest
+    name: track-4
+    resources:
+      cpu: 500m
+      memory: 512Mi
+    runtime: 2
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+  - command:
+    - python
+    - wl_cross_camera_match_task.py
+    constraints:
+      nodeNames:
+      - anrg-9
+    dataSize: 1MB
+    dependencies:
+    - track-1
+    - track-2
+    - track-3
+    - track-4
+    env:
+    - name: VEMCMT_SIM_THRESH
+      value: "0.55"
+    image: 192.168.1.163:5000/vemcmt-cross-camera-match:latest
+    name: cross-camera-match
+    resources:
+      cpu: 500m
+      memory: 512Mi
+    runtime: 2
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+  - command:
+    - python
+    - wl_report_task.py
+    constraints:
+      nodeNames:
+      - anrg-9
+    dataSize: 100KB
+    dependencies:
+    - cross-camera-match
+    env:
+    - name: VEMCMT_REPORT_ROOT
+      value: /reports
+    image: 192.168.1.163:5000/vemcmt-report:latest
+    name: report
+    resources:
+      cpu: 100m
+      memory: 128Mi
+    runtime: 1
+    securityContext:
+      supplementalGroups:
+      - 992
+    volumeMounts:
+    - mountPath: /dev/dri
+      name: dev-dri
+    - mountPath: /reports
+      name: reports
+    volumes:
+    - hostPath:
+        path: /dev/dri
+        type: Directory
+      name: dev-dri
+    - hostPath:
+        path: /var/lib/wl-workloads/reports
+        type: DirectoryOrCreate
+      name: reports
+status:
+  actualNetworkFlows:
+  - dataSize: 115397018
+    dstNode: anrg-8
+    end: 58.6898148059845
+    fromTask: preprocess-3
+    ok: true
+    srcNode: anrg-4
+    start: 48.42114043235779
+    toTask: detect-embed-3
+  - dataSize: 31526
+    dstNode: anrg-9
+    end: 155.6273901462555
+    fromTask: track-4
+    ok: true
+    srcNode: anrg-7
+    start: 155.6109881401062
+    toTask: cross-camera-match
+  - dataSize: 47021
+    dstNode: anrg-9
+    end: 82.3032009601593
+    fromTask: track-2
+    ok: true
+    srcNode: anrg-6
+    start: 82.28349876403809
+    toTask: cross-camera-match
+  - dataSize: 63566
+    dstNode: anrg-9
+    end: 99.18582510948181
+    fromTask: track-1
+    ok: true
+    srcNode: anrg-6
+    start: 99.16882491111755
+    toTask: cross-camera-match
+  - dataSize: 61205167
+    dstNode: anrg-8
+    end: 29.5368332862854
+    fromTask: preprocess-1
+    ok: true
+    srcNode: anrg-1
+    start: 24.12557816505432
+    toTask: detect-embed-1
+  - dataSize: 68485328
+    dstNode: anrg-8
+    end: 24.55301785469055
+    fromTask: preprocess-2
+    ok: true
+    srcNode: anrg-3
+    start: 18.515317678451538
+    toTask: detect-embed-2
+  - dataSize: 1435307
+    dstNode: anrg-6
+    end: 80.24210262298584
+    fromTask: detect-embed-2
+    ok: true
+    srcNode: anrg-8
+    start: 80.20799827575684
+    toTask: track-2
+  - dataSize: 1394816
+    dstNode: anrg-6
+    end: 96.8832573890686
+    fromTask: detect-embed-1
+    ok: true
+    srcNode: anrg-8
+    start: 96.85054445266724
+    toTask: track-1
+  - dataSize: 51119
+    dstNode: anrg-9
+    end: 151.31379318237305
+    fromTask: track-3
+    ok: true
+    srcNode: anrg-8
+    start: 151.29446291923523
+    toTask: cross-camera-match
+  - dataSize: 129437610
+    dstNode: anrg-7
+    end: 74.24000930786133
+    fromTask: preprocess-4
+    ok: true
+    srcNode: anrg-5
+    start: 62.821258783340454
+    toTask: detect-embed-4
+  completionTime: "2026-05-14T12:35:27.501543807Z"
+  makespan: 165
+  message: ""
+  phase: Succeeded
+  predictedNetworkFlows:
+  - dataSize: 13889270
+    dstNode: anrg-8
+    end: 21.106479372562003
+    fromTask: preprocess-1
+    srcNode: anrg-1
+    start: 19.995337772562003
+    toTask: detect-embed-1
+  - dataSize: 15619852
+    dstNode: anrg-8
+    end: 22.263625080037876
+    fromTask: preprocess-2
+    srcNode: anrg-3
+    start: 20.92159446751375
+    toTask: detect-embed-2
+  - dataSize: 25399825
+    dstNode: anrg-8
+    end: 55.094493683068336
+    fromTask: preprocess-3
+    srcNode: anrg-4
+    start: 53.06250768306834
+    toTask: detect-embed-3
+  - dataSize: 27310186
+    dstNode: anrg-7
+    end: 58.79881834842705
+    fromTask: preprocess-4
+    srcNode: anrg-5
+    start: 56.61400346842705
+    toTask: detect-embed-4
+  - dataSize: 1765738
+    dstNode: anrg-6
+    end: 89.66850790777924
+    fromTask: detect-embed-1
+    srcNode: anrg-8
+    start: 89.65438200377925
+    toTask: track-1
+  - dataSize: 1765738
+    dstNode: anrg-6
+    end: 90.8256536152551
+    fromTask: detect-embed-2
+    srcNode: anrg-8
+    start: 90.81152771125511
+    toTask: track-2
+  - dataSize: 34880
+    dstNode: anrg-9
+    end: 91.67129830777924
+    fromTask: track-1
+    srcNode: anrg-6
+    start: 91.66850790777924
+    toTask: cross-camera-match
+  - dataSize: 34880
+    dstNode: anrg-9
+    end: 92.8284440152551
+    fromTask: track-2
+    srcNode: anrg-6
+    start: 92.8256536152551
+    toTask: cross-camera-match
+  - dataSize: 51120
+    dstNode: anrg-9
+    end: 125.64648591436713
+    fromTask: track-3
+    srcNode: anrg-8
+    start: 125.64239631436713
+    toTask: cross-camera-match
+  - dataSize: 47565
+    dstNode: anrg-9
+    end: 128.2633572393815
+    fromTask: track-4
+    srcNode: anrg-7
+    start: 128.2595520393815
+    toTask: cross-camera-match
+  predictedTasks:
+  - estEnd: 15.912636772593755
+    estStart: 0
+    name: decode-1
+    node: anrg-1
+  - estEnd: 19.995337772562003
+    estStart: 15.912636772593755
+    name: preprocess-1
+    node: anrg-1
+  - estEnd: 89.65438200377925
+    estStart: 21.106479372562006
+    name: detect-embed-1
+    node: anrg-8
+  - estEnd: 91.66850790777924
+    estStart: 89.66850790777924
+    name: track-1
+    node: anrg-6
+  - estEnd: 16.840594467514084
+    estStart: 0
+    name: decode-2
+    node: anrg-3
+  - estEnd: 20.92159446751375
+    estStart: 16.840594467514084
+    name: preprocess-2
+    node: anrg-3
+  - estEnd: 90.81152771125511
+    estStart: 22.26362508003787
+    name: detect-embed-2
+    node: anrg-8
+  - estEnd: 92.8256536152551
+    estStart: 90.8256536152551
+    name: track-2
+    node: anrg-6
+  - estEnd: 43.99050766297782
+    estStart: 0
+    name: decode-3
+    node: anrg-4
+  - estEnd: 53.06250768306834
+    estStart: 43.99050766297782
+    name: preprocess-3
+    node: anrg-4
+  - estEnd: 123.64239631428558
+    estStart: 55.094493683068336
+    name: detect-embed-3
+    node: anrg-8
+  - estEnd: 125.64239631436713
+    estStart: 123.64239631428558
+    name: track-3
+    node: anrg-8
+  - estEnd: 46.45198969032765
+    estStart: 0
+    name: decode-4
+    node: anrg-5
+  - estEnd: 56.61400346842705
+    estStart: 46.45198969032765
+    name: preprocess-4
+    node: anrg-5
+  - estEnd: 126.25955203938152
+    estStart: 58.79881834842705
+    name: detect-embed-4
+    node: anrg-7
+  - estEnd: 128.2595520393815
+    estStart: 126.2595520393815
+    name: track-4
+    node: anrg-7
+  - estEnd: 130.2633572393815
+    estStart: 128.2633572393815
+    name: cross-camera-match
+    node: anrg-9
+  - estEnd: 139.8178498373251
+    estStart: 130.2633572393815
+    name: report
+    node: anrg-9
+  startTime: "2026-05-14T12:32:40.399667732Z"
+  tasks:
+  - completionTime: "2026-05-14T12:35:09Z"
+    dataSize: "10000000"
+    name: detect-embed-3
+    node: anrg-8
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-detect-embed-3
+    startTime: "2026-05-14T12:33:38Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:33:14Z"
+    dataSize: "200000000"
+    name: decode-3
+    node: anrg-4
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-decode-3
+    startTime: "2026-05-14T12:32:40Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:33:04Z"
+    dataSize: "100000000"
+    name: preprocess-1
+    node: anrg-1
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-preprocess-1
+    startTime: "2026-05-14T12:32:57Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:32:58Z"
+    dataSize: "100000000"
+    name: preprocess-2
+    node: anrg-3
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-preprocess-2
+    startTime: "2026-05-14T12:32:51Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:35:15Z"
+    dataSize: "2000000"
+    name: track-4
+    node: anrg-7
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-track-4
+    startTime: "2026-05-14T12:35:13Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:35:17Z"
+    dataSize: "1000000"
+    name: cross-camera-match
+    node: anrg-9
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-cross-camera-match
+    startTime: "2026-05-14T12:35:15Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:33:42Z"
+    dataSize: "100000000"
+    name: preprocess-4
+    node: anrg-5
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-preprocess-4
+    startTime: "2026-05-14T12:33:26Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:32:51Z"
+    dataSize: "200000000"
+    name: decode-2
+    node: anrg-3
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-decode-2
+    startTime: "2026-05-14T12:32:40Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:34:02Z"
+    dataSize: "2000000"
+    name: track-2
+    node: anrg-6
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-track-2
+    startTime: "2026-05-14T12:34:00Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:34:16Z"
+    dataSize: "10000000"
+    name: detect-embed-1
+    node: anrg-8
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-detect-embed-1
+    startTime: "2026-05-14T12:33:09Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:35:11Z"
+    dataSize: "2000000"
+    name: track-3
+    node: anrg-8
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-track-3
+    startTime: "2026-05-14T12:35:09Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:34:00Z"
+    dataSize: "10000000"
+    name: detect-embed-2
+    node: anrg-8
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-detect-embed-2
+    startTime: "2026-05-14T12:33:04Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:34:19Z"
+    dataSize: "2000000"
+    name: track-1
+    node: anrg-6
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-track-1
+    startTime: "2026-05-14T12:34:17Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:32:57Z"
+    dataSize: "200000000"
+    name: decode-1
+    node: anrg-1
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-decode-1
+    startTime: "2026-05-14T12:32:40Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:33:28Z"
+    dataSize: "100000000"
+    name: preprocess-3
+    node: anrg-4
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-preprocess-3
+    startTime: "2026-05-14T12:33:14Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:35:13Z"
+    dataSize: "10000000"
+    name: detect-embed-4
+    node: anrg-7
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-detect-embed-4
+    startTime: "2026-05-14T12:33:54Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:33:26Z"
+    dataSize: "200000000"
+    name: decode-4
+    node: anrg-5
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-decode-4
+    startTime: "2026-05-14T12:32:40Z"
+    state: ComputeDone
+  - completionTime: "2026-05-14T12:35:25Z"
+    dataSize: "100000"
+    name: report
+    node: anrg-9
+    phase: Succeeded
+    podName: vemcmt-n4-d120-png-static-run-wvdsm-report
+    startTime: "2026-05-14T12:35:17Z"
+    state: ComputeDone

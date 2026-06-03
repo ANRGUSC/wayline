@@ -1,0 +1,107 @@
+# Hetero-compute — Argo Workflow port.
+# 5 tasks: preprocess -> train -> { evaluate, export } -> report.
+# Multi-candidate constraints in Wayline are collapsed to first-in-list for
+# Argo nodeSelector (Argo has no network-aware placement).
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: e1-hetero
+  namespace: argo
+spec:
+  entrypoint: dag
+  serviceAccountName: argo
+  artifactRepositoryRef:
+    configMap: artifact-repositories
+    key: e0bench-minio
+  templates:
+    - name: dag
+      dag:
+        tasks:
+          - { name: preprocess, template: generic,
+              arguments: { parameters: [
+                { name: tname, value: preprocess },
+                { name: dsize, value: "20000000" },
+                { name: rtime, value: "8" },
+                { name: node,  value: anrg-3 } ] } }
+
+          - { name: train, template: generic, dependencies: [ preprocess ],
+              arguments: {
+                parameters: [
+                  { name: tname, value: train },
+                  { name: dsize, value: "100000000" },
+                  { name: rtime, value: "20" },
+                  { name: node,  value: anrg-5 } ],
+                artifacts: [ { name: in-0, from: "{{tasks.preprocess.outputs.artifacts.payload}}" } ] } }
+
+          - { name: evaluate, template: generic, dependencies: [ train ],
+              arguments: {
+                parameters: [
+                  { name: tname, value: evaluate },
+                  { name: dsize, value: "5000000" },
+                  { name: rtime, value: "4" },
+                  { name: node,  value: anrg-3 } ],
+                artifacts: [ { name: in-0, from: "{{tasks.train.outputs.artifacts.payload}}" } ] } }
+
+          - { name: export, template: generic, dependencies: [ train ],
+              arguments: {
+                parameters: [
+                  { name: tname, value: export },
+                  { name: dsize, value: "50000000" },
+                  { name: rtime, value: "6" },
+                  { name: node,  value: anrg-1 } ],
+                artifacts: [ { name: in-0, from: "{{tasks.train.outputs.artifacts.payload}}" } ] } }
+
+          - { name: report, template: generic-2in, dependencies: [ evaluate, export ],
+              arguments: {
+                parameters: [
+                  { name: tname, value: report },
+                  { name: dsize, value: "0" },
+                  { name: rtime, value: "3" },
+                  { name: node,  value: anrg-1 } ],
+                artifacts: [
+                  { name: in-0, from: "{{tasks.evaluate.outputs.artifacts.payload}}" },
+                  { name: in-1, from: "{{tasks.export.outputs.artifacts.payload}}" } ] } }
+
+    # Generic task template with 0..1 inputs (used by preprocess, train, evaluate, export).
+    - name: generic
+      inputs:
+        parameters: [ { name: tname }, { name: dsize }, { name: rtime }, { name: node } ]
+        artifacts:  [ { name: in-0, optional: true, path: /in/in-0/output } ]
+      nodeSelector: { kubernetes.io/hostname: "{{inputs.parameters.node}}" }
+      container:
+        image: 192.168.1.163:5000/e1-argo-tasks:latest
+        imagePullPolicy: Always
+        command: [ python, /app/generic.py ]
+        env:
+          - { name: E1_TASK_NAME, value: "{{inputs.parameters.tname}}" }
+          - { name: E1_DATA_SIZE, value: "{{inputs.parameters.dsize}}" }
+          - { name: E1_RUNTIME,   value: "{{inputs.parameters.rtime}}" }
+          - { name: NODE_NAME,    valueFrom: { fieldRef: { fieldPath: spec.nodeName } } }
+        resources:
+          requests: { cpu: 200m, memory: 256Mi }
+      outputs:
+        artifacts:
+          - { name: payload, path: /out/output, archive: { none: {} } }
+
+    # Same as generic but accepts 2 input artifacts (fan-in: report).
+    - name: generic-2in
+      inputs:
+        parameters: [ { name: tname }, { name: dsize }, { name: rtime }, { name: node } ]
+        artifacts:
+          - { name: in-0, path: /in/in-0/output }
+          - { name: in-1, path: /in/in-1/output }
+      nodeSelector: { kubernetes.io/hostname: "{{inputs.parameters.node}}" }
+      container:
+        image: 192.168.1.163:5000/e1-argo-tasks:latest
+        imagePullPolicy: Always
+        command: [ python, /app/generic.py ]
+        env:
+          - { name: E1_TASK_NAME, value: "{{inputs.parameters.tname}}" }
+          - { name: E1_DATA_SIZE, value: "{{inputs.parameters.dsize}}" }
+          - { name: E1_RUNTIME,   value: "{{inputs.parameters.rtime}}" }
+          - { name: NODE_NAME,    valueFrom: { fieldRef: { fieldPath: spec.nodeName } } }
+        resources:
+          requests: { cpu: 200m, memory: 256Mi }
+      outputs:
+        artifacts:
+          - { name: payload, path: /out/output, archive: { none: {} } }

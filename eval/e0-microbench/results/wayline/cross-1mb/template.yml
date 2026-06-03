@@ -1,0 +1,45 @@
+apiVersion: wl.io/v1
+kind: ODAGTemplate
+metadata:
+  name: e0-wayline-cross-1mb
+  namespace: wl-system
+spec:
+  description: "E0 two-hop microbenchmark — cross, 1MB."
+  scheduler: random
+  profiling:
+    enabled: false
+  retention:
+    maxRuns: 25
+    data:
+      policy: immediate
+  defaults:
+    runtime: 6
+    dataSize: "1MB"
+  tasks:
+    - name: producer
+      image: 192.168.1.163:5000/wl-two-hop-producer:latest
+      command: ["python", "-u", "task.py"]
+      dependencies: []
+      dataSize: "1MB"
+      runtime: 6
+      resources:
+        cpu: "200m"
+        memory: "768Mi"
+      env:
+        - { name: WL_E0_BYTES,   value: "1048576" }
+        - { name: WL_E0_COMPUTE, value: "5.0" }
+      constraints:
+        nodeNames: [anrg-3]
+    - name: consumer
+      image: 192.168.1.163:5000/wl-two-hop-consumer:latest
+      command: ["python", "-u", "task.py"]
+      dependencies: [producer]
+      dataSize: "1KB"
+      runtime: 2
+      resources:
+        cpu: "200m"
+        memory: "768Mi"
+      env:
+        - { name: WL_E0_BYTES, value: "1048576" }
+      constraints:
+        nodeNames: [anrg-6]

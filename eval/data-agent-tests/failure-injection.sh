@@ -111,7 +111,7 @@ kubectl -n "$NS" exec "$DA_POD" -- sh -c "
   touch /data/wl-outputs/${ODAG}/${TASK}/.wl-ready
   sha=\$(sha256sum /data/wl-outputs/${ODAG}/${TASK}/output | awk '{print \$1}')
   echo -n \"\$sha\" > /data/wl-outputs/${ODAG}/${TASK}/.wl-sha256
-  echo 16384 > /data/wl-outputs/${ODAG}/${TASK}/.dsf-bytes
+  echo 16384 > /data/wl-outputs/${ODAG}/${TASK}/.wl-bytes
 " >/dev/null 2>&1
 
 # /push from helper to sender (cross-node successor target: receiver)
@@ -181,7 +181,7 @@ kubectl -n "$NS" exec "$DA_POD" -- sh -c "
   dd if=/dev/urandom of=/data/wl-outputs/${ODAG}/${TASK}/output bs=1M count=10 status=none
   sha=\$(sha256sum /data/wl-outputs/${ODAG}/${TASK}/output | awk '{print \$1}')
   echo -n \"\$sha\" > /data/wl-outputs/${ODAG}/${TASK}/.wl-sha256
-  echo 10485760 > /data/wl-outputs/${ODAG}/${TASK}/.dsf-bytes
+  echo 10485760 > /data/wl-outputs/${ODAG}/${TASK}/.wl-bytes
   echo -n ComputeDone > /data/wl-outputs/${ODAG}/${TASK}/.wl-task-state
   touch /data/wl-outputs/${ODAG}/${TASK}/.wl-ready
 " >/dev/null 2>&1
