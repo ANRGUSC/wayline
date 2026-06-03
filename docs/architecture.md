@@ -146,5 +146,5 @@ binary. See [local-dev.md](local-dev.md) for running it as a local binary.
 - **Trusted single-domain edge clusters.** The agent is privileged and validates
   every URL-derived path component before constructing a filesystem path; this is
   not a hostile multi-tenant isolation model.
-- **Distinct identifiers from Wayline.** `wl-system` / `wl.io` / `wl-odag` /
-  `/data/wl-outputs` / port 8082 let Wayline coexist with a legacy Wayline cluster.
+- **Namespaced identifiers.** `wl-system` / `wl.io` / `wl-odag` /
+  `/data/wl-outputs` / data-agent port 8082.

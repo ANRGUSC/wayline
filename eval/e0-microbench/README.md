@@ -37,7 +37,7 @@ E0 measures the size of that penalty under controlled conditions.
 | Co-location | same-node (anrg-3 ↔ anrg-3), cross-node (anrg-3 ↔ anrg-6, S-link 50 Mbps) |
 | System | `wayline`, `minio` |
 
-- Matrix v2 tc shaping is **on** throughout (`../network-aware/setup-tc-matrix.sh`).
+- Matrix v2 tc shaping is **on** throughout (`../synthetic-dags/scheduler/setup-tc-matrix.sh`).
 - MinIO single-pod on a *neutral* node (anrg-9) so its reachability is
   symmetric and stable across cells.
 
@@ -124,8 +124,8 @@ eval/e0-microbench/
 
 - 8-node k3s cluster healthy (`kubectl get nodes`).
 - Wayline controllers + data-agent DaemonSet running in `wl-system` (paper builds rely on
-  the existing matrix-v2 deployment — see `../network-aware/README.md`).
-- Bandwidth matrix v2 applied (`../network-aware/setup-tc-matrix.sh`).
+  the existing matrix-v2 deployment — see `../synthetic-dags/scheduler/README.md`).
+- Bandwidth matrix v2 applied (`../synthetic-dags/scheduler/setup-tc-matrix.sh`).
 - Local image registry at `192.168.1.163:5000` reachable from every node.
 
 ### Smoke test (run this first)

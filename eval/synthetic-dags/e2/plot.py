@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 
 HERE = pathlib.Path(__file__).parent
 RESULTS_NO = HERE / "results"                # Argo+NetworkOverhead
-RESULTS_E1 = HERE.parent / "argo-headtohead" / "results"   # wayline + argo
+RESULTS_E1 = HERE.parent / "e1" / "results"   # wayline + argo
 FIGS = HERE / "figures"
 FIGS.mkdir(parents=True, exist_ok=True)
 

@@ -12,7 +12,7 @@ GOFLAGS    ?=
         image-odag-controller image-data-agent image-ui-server image-examples \
         push-all push-controllers \
         install deploy rollout \
-        example-odag clean-examples clean-deploy clean-all help
+        example-odag clean-examples clean-deploy clean-all repro-figures help
 
 # ─── default ──────────────────────────────────────────────────────────────────
 
@@ -128,6 +128,17 @@ clean-all: clean-examples clean-deploy
 	-kubectl delete -f api/v1/odag-crd.yml         --ignore-not-found
 	-kubectl delete -f api/v1/odagtemplate-crd.yml --ignore-not-found
 	-kubectl delete -f deployments/namespace.yml   --ignore-not-found
+
+# ─── Reproducibility ────────────────────────────────────────────────────────
+
+## Regenerate the paper figures from committed result data (no cluster needed)
+repro-figures:
+	cd eval/e0-microbench            && python3 plot.py
+	cd eval/synthetic-dags/e1        && python3 plot.py
+	cd eval/synthetic-dags/e2        && python3 plot.py
+	cd eval/synthetic-dags/scheduler && python3 plot-results.py
+	cd eval/mcmt                     && python3 scripts/plot-fair.py
+	@echo "figures regenerated; see eval/README.md for the claim->figure map"
 
 # ─── Help ─────────────────────────────────────────────────────────────────────
 

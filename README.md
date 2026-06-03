@@ -314,27 +314,33 @@ sudo systemctl restart k3s          # master
 sudo systemctl restart k3s-agent    # each worker
 ```
 
-The data-agent DaemonSet binds **hostPort 8082** on every node (chosen so a
-Wayline cluster can coexist with a legacy Wayline deployment on 8081). It writes
+The data-agent DaemonSet binds **hostPort 8082** on every node and writes
 node-local intermediates under `/data/wl-outputs`.
 
 ---
 
 ## Reproducing the paper
 
-The complete evaluation lives in [`eval/`](eval/); start with
-[`eval/EXPERIMENTS.md`](eval/EXPERIMENTS.md). Highlights:
+The complete evaluation lives in [`eval/`](eval/); **start with
+[`eval/README.md`](eval/README.md)**, which maps every paper figure and table
+to the exact command that reproduces it, the expected result, and the approximate
+runtime. Each experiment directory holds its scripts, committed results, and a
+plot script that regenerates the paper figures from those results.
 
-| Directory | Experiment |
+| Directory | Paper artifact |
 |---|---|
-| `eval/mcmt/` | AI City multi-camera tracking head-to-head (Wayline vs Argo+MinIO, distributed MinIO, NFS) |
-| `eval/synthetic-dags/scheduler/` | HEFT placement under bandwidth-asymmetric `tc` topologies |
-| `eval/e0-microbench/` | E0 data-plane microbenchmark (same-node vs cross-node, by payload size) |
-| `eval/synthetic-dags/e1/`, `eval/synthetic-dags/e2/` | Argo/MinIO baselines |
-| `eval/ray-microbench/`, `eval/scalability/`, `eval/overhead-stress/` | Ray comparison, scaling, overhead |
+| `eval/e0-microbench/` | E0 data-plane microbenchmark (Tab. e0-summary, Fig. e0-*; the 2.7–7.2× same/cross-node results) |
+| `eval/mcmt/` | AI City multi-camera tracking, Wayline vs Argo+MinIO/distributed-MinIO/NFS (Tab/Fig aicity-*, static-ablation, tuned-minio) |
+| `eval/synthetic-dags/e1/`, `.../e2/`, `.../scheduler/` | E1 head-to-head, E2 NetworkOverhead, HEFT-vs-random scheduler ablation |
+| `eval/ray-microbench/` | E0 with Ray as a third comparator (Tab. e0-ray) |
+| `eval/stress/` | concurrent-ODAG throughput + data-agent overhead (Tab. concurrent, overhead) |
+| `eval/data-agent-tests/` | data-agent correctness + adversarial failure injection |
 
-> The eval harnesses are preserved verbatim as they were run, and therefore still
-> reference the project's original `wayline`/`wl-system` identifiers.
+**Kick the tires (no cluster needed):** `make repro-figures` regenerates the
+paper figures from the committed result CSVs in seconds. Reproducing the raw
+measurements requires the 8-node x86 k3s testbed (and the AI City dataset for
+MCMT); see `eval/README.md` for which claims need the testbed vs. which a
+reviewer can reproduce from the shipped data.
 
 ---
 
@@ -358,10 +364,6 @@ kubectl logs -n wl-system deployment/odag-controller --tail=40
 kubectl logs -n wl-system -l app=data-agent --tail=40
 kubectl get pods -l wl-odag=<name>
 ```
-
-**Coexisting with a legacy Wayline cluster.** Wayline uses namespace `wl-system`, CRD
-group `wl.io`, label `wl-odag`, data dir `/data/wl-outputs`, and data-agent port
-`8082` — all distinct from Wayline's — so the two can run side by side.
 
 ---
 
