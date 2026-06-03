@@ -35,10 +35,17 @@ def main():
         for dep, data in inputs.items():
             print(f"[{name}] received from {dep}: {len(data)} bytes")
 
-    # Do real CPU work. Scale iterations so ~1M iterations ≈ 1s on a fast node.
-    # Slower nodes will take longer — that's the point.
-    target_seconds = task.expected_runtime or 5
-    iterations = int(target_seconds * 1_000_000)
+    # Do real CPU work. WL_ITERS, if set, gives the exact SHA-256 iteration count
+    # (decouples actual compute from the integer runtime hint, so a benchmark can
+    # dial compute precisely — e.g. to hit a target CCR). Otherwise fall back to
+    # ~1M iterations per runtime-hint second. Slower nodes take longer either way.
+    iters_env = os.environ.get("WL_ITERS", "").strip()
+    if iters_env:
+        iterations = int(iters_env)
+        target_seconds = iterations / 1_000_000.0
+    else:
+        target_seconds = task.expected_runtime or 5
+        iterations = int(target_seconds * 1_000_000)
 
     print(f"[{name}] running {iterations:,} hash iterations (target ~{target_seconds}s on fast node)...")
     t0 = time.time()
