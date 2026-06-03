@@ -52,19 +52,19 @@ are future work and are not included.
             wayline apply -f odag.yml
                       │  ODAG custom resource (wl.io/v1)
                       ▼
-┌─────────────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────────────┐
 │  wl-system namespace (control plane, on the master node)             │
 │                                                                      │
-│   odag-controller                          ui-server :8080          │
+│   odag-controller                          ui-server :8080           │
 │   • HEFT placement (runtime/dataSize        • K8s watch cache        │
 │     profiling, EMA, spread-aware)           • SQLite run history     │
 │   • starts a task pod only when its         • REST /api/* + SSE      │
 │     inputs are .wl-ready on its node        • React frontend         │
-│   • injects the WL_* task env contract                              │
-└─────────────────────────────────────────────────────────────────────┘
+│   • injects the WL_* task env contract                               │
+└──────────────────────────────────────────────────────────────────────┘
                       │ creates task pods
                       ▼
-┌─────────────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────────────┐
 │  task pods + per-node data-agent DaemonSet (hostPort 8082)           │
 │                                                                      │
 │   ┌──────────┐  1. PUT output → LOCAL agent (atomic, .wl-ready)      │
