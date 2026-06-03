@@ -52,7 +52,17 @@ type Server struct {
 	// SSE clients: each client gets a channel of JSON event bytes.
 	sseMu      sync.Mutex
 	sseClients map[chan []byte]struct{}
+
+	// Last-known per-node filesystem stats, retained across cluster-node
+	// refreshes so a transient kubelet stats/summary timeout (common once slow
+	// edge nodes join) doesn't blank the disk column.
+	diskMu    sync.Mutex
+	diskCache map[string]nodeDiskStat
 }
+
+// nodeDiskStat is a node's root-filesystem usage as reported by the kubelet
+// stats/summary endpoint.
+type nodeDiskStat struct{ capacity, used, available int64 }
 
 func newServer(dynClient dynamic.Interface, kubeClient kubernetes.Interface, cfg *rest.Config, db *sql.DB) *Server {
 	return &Server{
@@ -63,6 +73,7 @@ func newServer(dynClient dynamic.Interface, kubeClient kubernetes.Interface, cfg
 		odags:      make(map[string]*unstructured.Unstructured),
 		templates:  make(map[string]*unstructured.Unstructured),
 		sseClients: make(map[chan []byte]struct{}),
+		diskCache:  make(map[string]nodeDiskStat),
 	}
 }
 
@@ -309,10 +320,10 @@ func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Per-node filesystem usage via kubelet stats/summary proxy.
-	type diskStats struct {
-		capacity, used, available int64
-	}
+	// Per-node filesystem usage via kubelet stats/summary proxy. Successful
+	// reads update s.diskCache; a node that times out keeps its last-known
+	// value, so the disk column stays stable instead of flickering when slow
+	// nodes intermittently miss the deadline.
 	type statsSummary struct {
 		Node struct {
 			Fs struct {
@@ -322,34 +333,40 @@ func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 			} `json:"fs"`
 		} `json:"node"`
 	}
-	disk := map[string]diskStats{}
-	var diskMu sync.Mutex
 	var wg sync.WaitGroup
 	for _, n := range nodes.Items {
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
 			path := fmt.Sprintf("/api/v1/nodes/%s/proxy/stats/summary", name)
-			cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 			defer cancel()
 			raw, err := s.kubeClient.CoreV1().RESTClient().Get().AbsPath(path).DoRaw(cctx)
 			if err != nil {
-				return
+				return // keep last-known value from diskCache
 			}
 			var ss statsSummary
 			if json.Unmarshal(raw, &ss) != nil {
 				return
 			}
-			diskMu.Lock()
-			disk[name] = diskStats{
+			s.diskMu.Lock()
+			s.diskCache[name] = nodeDiskStat{
 				capacity:  ss.Node.Fs.CapacityBytes,
 				used:      ss.Node.Fs.UsedBytes,
 				available: ss.Node.Fs.AvailableBytes,
 			}
-			diskMu.Unlock()
+			s.diskMu.Unlock()
 		}(n.Name)
 	}
 	wg.Wait()
+
+	// Stable snapshot of cached disk stats (retained across per-node timeouts).
+	s.diskMu.Lock()
+	disk := make(map[string]nodeDiskStat, len(s.diskCache))
+	for k, v := range s.diskCache {
+		disk[k] = v
+	}
+	s.diskMu.Unlock()
 
 	// Tally pods per node.
 	type podTally struct {
