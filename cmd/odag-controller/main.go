@@ -331,8 +331,8 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 	var flows []predictedFlowEntry
 	switch schedulerName {
 	case "heft":
-		log.Printf("[odag-ctrl] using HEFT scheduler for %s (spreadEpsilon=%.2fs exclusivePerNode=%v)", key, schedCfg.SpreadEpsilon, schedCfg.ExclusivePerNode)
-		hr := heftAssignTasks(tasks, nodeMap, rtRes, dsRes, bwRes, heftOptions{SpreadEpsilon: schedCfg.SpreadEpsilon, ExclusivePerNode: schedCfg.ExclusivePerNode})
+		log.Printf("[odag-ctrl] using HEFT scheduler for %s (spreadEpsilon=%.2fs)", key, schedCfg.SpreadEpsilon)
+		hr := heftAssignTasks(tasks, nodeMap, rtRes, dsRes, bwRes, heftOptions{SpreadEpsilon: schedCfg.SpreadEpsilon})
 		assignMap = hr.assignMap
 		// Use HEFT's own schedule directly (avoids recomputation order mismatch).
 		for _, t := range tasks {

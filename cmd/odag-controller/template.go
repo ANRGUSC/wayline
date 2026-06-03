@@ -229,10 +229,6 @@ type schedulerConfig struct {
 	// minimum EFT are treated as tied and the least-loaded is chosen.
 	// 0 preserves strict EFT selection (with least-loaded exact-tie break).
 	SpreadEpsilon float64
-	// ExclusivePerNode: when true, HEFT uses classical (sequential-node)
-	// semantics — at most one task per node at a time. Default false keeps the
-	// resource-aware parallel model.
-	ExclusivePerNode bool
 }
 
 // extractSchedulerConfig reads spec.schedulerConfig.* from an ODAGTemplate.
@@ -250,9 +246,6 @@ func extractSchedulerConfig(templateObj *unstructured.Unstructured) schedulerCon
 		cfg.SpreadEpsilon = v
 	} else if v, ok, _ := unstructured.NestedInt64(sc, "spreadEpsilon"); ok {
 		cfg.SpreadEpsilon = float64(v)
-	}
-	if v, ok, _ := unstructured.NestedBool(sc, "exclusivePerNode"); ok {
-		cfg.ExclusivePerNode = v
 	}
 	return cfg
 }
