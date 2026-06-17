@@ -2,9 +2,8 @@
 
 **A data-aware DAG scheduling framework for Kubernetes.**
 
-> Status: **v0.1 / beta.** Wayline is the public release of the system described in
-> our ATC 2026 paper. The API is stable enough to run real workloads; expect rough
-> edges in tooling.
+> Status: **v0.1 / beta.** The API is stable enough to run real workloads; expect
+> rough edges in tooling.
 
 Kubernetes-native workflow engines (Argo, Tekton, Kubeflow Pipelines) pass
 intermediate results between tasks through a shared **artifact store** (S3/MinIO,
