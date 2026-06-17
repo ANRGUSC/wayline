@@ -369,16 +369,16 @@ kubectl get pods -l wl-odag=<name>
 
 ## Citation
 
-If you use Wayline in academic work, please cite the ATC 2026 paper:
+If you use Wayline in academic work, please cite the paper (currently under submission):
 
 ```bibtex
-@inproceedings{wayline2026,
+@misc{wayline2026,
   title     = {Wayline: Decoupling Task Completion from Data Availability
                for DAG Workflows on Kubernetes},
   author    = {Khodabandehlou, Mohammadali and Coleman, Jared and
                Krishnamachari, Bhaskar},
-  booktitle = {Proceedings of the 2026 USENIX/ACM Annual Technical Conference (ATC)},
-  year      = {2026}
+  year      = {2026},
+  note      = {Manuscript under submission}
 }
 ```
 
