@@ -42,7 +42,6 @@ are future work and are not included.
 10. [Cluster setup](#cluster-setup)
 11. [Reproducing the paper](#reproducing-the-paper)
 12. [Troubleshooting](#troubleshooting)
-13. [Citation](#citation)
 
 ---
 
@@ -366,21 +365,6 @@ kubectl get pods -l wl-odag=<name>
 ```
 
 ---
-
-## Citation
-
-If you use Wayline in academic work, please cite the paper (currently under submission):
-
-```bibtex
-@misc{wayline2026,
-  title     = {Wayline: Decoupling Task Completion from Data Availability
-               for DAG Workflows on Kubernetes},
-  author    = {Khodabandehlou, Mohammadali and Coleman, Jared and
-               Krishnamachari, Bhaskar},
-  year      = {2026},
-  note      = {Manuscript under submission}
-}
-```
 
 ## License
 
