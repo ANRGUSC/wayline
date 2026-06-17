@@ -1,7 +1,7 @@
 # Contributing to Wayline
 
-Thanks for your interest. Wayline is a research artifact (ATC paper) plus a
-working Kubernetes-native runtime for one-shot DAGs.
+Thanks for your interest. Wayline is a research artifact plus a working
+Kubernetes-native runtime for one-shot DAGs.
 
 ## Layout & docs
 - Architecture and data-plane internals: [`docs/architecture.md`](docs/architecture.md)

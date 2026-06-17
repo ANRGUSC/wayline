@@ -1,6 +1,6 @@
 # E0 — Two-Hop Microbenchmark
 
-The framing-gate experiment for the ATC 2026 submission. Measures the
+The framing-gate experiment for the paper. Measures the
 penalty paid by K8s-native workflow systems that conflate task
 completion with data availability via shared object storage, isolated
 from any controller-specific overhead.

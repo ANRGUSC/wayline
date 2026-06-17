@@ -1,8 +1,8 @@
-# mcmt — Real-Workload ATC Evaluation
+# mcmt — Real-Workload Evaluation
 
 A **Multi-Camera Multi-Target tracking** (MCMT) workflow ported from VideoEdge
 (Hung et al., SEC 2018), running against the AI City Challenge Track 1
-dataset. Used as the real-workload evidence in the ATC submission, sitting
+dataset. Used as the real-workload evidence in the paper, sitting
 alongside the synthetic E1 head-to-head.
 
 ## What this is
