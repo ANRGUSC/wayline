@@ -20,8 +20,23 @@ spec:
                   type: string
                   default: random
                   description: >
-                    Scheduler to use. Built-ins: random.
-                    Or a path to a user-defined Python script mounted via ConfigMap.
+                    Scheduler to use. Built-ins: "heft", "random".
+                    "saga/<algorithm>" (e.g. "saga/heft", "saga/cpop",
+                    "saga/minmin") delegates placement to the SAGA scheduler
+                    sidecar; on sidecar failure the controller falls back to
+                    the built-in HEFT scheduler.
+                schedulerConfig:
+                  type: object
+                  description: Tunable knobs for the scheduler.
+                  properties:
+                    spreadEpsilon:
+                      type: number
+                      default: 0
+                      minimum: 0
+                      description: >
+                        HEFT tie-breaking tolerance in seconds. Candidate nodes whose EFT is within
+                        spreadEpsilon of the minimum EFT are treated as tied, and the least-loaded
+                        node wins. 0 preserves strict HEFT (with least-loaded exact-tie break).
                 retryPolicy:
                   type: object
                   properties:

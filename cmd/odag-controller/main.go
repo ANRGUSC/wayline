@@ -357,6 +357,21 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 			})
 		}
 	default:
+		if algo, isSaga := strings.CutPrefix(schedulerName, sagaSchedulerPrefix); isSaga {
+			log.Printf("[odag-ctrl] using SAGA scheduler %q for %s (sidecar %s)", algo, key, sagaSchedulerURL())
+			am, err := sagaAssignTasks(algo, tasks, nodeMap, rtRes, dsRes, bwRes)
+			if err != nil {
+				// A dead or buggy sidecar degrades placement quality, never
+				// availability: fall back to the built-in HEFT scheduler.
+				log.Printf("[odag-ctrl] SAGA scheduler %q failed for %s: %v — falling back to built-in HEFT", algo, key, err)
+				hr := heftAssignTasks(tasks, nodeMap, rtRes, dsRes, bwRes, heftOptions{SpreadEpsilon: schedCfg.SpreadEpsilon})
+				assignMap = hr.assignMap
+			} else {
+				assignMap = am
+			}
+			predicted, flows = computePredictedSchedule(tasks, assignMap, rtRes, dsRes, bwRes)
+			break
+		}
 		log.Printf("[odag-ctrl] using random scheduler for %s", key)
 		assignMap = assignTasks(tasks, nodeMap)
 		predicted, flows = computePredictedSchedule(tasks, assignMap, rtRes, dsRes, bwRes)

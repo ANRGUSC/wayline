@@ -43,6 +43,25 @@ spec:
           volumeMounts:
             - name: profiler-data
               mountPath: /data
+        # SAGA scheduler sidecar: serves spec.scheduler = "saga/<algo>".
+        # The controller reaches it over the shared pod network at
+        # 127.0.0.1:8090 and falls back to built-in HEFT if it is down.
+        - name: saga-sidecar
+          image: 192.168.1.163:5000/wl-saga-sidecar:latest
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8090
+            initialDelaySeconds: 3
+            periodSeconds: 10
       volumes:
         - name: profiler-data
           hostPath:
