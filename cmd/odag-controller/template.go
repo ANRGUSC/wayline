@@ -408,10 +408,30 @@ func profileCompletedRun(dynClient dynamic.Interface, client *kubernetes.Clients
 		}
 	}
 
-	// Record link profiles (data transfers between dependent tasks on different nodes).
+	// Record link profiles (data transfers between dependent tasks on
+	// different nodes). Prefer the data-agents' measured per-push flow
+	// records — sender-side wall-clock and actual byte counts — over the
+	// inferred childStart−depEnd gap (which also includes pod scheduling
+	// latency) and the spec-hint size. Fall back to the inferred gap when
+	// no flow record exists for an edge.
 	taskByName := make(map[string]*taskSpec, len(tasks))
 	for i := range tasks {
 		taskByName[tasks[i].Name] = &tasks[i]
+	}
+	type edgeKey struct{ from, to string }
+	measured := make(map[edgeKey]dataAgentFlow)
+	srcIPs := make(map[string]string) // nodeName -> ip (only senders record flows)
+	for _, ni := range assignMap {
+		if ni.ip != "" {
+			srcIPs[ni.name] = ni.ip
+		}
+	}
+	for _, ip := range srcIPs {
+		for _, f := range queryFlows(ip, odagName) {
+			if f.Ok && f.EndUnix > f.StartUnix {
+				measured[edgeKey{f.FromTask, f.ToTask}] = f
+			}
+		}
 	}
 	for _, t := range tasks {
 		for _, dep := range t.Dependencies {
@@ -420,16 +440,22 @@ func profileCompletedRun(dynClient dynamic.Interface, client *kubernetes.Clients
 			if srcNode == dstNode {
 				continue
 			}
-			depEnd, hasDep := taskCompletionTimes[dep]
-			childStart, hasChild := taskStartTimes[t.Name]
-			if !hasDep || !hasChild {
-				continue
+			var transferSec, dataBytes float64
+			if f, ok := measured[edgeKey{dep, t.Name}]; ok {
+				transferSec = f.EndUnix - f.StartUnix
+				dataBytes = float64(f.DataSize)
+			} else {
+				depEnd, hasDep := taskCompletionTimes[dep]
+				childStart, hasChild := taskStartTimes[t.Name]
+				if !hasDep || !hasChild {
+					continue
+				}
+				transferSec = childStart.Sub(depEnd).Seconds()
+				if transferSec < 0 {
+					transferSec = 0
+				}
+				dataBytes = float64(parseDataSizeBytes(taskByName[dep].DataSize))
 			}
-			transferSec := childStart.Sub(depEnd).Seconds()
-			if transferSec < 0 {
-				transferSec = 0
-			}
-			dataBytes := float64(parseDataSizeBytes(taskByName[dep].DataSize))
 
 			if err := recordLinkProfile(db, templateName, dep, t.Name, srcNode, dstNode,
 				dataBytes, transferSec, cfg.EmaAlpha, cfg.MaxSamples); err != nil {
