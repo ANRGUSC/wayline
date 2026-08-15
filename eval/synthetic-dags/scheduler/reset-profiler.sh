@@ -24,14 +24,19 @@ kubectl rollout status  -n "$NS" deploy/$DEPLOY --timeout=120s >/dev/null
 
 # Verify profiler initialized cleanly — if not, something else is wrong
 # and we want to fail loud rather than continue with profiling silently off.
+# Target the NEWEST pod explicitly: right after a rollout the deployment
+# label selector still matches terminating old replicas, and
+# `kubectl logs deploy/` may pick one of those.
 sleep 3
-if kubectl logs -n "$NS" deploy/$DEPLOY --since=30s 2>/dev/null | grep -q "profiler DB init failed"; then
+pod=$(kubectl get pods -n "$NS" -l app=$DEPLOY \
+  --sort-by=.metadata.creationTimestamp -o name | tail -1)
+if kubectl logs -n "$NS" "$pod" -c odag-controller 2>/dev/null | grep -q "profiler DB init failed"; then
   echo "[profiler] ERROR: DB init failed after restart. Aborting." >&2
-  kubectl logs -n "$NS" deploy/$DEPLOY --since=30s 2>/dev/null | grep -i profiler >&2
+  kubectl logs -n "$NS" "$pod" -c odag-controller 2>/dev/null | grep -i profiler >&2
   exit 1
 fi
-if ! kubectl logs -n "$NS" deploy/$DEPLOY --since=30s 2>/dev/null | grep -q "database ready"; then
-  echo "[profiler] ERROR: no 'database ready' message seen. Aborting." >&2
+if ! kubectl logs -n "$NS" "$pod" -c odag-controller 2>/dev/null | grep -q "database ready"; then
+  echo "[profiler] ERROR: no 'database ready' message seen in $pod. Aborting." >&2
   exit 1
 fi
 echo "[profiler] ready (verified)."
