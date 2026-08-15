@@ -161,3 +161,23 @@ def test_empty_dag():
     result = bridge.schedule_request(_request(tasks=[]))
     assert result["assignments"] == []
     assert result["estimatedMakespan"] == 0.0
+
+
+def test_constrained_siblings_spread_not_packed():
+    # Three parallel siblings constrained to a 3-node tier none of which
+    # SAGA would pick on its own (their tier nodes are slow). The override
+    # must spread them, not pack all three onto one node.
+    tier = ["t1", "t2", "t3"]
+    tasks = [
+        {"name": "src", "dependencies": [], "runtime": 1, "dataSize": "1MB",
+         "constraints": {"nodeNames": ["fast"]}},
+    ] + [
+        {"name": f"par-{i}", "dependencies": ["src"], "runtime": 10,
+         "dataSize": "0", "constraints": {"nodeNames": tier}}
+        for i in range(3)
+    ]
+    nodes = [{"name": "fast"}] + [{"name": n} for n in tier]
+    result = bridge.schedule_request(_request(tasks=tasks, nodes=nodes))
+    placement = {a["task"]: a["node"] for a in result["assignments"]}
+    par_nodes = {placement[f"par-{i}"] for i in range(3)}
+    assert len(par_nodes) == 3, f"siblings packed: {placement}"

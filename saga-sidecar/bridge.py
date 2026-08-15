@@ -42,8 +42,8 @@ Model-conversion rules (each guards a known SAGA trap):
 
 from __future__ import annotations
 
+import collections
 import logging
-import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -265,19 +265,26 @@ def schedule_request(request: dict) -> dict:
     if missing:
         raise RuntimeError(f"{algorithm} left tasks unassigned: {missing}")
 
-    # Constraint post-override (ncsim's pinning pattern). Move violating
-    # tasks to the fastest allowed node.
+    # Constraint post-override (ncsim's pinning pattern), load-balanced:
+    # a violating task moves to the allowed node currently holding the
+    # fewest tasks (ties broken by fitted speed). Moving every violator
+    # to the single "best" allowed node packs constrained siblings onto
+    # one node and serializes parallel tiers — measured on the wpf
+    # benchmark as SAGA arms landing below even random placement.
     node_speed = {nn.name: nn.speed for nn in network.nodes}
+    load = collections.Counter(placement.values())
     overrides: List[dict] = []
     for t in tasks:
         allowed = _allowed_nodes(t, node_names)
         if allowed is None:
             continue
         if placement[t["name"]] not in allowed:
-            target = max(allowed, key=lambda n: node_speed[n])
+            target = min(allowed, key=lambda n: (load[n], -node_speed[n]))
             overrides.append(
                 {"task": t["name"], "from": placement[t["name"]], "to": target}
             )
+            load[placement[t["name"]]] -= 1
+            load[target] += 1
             placement[t["name"]] = target
 
     makespan = float(sched.makespan) if placement else 0.0
