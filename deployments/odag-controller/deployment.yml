@@ -53,6 +53,21 @@ spec:
         - name: saga-sidecar
           image: 192.168.1.163:5000/wl-saga-sidecar:latest
           imagePullPolicy: Always
+          env:
+            # Bring-your-own-scheduler. Either (or both) makes an external
+            # saga.Scheduler subclass importable, so spec.scheduler can name
+            # it by dotted path without rebuilding this image:
+            #   WL_SAGA_PATH            dirs added to sys.path (mount a
+            #                           ConfigMap or PVC holding a package)
+            #   WL_SAGA_EXTRA_PACKAGES  pip requirements installed at startup
+            #                           (e.g. "git+https://github.com/you/sched")
+            - name: WL_SAGA_PATH
+              value: "/opt/wl-schedulers"
+            - name: WL_SAGA_EXTRA_PACKAGES
+              value: ""
+          volumeMounts:
+            - name: user-schedulers
+              mountPath: /opt/wl-schedulers
           resources:
             requests:
               cpu: "100m"
@@ -71,3 +86,10 @@ spec:
           hostPath:
             path: /var/lib/wayline
             type: DirectoryOrCreate
+        # Drop-in location for user scheduler packages. Optional by
+        # construction: an absent ConfigMap yields an empty directory, the
+        # sidecar logs it and carries on with the built-ins.
+        - name: user-schedulers
+          configMap:
+            name: wl-user-schedulers
+            optional: true

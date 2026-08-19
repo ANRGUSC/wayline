@@ -23,10 +23,19 @@ spec:
                   type: string
                   default: random
                   description: >
-                    Scheduler to use: "heft", "random", or "saga/<algorithm>"
-                    (e.g. "saga/heft", "saga/cpop", "saga/minmin") to delegate
-                    placement to the SAGA scheduler sidecar (falls back to
-                    built-in HEFT on sidecar failure).
+                    Scheduler to use. Four forms:
+                    "random" / "heft" — compiled-in schedulers;
+                    "saga/<name>" — a built-in SAGA algorithm (heft, cpop,
+                    peft, minmin, maxmin, sufferage, ...);
+                    "saga/<dotted.path.ClassName>" — ANY importable
+                    saga.Scheduler subclass, so a scheduler developed and
+                    validated in simulation runs here unmodified (make it
+                    importable via WL_SAGA_PATH or WL_SAGA_EXTRA_PACKAGES on
+                    the sidecar);
+                    "http(s)://host:port" — any service implementing the
+                    scheduler contract, in any language.
+                    On failure of an external scheduler the controller falls
+                    back to the built-in HEFT scheduler.
                 schedulerConfig:
                   type: object
                   description: Tunable knobs for the scheduler.
@@ -41,6 +50,13 @@ spec:
                         node wins. 0 preserves strict HEFT (with least-loaded exact-tie break).
                         Larger values trade a small predicted-makespan penalty for better spread
                         and improved resilience to runtime noise / stragglers.
+                    options:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                      description: >
+                        Free-form key/value options passed to an external scheduler
+                        as constructor keyword arguments (e.g. {alpha: 0.5}). Ignored
+                        by the built-in schedulers.
                 profiling:
                   type: object
                   description: Controls runtime/data profiling across runs.

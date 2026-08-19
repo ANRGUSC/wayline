@@ -181,3 +181,56 @@ def test_constrained_siblings_spread_not_packed():
     placement = {a["task"]: a["node"] for a in result["assignments"]}
     par_nodes = {placement[f"par-{i}"] for i in range(3)}
     assert len(par_nodes) == 3, f"siblings packed: {placement}"
+
+
+# --------------------------------------------------------------------------
+# Bring-your-own-scheduler: loading a Scheduler subclass by dotted path
+# --------------------------------------------------------------------------
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "testdata"))
+
+
+def test_external_scheduler_loads_by_dotted_path():
+    # The whole point: a scheduler that is NOT in the built-in registry,
+    # living outside the sidecar image, runs with no code change here.
+    assert "mysched.PinFirstNodeScheduler" not in bridge.available_algorithms()
+    result = bridge.schedule_request(_request(algorithm="mysched.PinFirstNodeScheduler"))
+    placement = {a["task"]: a["node"] for a in result["assignments"]}
+    assert set(placement) == {"a", "b", "c", "d"}
+    # This scheduler pins everything to the alphabetically-first node.
+    assert set(placement.values()) == {"n0"}
+
+
+def test_external_scheduler_receives_constructor_options():
+    req = _request(algorithm="mysched.ParamScheduler")
+    req["options"] = {"which": 2}
+    result = bridge.schedule_request(req)
+    placement = {a["task"]: a["node"] for a in result["assignments"]}
+    assert set(placement.values()) == {"n2"}, placement
+
+
+def test_builtin_name_still_wins_over_path_lookup():
+    result = bridge.schedule_request(_request(algorithm="heft"))
+    assert len(result["assignments"]) == 4
+
+
+def test_non_scheduler_class_rejected_with_useful_message():
+    with pytest.raises(KeyError) as e:
+        bridge.schedule_request(_request(algorithm="mysched.NotAScheduler"))
+    assert "Scheduler subclass" in str(e.value)
+
+
+def test_missing_module_names_the_remedy():
+    with pytest.raises(KeyError) as e:
+        bridge.schedule_request(_request(algorithm="nosuchpkg.Sched"))
+    msg = str(e.value)
+    assert "cannot import" in msg and "WL_SAGA_EXTRA_PACKAGES" in msg
+
+
+def test_bare_unknown_name_suggests_dotted_path():
+    with pytest.raises(KeyError) as e:
+        bridge.schedule_request(_request(algorithm="totally-unknown"))
+    assert "dotted path" in str(e.value)

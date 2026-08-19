@@ -72,8 +72,9 @@ type sagaBandwidthEntry struct {
 }
 
 type sagaScheduleRequest struct {
-	Algorithm    string `json:"algorithm"`
-	DAG          struct {
+	Algorithm string                 `json:"algorithm"`
+	Options   map[string]interface{} `json:"options,omitempty"`
+	DAG       struct {
 		Tasks []sagaTaskRequest `json:"tasks"`
 	} `json:"dag"`
 	ClusterState struct {
@@ -94,11 +95,18 @@ type sagaScheduleResponse struct {
 	Error             string           `json:"error"`
 }
 
-// sagaAssignTasks delegates placement to the SAGA sidecar. It densifies the
-// pull-style resolvers into full matrices over tasks x nodes and nodes x
-// nodes. Returns an error (never a partial result) on any failure so the
-// caller can fall back.
-func sagaAssignTasks(algorithm string, tasks []taskSpec, nodeMap map[string]nodeInfo,
+// sagaAssignTasks delegates placement to an external scheduler service. It
+// densifies the pull-style resolvers into full matrices over tasks x nodes
+// and nodes x nodes. Returns an error (never a partial result) on any
+// failure so the caller can fall back.
+//
+// baseURL is the sidecar for "saga/<algorithm>" schedulers, or an
+// operator-supplied service for the "http(s)://..." form. algorithm is a
+// built-in name, a dotted path to any saga.Scheduler subclass, or "" when
+// the service implements a single scheduler of its own. options are passed
+// to the scheduler's constructor.
+func sagaAssignTasks(algorithm, baseURL string, options map[string]interface{},
+	tasks []taskSpec, nodeMap map[string]nodeInfo,
 	rtRes runtimeResolver, dsRes dataSizeResolver, bwRes bandwidthResolver) (map[string]nodeInfo, error) {
 
 	nodeNames := make([]string, 0, len(nodeMap))
@@ -109,6 +117,7 @@ func sagaAssignTasks(algorithm string, tasks []taskSpec, nodeMap map[string]node
 
 	var req sagaScheduleRequest
 	req.Algorithm = algorithm
+	req.Options = options
 	for _, t := range tasks {
 		tr := sagaTaskRequest{
 			Name:         t.Name,
@@ -157,7 +166,8 @@ func sagaAssignTasks(algorithm string, tasks []taskSpec, nodeMap map[string]node
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
-	resp, err := sagaHTTPClient.Post(sagaSchedulerURL()+"/schedule", "application/json", bytes.NewReader(body))
+	resp, err := sagaHTTPClient.Post(strings.TrimRight(baseURL, "/")+"/schedule",
+		"application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("sidecar unreachable: %w", err)
 	}
@@ -191,8 +201,12 @@ func sagaAssignTasks(algorithm string, tasks []taskSpec, nodeMap map[string]node
 			return nil, fmt.Errorf("sidecar violated constraints for task %q (node %q)", t.Name, ni.name)
 		}
 	}
-	log.Printf("[saga] %s placed %d tasks (sidecar makespan estimate %.1fs, cost-model fit RMSE %.3f)",
-		algorithm, len(assignMap), out.EstimatedMakespan, out.CostModelFitRMSE)
+	name := algorithm
+	if name == "" {
+		name = baseURL
+	}
+	log.Printf("[saga] %s placed %d tasks (makespan estimate %.1fs, cost-model fit RMSE %.3f)",
+		name, len(assignMap), out.EstimatedMakespan, out.CostModelFitRMSE)
 	return assignMap, nil
 }
 

@@ -7,9 +7,24 @@ at 127.0.0.1 over the shared pod network.
 
 Endpoints:
   GET  /healthz     -> 200 "ok"
-  GET  /algorithms  -> JSON list of available SAGA algorithm names
-  POST /schedule    -> {"algorithm": ..., "dag": ..., "clusterState": ...}
+  GET  /algorithms  -> JSON list of built-in SAGA algorithm names
+  POST /schedule    -> {"algorithm": ..., "options": {...}, "dag": ...,
+                        "clusterState": ...}
                        -> {"assignments": [...], "estimatedMakespan": ...}
+
+Bringing your own scheduler
+---------------------------
+"algorithm" accepts a dotted path to any saga.Scheduler subclass, so a
+scheduler developed and validated against SAGA runs here unmodified. Two
+env vars make such code importable without rebuilding this image:
+
+  WL_SAGA_PATH             colon-separated directories appended to sys.path.
+                           Point at a mounted ConfigMap or PVC holding a
+                           package.
+  WL_SAGA_EXTRA_PACKAGES   whitespace-separated pip requirements installed at
+                           startup (e.g. a git+https:// URL or a wheel path).
+                           Failures are logged, not fatal — the built-ins
+                           keep working.
 
 Errors return 4xx/5xx with a JSON {"error": ...} body; the Go side treats
 any non-200 as "fall back to the built-in HEFT scheduler".
@@ -20,8 +35,12 @@ Run: python server.py [--port 8090]
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import logging
+import os
+import subprocess
+import sys
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -80,6 +99,39 @@ class Handler(BaseHTTPRequestHandler):
         logger.info("%s %s", self.address_string(), fmt % args)
 
 
+def bootstrap_user_code() -> None:
+    """Make operator-supplied scheduler packages importable.
+
+    Runs before the first request so a dotted-path scheduler resolves without
+    an image rebuild. Both steps are best-effort: a broken extra package must
+    not take down scheduling for everyone else.
+    """
+    extra_path = os.environ.get("WL_SAGA_PATH", "")
+    for d in [p for p in extra_path.split(":") if p]:
+        if os.path.isdir(d):
+            sys.path.insert(0, d)
+            logger.info("added %s to sys.path", d)
+        else:
+            logger.warning("WL_SAGA_PATH entry %s is not a directory; ignored", d)
+
+    pkgs = os.environ.get("WL_SAGA_EXTRA_PACKAGES", "").split()
+    if not pkgs:
+        return
+    logger.info("installing extra packages: %s", " ".join(pkgs))
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--no-cache-dir", *pkgs],
+            check=True, capture_output=True, timeout=600,
+        )
+        logger.info("extra packages installed")
+    except subprocess.CalledProcessError as e:
+        logger.error("pip install failed (built-ins still available): %s",
+                     e.stderr.decode(errors="replace")[-2000:])
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.error("pip install failed (built-ins still available): %s", e)
+    importlib.invalidate_caches()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="0.0.0.0")
@@ -87,8 +139,10 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    bootstrap_user_code()
     # Fail fast at startup if SAGA is broken, and log the roster once.
-    logger.info("algorithms: %s", ", ".join(bridge.available_algorithms()))
+    logger.info("built-in algorithms: %s", ", ".join(bridge.available_algorithms()))
+    logger.info("plus any importable saga.Scheduler subclass by dotted path")
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     logger.info("saga-sidecar listening on %s:%d", args.host, args.port)

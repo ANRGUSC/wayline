@@ -8,6 +8,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 )
@@ -71,7 +72,7 @@ func TestSagaHeft_Diamond_QualityParity(t *testing.T) {
 	builtin := heftAssignTasks(tasks, nodes, rtRes, dsRes, bwRes, heftOptions{})
 	builtinMS := predictedMakespan(tasks, builtin.assignMap, rtRes, dsRes, bwRes)
 
-	sagaMap, err := sagaAssignTasks("heft", tasks, nodes, rtRes, dsRes, bwRes)
+	sagaMap, err := sagaAssignTasks("heft", sagaSchedulerURL(), nil, tasks, nodes, rtRes, dsRes, bwRes)
 	if err != nil {
 		t.Fatalf("sagaAssignTasks: %v", err)
 	}
@@ -96,7 +97,7 @@ func TestSaga_ConstraintsRespected(t *testing.T) {
 	tasks[0].Constraints = []string{"n3"} // pin A to the slow node
 	nodes := makeNodes("n1", "n2", "n3")
 
-	sagaMap, err := sagaAssignTasks("heft", tasks, nodes, separableRT(), constDS(1_000_000), constBW(100e6))
+	sagaMap, err := sagaAssignTasks("heft", sagaSchedulerURL(), nil, tasks, nodes, separableRT(), constDS(1_000_000), constBW(100e6))
 	if err != nil {
 		t.Fatalf("sagaAssignTasks: %v", err)
 	}
@@ -119,7 +120,7 @@ func TestSaga_MultipleAlgorithms(t *testing.T) {
 	for _, algo := range []string{"heft", "cpop", "peft", "minmin", "maxmin", "sufferage"} {
 		algo := algo
 		t.Run(algo, func(t *testing.T) {
-			m, err := sagaAssignTasks(algo, tasks, nodes, rtRes, dsRes, bwRes)
+			m, err := sagaAssignTasks(algo, sagaSchedulerURL(), nil, tasks, nodes, rtRes, dsRes, bwRes)
 			if err != nil {
 				t.Fatalf("%s: %v", algo, err)
 			}
@@ -136,10 +137,76 @@ func TestSaga_MultipleAlgorithms(t *testing.T) {
 
 func TestSaga_UnknownAlgorithmFallsThroughAsError(t *testing.T) {
 	requireSidecar(t)
-	_, err := sagaAssignTasks("not-a-real-algorithm", diamondTasks(), makeNodes("n1", "n2"),
+	_, err := sagaAssignTasks("not-a-real-algorithm", sagaSchedulerURL(), nil, diamondTasks(), makeNodes("n1", "n2"),
 		nil, nil, constBW(100e6))
 	if err == nil {
 		t.Fatal("expected error for unknown algorithm")
 	}
 	t.Log(fmt.Sprintf("got expected error: %v", err))
+}
+
+// --------------------------------------------------------------------------
+// Bring-your-own-scheduler: explicit endpoint + dotted-path algorithm
+// --------------------------------------------------------------------------
+
+// sidecarWithUserCode returns a scheduler endpoint that can import the
+// mysched test package, or "" if none is reachable. Set WL_SAGA_TEST_URL to
+// a sidecar started with WL_SAGA_PATH=saga-sidecar/testdata.
+func sidecarWithUserCode(t *testing.T) string {
+	t.Helper()
+	url := os.Getenv("WL_SAGA_TEST_URL")
+	if url == "" {
+		url = sagaSchedulerURL()
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url + "/healthz")
+	if err != nil {
+		t.Skipf("no scheduler service at %s: %v", url, err)
+	}
+	resp.Body.Close()
+	return url
+}
+
+func TestSaga_ExternalSchedulerByDottedPathOverExplicitURL(t *testing.T) {
+	url := sidecarWithUserCode(t)
+	tasks := diamondTasks()
+	nodes := makeNodes("n1", "n2", "n3")
+
+	// A class that exists in no registry: it must be imported by name.
+	m, err := sagaAssignTasks("mysched.PinFirstNodeScheduler", url, nil,
+		tasks, nodes, separableRT(), constDS(1_000_000), constBW(100e6))
+	if err != nil {
+		t.Skipf("sidecar cannot import the test scheduler (start it with "+
+			"WL_SAGA_PATH=saga-sidecar/testdata): %v", err)
+	}
+	for _, task := range tasks {
+		if _, ok := m[task.Name]; !ok {
+			t.Fatalf("task %s unassigned", task.Name)
+		}
+	}
+	// This scheduler pins everything to the alphabetically-first node.
+	for name, ni := range m {
+		if ni.name != "n1" {
+			t.Errorf("task %s on %s, want n1 (scheduler pins to first node)", name, ni.name)
+		}
+	}
+}
+
+func TestSaga_ConstructorOptionsReachTheScheduler(t *testing.T) {
+	url := sidecarWithUserCode(t)
+	tasks := diamondTasks()
+	nodes := makeNodes("n1", "n2", "n3")
+
+	// which=2 selects the third node alphabetically.
+	m, err := sagaAssignTasks("mysched.ParamScheduler", url,
+		map[string]interface{}{"which": 2},
+		tasks, nodes, separableRT(), constDS(1_000_000), constBW(100e6))
+	if err != nil {
+		t.Skipf("sidecar cannot import the test scheduler: %v", err)
+	}
+	for name, ni := range m {
+		if ni.name != "n3" {
+			t.Errorf("task %s on %s, want n3 (options.which=2)", name, ni.name)
+		}
+	}
 }

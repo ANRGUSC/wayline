@@ -43,6 +43,7 @@ Model-conversion rules (each guards a known SAGA trap):
 from __future__ import annotations
 
 import collections
+import importlib
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -59,12 +60,28 @@ MIN_RUNTIME = 1e-6  # seconds floor so log() stays finite
 
 
 # ---------------------------------------------------------------------------
-# Scheduler registry
+# Scheduler resolution
 # ---------------------------------------------------------------------------
-# Curated, explicitly constructed (mirrors ncsim's approach): every entry is a
-# static batch scheduler constructible with no arguments.
+# Two ways to name a scheduler:
+#
+#   "heft"                        a short name from the built-in registry below
+#   "mypkg.schedulers.MyHeft"     any importable saga.Scheduler subclass
+#
+# The second form is what makes porting a scheduler zero-effort: a researcher
+# writes and validates a Scheduler subclass against SAGA, makes it importable
+# in the sidecar (see WL_SAGA_PATH / WL_SAGA_EXTRA_PACKAGES in server.py), and
+# names its dotted path in spec.scheduler. No entry here, no image rebuild, no
+# Go code.
+#
+# SECURITY: resolving a dotted path imports and executes that module inside
+# the sidecar. The sidecar is a trusted component of the control plane, on the
+# same footing as the data-agent, and only code the cluster operator has
+# installed is importable. This is not a sandbox for untrusted schedulers.
+#
+# The built-in registry is a convenience alias table, not a gate: every entry
+# is a static batch scheduler constructible with no arguments.
 
-def _registry() -> Dict[str, "Scheduler"]:
+def _builtin_registry() -> Dict[str, "Scheduler"]:
     from saga.schedulers import (
         CpopScheduler,
         DuplexScheduler,
@@ -105,19 +122,72 @@ _SCHEDULERS: Optional[Dict[str, Scheduler]] = None
 def available_algorithms() -> List[str]:
     global _SCHEDULERS
     if _SCHEDULERS is None:
-        _SCHEDULERS = _registry()
+        _SCHEDULERS = _builtin_registry()
     return sorted(_SCHEDULERS.keys())
 
 
-def get_scheduler(name: str) -> Scheduler:
+def _load_by_path(path: str, options: Optional[Dict[str, Any]] = None) -> Scheduler:
+    """Import and instantiate a Scheduler subclass named by dotted path.
+
+    "pkg.module.ClassName" -> instance. Constructor keyword arguments come
+    from options, so a parameterised scheduler (e.g. one taking alpha or a
+    lookahead depth) is configurable from the ODAG spec without code changes.
+    """
+    module_path, _, class_name = path.rpartition(".")
+    if not module_path or not class_name:
+        raise KeyError(
+            f"{path!r} is not a dotted path to a class "
+            "(expected e.g. 'mypkg.schedulers.MyScheduler')"
+        )
+    try:
+        module = importlib.import_module(module_path)
+    except ImportError as e:
+        raise KeyError(
+            f"cannot import {module_path!r} for scheduler {path!r}: {e}. "
+            "Install it in the sidecar via WL_SAGA_EXTRA_PACKAGES or mount it "
+            "on WL_SAGA_PATH."
+        ) from e
+    try:
+        cls = getattr(module, class_name)
+    except AttributeError as e:
+        raise KeyError(f"module {module_path!r} has no attribute {class_name!r}") from e
+    if not (isinstance(cls, type) and issubclass(cls, Scheduler)):
+        raise KeyError(
+            f"{path!r} is not a saga.Scheduler subclass (got {cls!r}); a "
+            "scheduler must implement schedule(network, task_graph) -> Schedule"
+        )
+    try:
+        return cls(**(options or {}))
+    except TypeError as e:
+        raise KeyError(f"cannot construct {path!r} with options {options!r}: {e}") from e
+
+
+def get_scheduler(name: str, options: Optional[Dict[str, Any]] = None) -> Scheduler:
+    """Resolve a scheduler by short name or dotted path.
+
+    Short names come from the built-in registry and ignore options unless the
+    class accepts them; a dotted path is imported on demand. Dotted paths are
+    not cached, so redeploying a scheduler package takes effect on the next
+    request without restarting the sidecar.
+    """
     global _SCHEDULERS
     if _SCHEDULERS is None:
-        _SCHEDULERS = _registry()
-    if name not in _SCHEDULERS:
-        raise KeyError(
-            f"unknown algorithm {name!r}; available: {', '.join(sorted(_SCHEDULERS))}"
+        _SCHEDULERS = _builtin_registry()
+    if name in _SCHEDULERS and not options:
+        return _SCHEDULERS[name]
+    if "." in name:
+        return _load_by_path(name, options)
+    if name in _SCHEDULERS:
+        # Known name with options: re-instantiate so the options apply.
+        return _load_by_path(
+            type(_SCHEDULERS[name]).__module__ + "." + type(_SCHEDULERS[name]).__name__,
+            options,
         )
-    return _SCHEDULERS[name]
+    raise KeyError(
+        f"unknown algorithm {name!r}; built-ins: {', '.join(sorted(_SCHEDULERS))}. "
+        "For a scheduler of your own, give its dotted path "
+        "(e.g. 'mypkg.schedulers.MyScheduler')."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -240,13 +310,14 @@ def schedule_request(request: dict) -> dict:
     """Handle one scheduling request. Raises on invalid input; the server
     turns exceptions into HTTP errors so the Go side can fall back."""
     algorithm = request.get("algorithm", "heft")
+    options = request.get("options") or {}
     dag = request["dag"]
     cluster_state = request["clusterState"]
     tasks: List[dict] = dag["tasks"]
     if not tasks:
         return {"assignments": [], "estimatedMakespan": 0.0, "algorithm": algorithm}
 
-    scheduler = get_scheduler(algorithm)
+    scheduler = get_scheduler(algorithm, options)
     task_graph, network, node_names, rmse = build_saga_models(dag, cluster_state)
 
     sched: Schedule = scheduler.schedule(network, task_graph)

@@ -229,6 +229,11 @@ type schedulerConfig struct {
 	// minimum EFT are treated as tied and the least-loaded is chosen.
 	// 0 preserves strict EFT selection (with least-loaded exact-tie break).
 	SpreadEpsilon float64
+
+	// Options are passed verbatim to an external scheduler as constructor
+	// keyword arguments, so a parameterised scheduler is configurable from
+	// the ODAG spec without any code change here. Ignored by the built-ins.
+	Options map[string]interface{}
 }
 
 // extractSchedulerConfig reads spec.schedulerConfig.* from an ODAGTemplate.
@@ -246,6 +251,9 @@ func extractSchedulerConfig(templateObj *unstructured.Unstructured) schedulerCon
 		cfg.SpreadEpsilon = v
 	} else if v, ok, _ := unstructured.NestedInt64(sc, "spreadEpsilon"); ok {
 		cfg.SpreadEpsilon = float64(v)
+	}
+	if opts, ok := sc["options"].(map[string]interface{}); ok && len(opts) > 0 {
+		cfg.Options = opts
 	}
 	return cfg
 }

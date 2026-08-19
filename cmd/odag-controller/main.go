@@ -357,13 +357,27 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 			})
 		}
 	default:
-		if algo, isSaga := strings.CutPrefix(schedulerName, sagaSchedulerPrefix); isSaga {
-			log.Printf("[odag-ctrl] using SAGA scheduler %q for %s (sidecar %s)", algo, key, sagaSchedulerURL())
-			am, err := sagaAssignTasks(algo, tasks, nodeMap, rtRes, dsRes, bwRes)
+		// External schedulers. Two spellings, one code path:
+		//   saga/<name-or-dotted.path>  -> the in-pod SAGA sidecar
+		//   http(s)://host:port         -> any service speaking the same
+		//                                  contract, in any language
+		// The dotted-path form is what makes porting a scheduler zero-effort:
+		// a saga.Scheduler subclass validated in simulation runs here with no
+		// reimplementation, provided the sidecar can import it.
+		algo, isSaga := strings.CutPrefix(schedulerName, sagaSchedulerPrefix)
+		isURL := strings.HasPrefix(schedulerName, "http://") || strings.HasPrefix(schedulerName, "https://")
+		if isSaga || isURL {
+			url := sagaSchedulerURL()
+			if isURL {
+				url, algo = schedulerName, ""
+			}
+			log.Printf("[odag-ctrl] using external scheduler %q for %s (endpoint %s)", schedulerName, key, url)
+			am, err := sagaAssignTasks(algo, url, schedCfg.Options, tasks, nodeMap, rtRes, dsRes, bwRes)
 			if err != nil {
-				// A dead or buggy sidecar degrades placement quality, never
-				// availability: fall back to the built-in HEFT scheduler.
-				log.Printf("[odag-ctrl] SAGA scheduler %q failed for %s: %v — falling back to built-in HEFT", algo, key, err)
+				// A dead or buggy scheduler service degrades placement
+				// quality, never availability: fall back to built-in HEFT.
+				log.Printf("[odag-ctrl] external scheduler %q failed for %s: %v — falling back to built-in HEFT",
+					schedulerName, key, err)
 				hr := heftAssignTasks(tasks, nodeMap, rtRes, dsRes, bwRes, heftOptions{SpreadEpsilon: schedCfg.SpreadEpsilon})
 				assignMap = hr.assignMap
 			} else {
