@@ -60,6 +60,7 @@ import glob
 import json
 import math
 import os
+import re
 import statistics
 import sys
 from typing import Any, Optional
@@ -70,10 +71,18 @@ from typing import Any, Optional
 # --------------------------------------------------------------------------
 
 def parse_ts(s: Optional[str]) -> Optional[dt.datetime]:
+    """Parse an RFC3339 timestamp, including Kubernetes' nanosecond form.
+
+    datetime.fromisoformat only accepts 9 fractional digits from Python
+    3.11, and the controller emits RFC3339Nano, so truncate to microseconds
+    rather than silently dropping every instrumented timestamp.
+    """
     if not s:
         return None
+    s = s.replace("Z", "+00:00")
+    s = re.sub(r"\.(\d{6})\d+", r".\1", s)
     try:
-        return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt.datetime.fromisoformat(s)
     except ValueError:
         return None
 
