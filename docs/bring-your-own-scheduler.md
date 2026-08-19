@@ -18,16 +18,19 @@ sidecar*, which is what the rest of this page is about.
 
 | value | meaning |
 |---|---|
+| `constraints` | **default.** Enforces `constraints.nodeNames` and nothing else — the neutral placement, and the fallback when an external scheduler fails |
 | `random` | compiled-in random placement |
-| `heft` | compiled-in HEFT (resource- and contention-aware; also the fallback) |
+| `heft` | compiled-in HEFT (resource- and contention-aware) |
 | `saga/heft`, `saga/cpop`, `saga/minmin`, … | a built-in SAGA algorithm |
 | `saga/pkg.module.ClassName` | **any importable `saga.Scheduler` subclass** |
 | `http://host:port` | any service speaking the scheduler contract, in any language |
 
 If an external scheduler fails for any reason — unreachable, import error,
 exception, a placement that violates task constraints — the controller logs
-the reason and falls back to built-in HEFT. A broken scheduler costs you
-placement quality, never availability.
+the reason and falls back to the **constraint-only** placement, never to an
+optimising one. Falling back to HEFT would mean a broken scheduler silently
+produces a good placement, and your measurement would describe HEFT while
+claiming to describe your scheduler.
 
 ## Writing the scheduler
 
@@ -141,5 +144,5 @@ kubectl logs deploy/odag-controller -n wl-system -c odag-controller | grep '\[sa
 # [saga] mypkg.MyScheduler placed 14 tasks (makespan estimate 21.4s, cost-model fit RMSE 0.163)
 ```
 
-A line mentioning "falling back to built-in HEFT" means your scheduler was
+A line mentioning "falling back to constraint-only placement" means your scheduler was
 not used; the same log line says why.
