@@ -68,6 +68,10 @@ import (
 const (
 	headerContentSHA256       = "X-Wayline-Content-SHA256"
 	headerUncompressedLength  = "X-Wayline-Uncompressed-Length"
+	// headerSourceNode is set by a pushing agent so the receiver can tell an
+	// agent-to-agent install apart from a local SDK install when it records
+	// the data-availability timestamp. Absent ⇒ local install.
+	headerSourceNode = "X-Wayline-Source-Node"
 )
 
 const (
@@ -123,6 +127,11 @@ var startTime = time.Now()
 // Atomic counters surfaced via GET /metrics. Updated from the request
 // handlers and the push goroutine. JSON-typed names match the response
 // shape so they're easy to grep alongside the metrics endpoint.
+// localNodeName is this agent's Kubernetes node name, set once in main().
+// Used to stamp outgoing pushes so the receiving agent can attribute an
+// install to its sending node.
+var localNodeName string
+
 var (
 	metricPutTotal       atomic.Int64 // every PUT received (success + fail)
 	metricPutOK          atomic.Int64 // PUT installed successfully
@@ -220,6 +229,46 @@ func sendingFile(rel string) string    { return filepath.Join(dataDir, filepath.
 func bytesFile(rel string) string      { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-bytes") }
 func digestSidecarFile(rel string) string { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-sha256") }
 func flowsFile(odag string) string     { return filepath.Join(dataDir, filepath.Clean(odag), ".wl-flows.jsonl") }
+
+// Instrumentation sidecars. Both are per-(odag, task) and are removed with
+// the rest of the run's data by DELETE /data/<odag>.
+//
+//	installedFile  →  .wl-installed.json  (when this node's copy of the
+//	                                        output became readable, and from
+//	                                        where — the data-availability
+//	                                        timestamp a scheduler's model
+//	                                        implicitly assumes)
+//	timingsFile    →  .wl-timings.json    (task-internal phase boundaries
+//	                                        reported by the SDK: compute
+//	                                        start/end, handoff duration)
+func installedFile(rel string) string { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-installed.json") }
+func timingsFile(rel string) string   { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-timings.json") }
+
+// installRecord is written once per successful install, at the moment the
+// payload becomes readable on this node (i.e. alongside the .wl-ready
+// marker). Source is "local" for an SDK install on the producing node and
+// "remote" for an agent-to-agent push, in which case FromNode names the
+// sender.
+type installRecord struct {
+	UnixTime float64 `json:"unixTime"`
+	Bytes    int64   `json:"bytes"`
+	Source   string  `json:"source"`
+	FromNode string  `json:"fromNode,omitempty"`
+}
+
+// recordInstalled durably writes the install record. Best-effort: a failure
+// here must never fail an install that already succeeded, so errors are
+// logged and swallowed.
+func recordInstalled(rel string, rec installRecord) {
+	b, err := json.Marshal(rec)
+	if err != nil {
+		log.Printf("[data-agent] recordInstalled marshal %s: %v", rel, err)
+		return
+	}
+	if err := writeFile(installedFile(rel), string(b)); err != nil {
+		log.Printf("[data-agent] recordInstalled write %s: %v", rel, err)
+	}
+}
 
 // readInstalledDigest returns the hex SHA-256 cached for an installed
 // output, or "" if no sidecar is present. Used by the idempotent fast-path
@@ -818,6 +867,7 @@ func pushToNode(odag, task, host, localFile, contentDigest string, size int64) e
 		if contentDigest != "" {
 			req.Header.Set(headerContentSHA256, contentDigest)
 		}
+		req.Header.Set(headerSourceNode, localNodeName)
 		resp, err := client.Do(req)
 		// File close: for the raw path, close here; for gzip, the goroutine
 		// closed it already.
@@ -875,6 +925,7 @@ func main() {
 	if nodeName == "" {
 		nodeName = "unknown"
 	}
+	localNodeName = nodeName
 
 	fs := http.FileServer(http.Dir(dataDir))
 
@@ -1261,6 +1312,68 @@ func main() {
 	// Files live on the producer's node only (the node that ran <task>). State
 	// values come from validTransferStates. Read-only externally; writes happen
 	// exclusively in the push goroutine on this same node.
+	// GET /installed/<odag>/<task> — when this node's copy of <task>'s output
+	// became readable, and from where. 404 until the payload is installed.
+	http.HandleFunc("/installed/", func(w http.ResponseWriter, r *http.Request) {
+		parts, status, msg := parsePathComponents(r.URL.Path, "/installed/", 2)
+		if status != http.StatusOK {
+			http.Error(w, msg, status)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		b, err := os.ReadFile(installedFile(parts[0] + "/" + parts[1]))
+		if err != nil {
+			http.Error(w, "no install record", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(b)
+	})
+
+	// /timings/<odag>/<task> — task-internal phase boundaries reported by the
+	// SDK (PUT) and read back by the controller (GET). The body is stored
+	// verbatim; the agent does not interpret it beyond a size and JSON-shape
+	// check, so the SDK can add fields without an agent release.
+	http.HandleFunc("/timings/", func(w http.ResponseWriter, r *http.Request) {
+		parts, status, msg := parsePathComponents(r.URL.Path, "/timings/", 2)
+		if status != http.StatusOK {
+			http.Error(w, msg, status)
+			return
+		}
+		rel := parts[0] + "/" + parts[1]
+		switch r.Method {
+		case http.MethodPut:
+			body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+			if err != nil {
+				http.Error(w, "failed to read body", http.StatusInternalServerError)
+				return
+			}
+			var probe map[string]interface{}
+			if err := json.Unmarshal(body, &probe); err != nil {
+				http.Error(w, "body must be a JSON object", http.StatusBadRequest)
+				return
+			}
+			if err := writeFile(timingsFile(rel), string(body)); err != nil {
+				http.Error(w, "failed to write", http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			b, err := os.ReadFile(timingsFile(rel))
+			if err != nil {
+				http.Error(w, "no timings", http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(b)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
 	http.HandleFunc("/transfers/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1493,6 +1606,19 @@ func main() {
 			// marker no consumer reads stale bytes. Task lifecycle state
 			// belongs to the producer's own node and is not touched here.
 			writeInstalledDigest(rel, computedDigest)
+			// Data-availability timestamp: recorded immediately before the
+			// readiness marker, so it is never later than the moment a
+			// consumer could first observe the payload.
+			src, fromNode := "local", ""
+			if sn := r.Header.Get(headerSourceNode); sn != "" && sn != nodeName {
+				src, fromNode = "remote", sn
+			}
+			recordInstalled(rel, installRecord{
+				UnixTime: float64(time.Now().UnixNano()) / 1e9,
+				Bytes:    n,
+				Source:   src,
+				FromNode: fromNode,
+			})
 			setReady(rel)
 			log.Printf("[data-agent/%s] PUT %s (%d bytes, sha256=%s) → ReadyLocal", nodeName, r.URL.Path, n, computedDigest)
 			w.WriteHeader(http.StatusOK)

@@ -61,6 +61,7 @@ Environment variables injected by odag-controller
 import hashlib
 import json
 import os
+import time
 import urllib.request
 
 
@@ -93,6 +94,18 @@ class FileTransport:
         self.output_dir: str = os.environ["WL_OUTPUT_DIR"]
         self.node_name: str = os.environ.get("NODE_NAME", "")
         self.node_ip: str = os.environ.get("WL_NODE_IP", "")
+        # Phase boundaries, wall-clock epoch seconds. Reported once at
+        # close() so a scheduler's predicted compute time can be compared
+        # against the time actually spent computing, separately from
+        # container startup, input reads, and output handoff. All are
+        # best-effort: instrumentation never fails a task.
+        self._t_task_start: float = time.time()
+        self._t_recv_first: float | None = None
+        self._t_recv_last: float | None = None
+        self._t_send_start: float | None = None
+        self._t_send_installed: float | None = None
+        self._bytes_in: int = 0
+        self._bytes_out: int = 0
         self._set_task_state("Running")
 
     # ------------------------------------------------------------------ #
@@ -157,7 +170,11 @@ class FileTransport:
         # fsyncs, renames into place, fsyncs the parent dir, then writes the
         # .wl-ready marker. Same-node consumers can proceed as soon as this
         # call returns. The SDK never touches the hostPath directly.
+        if self._t_send_start is None:
+            self._t_send_start = time.time()
         self._install_local(payload)
+        self._t_send_installed = time.time()
+        self._bytes_out += len(payload)
         print(
             f"[{self.task_name}] installed {len(payload)} bytes via local data-agent",
             flush=True,
@@ -224,9 +241,13 @@ class FileTransport:
                 )
             peer = deps[0]
 
+        if self._t_recv_first is None:
+            self._t_recv_first = time.time()
         path = f"/data/wl-outputs/{self.odag_name}/{peer}/output"
         with open(path, "rb") as f:
             data = f.read()
+        self._t_recv_last = time.time()
+        self._bytes_in += len(data)
         print(f"[{self.task_name}] read {len(data)} bytes from {peer} ({path})", flush=True)
         return data
 
@@ -248,4 +269,60 @@ class FileTransport:
         in-flight transfers independently; per-successor transfer state
         captures their outcome.
         """
+        self._report_timings()
         self._set_task_state("ComputeDone")
+
+    # ------------------------------------------------------------------ #
+    # instrumentation                                                       #
+    # ------------------------------------------------------------------ #
+
+    def _report_timings(self) -> None:
+        """
+        PUT the task's phase boundaries to the local data-agent.
+
+        Compute is defined as the interval between the last input read and
+        the first output handoff — the span a scheduler's cost model claims
+        to predict. For the usual ODAG shape (read inputs, compute, send
+        once) that is exact; a task that interleaves reads and writes still
+        gets monotone boundaries, but computeSeconds then covers the whole
+        interleaved span and should be read as an upper bound.
+
+        Best-effort: any failure is logged and ignored. Instrumentation must
+        never fail a task that has already produced its output.
+        """
+        if not self.node_ip:
+            return
+        now = time.time()
+        compute_start = self._t_recv_last if self._t_recv_last is not None else self._t_task_start
+        compute_end = self._t_send_start if self._t_send_start is not None else now
+        rec = {
+            "taskStartUnix": self._t_task_start,
+            "computeStartUnix": compute_start,
+            "computeEndUnix": compute_end,
+            "closeUnix": now,
+            "computeSeconds": max(compute_end - compute_start, 0.0),
+            "inputReadSeconds": (
+                max(self._t_recv_last - self._t_recv_first, 0.0)
+                if self._t_recv_first is not None and self._t_recv_last is not None
+                else 0.0
+            ),
+            "handoffSeconds": (
+                max(self._t_send_installed - self._t_send_start, 0.0)
+                if self._t_send_start is not None and self._t_send_installed is not None
+                else 0.0
+            ),
+            "bytesIn": self._bytes_in,
+            "bytesOut": self._bytes_out,
+        }
+        url = f"http://{self.node_ip}:{_DATA_AGENT_PORT}/timings/{self.odag_name}/{self.task_name}"
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(rec).encode(),
+                method="PUT",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+        except Exception as e:
+            print(f"[{self.task_name}] WARNING: failed to report timings: {e}", flush=True)

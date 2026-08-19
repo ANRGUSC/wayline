@@ -1174,6 +1174,86 @@ func queryTaskState(nodeIP, odagName, taskName string) string {
 	return strings.TrimSpace(string(body))
 }
 
+// queryTimings fetches the SDK-reported phase boundaries for a task from
+// the data-agent on its node. Returns nil when the task's image predates
+// the instrumented SDK, or the agent is unreachable — callers treat the
+// instrumentation as optional.
+func queryTimings(nodeIP, odagName, taskName string) map[string]interface{} {
+	url := fmt.Sprintf("http://%s:%d/timings/%s/%s", nodeIP, dataAgentPort, odagName, taskName)
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var out map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// queryInstalled returns the epoch-seconds timestamp at which taskName's
+// output became readable on the node at nodeIP, or 0 if unknown.
+func queryInstalled(nodeIP, odagName, taskName string) float64 {
+	url := fmt.Sprintf("http://%s:%d/installed/%s/%s", nodeIP, dataAgentPort, odagName, taskName)
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0
+	}
+	var rec struct {
+		UnixTime float64 `json:"unixTime"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rec); err != nil {
+		return 0
+	}
+	return rec.UnixTime
+}
+
+// inputsReadyTime returns when the LAST dependency of taskName finished
+// installing on the node where taskName runs — the moment the controller's
+// data-readiness gate could open. Returns "" for source tasks, and for
+// tasks where any dependency's install record is missing (partial data is
+// worse than none for error attribution).
+func inputsReadyTime(taskName string, tasks []taskSpec, assignMap map[string]nodeInfo, odagName string) string {
+	var deps []string
+	for _, t := range tasks {
+		if t.Name == taskName {
+			deps = t.Dependencies
+			break
+		}
+	}
+	if len(deps) == 0 {
+		return ""
+	}
+	consumerIP := assignMap[taskName].ip
+	if consumerIP == "" {
+		return ""
+	}
+	latest := 0.0
+	for _, dep := range deps {
+		// The relevant copy is the one on the CONSUMER's node: for a
+		// same-node edge that is the producer's local install, for a
+		// cross-node edge the receiving agent's install.
+		ts := queryInstalled(consumerIP, odagName, dep)
+		if ts <= 0 {
+			return ""
+		}
+		if ts > latest {
+			latest = ts
+		}
+	}
+	sec := int64(latest)
+	nsec := int64((latest - float64(sec)) * 1e9)
+	return time.Unix(sec, nsec).UTC().Format(time.RFC3339Nano)
+}
+
 // --------------------------------------------------------------------------
 // Status updates
 // --------------------------------------------------------------------------
@@ -1238,6 +1318,38 @@ func updateTaskStatuses(dynClient dynamic.Interface,
 		ts["state"] = taskState
 		if ds := dataSizeMap[taskName]; ds != "" {
 			ts["dataSize"] = ds
+		}
+		// Instrumentation: pod creation is the controller's own clock, so
+		// startupSeconds isolates scheduling + image pull + sandbox +
+		// interpreter start from anything the task itself did.
+		if !pod.CreationTimestamp.IsZero() {
+			ts["createdTime"] = pod.CreationTimestamp.UTC().Format(time.RFC3339Nano)
+			if pod.Status.StartTime != nil {
+				ts["startupSeconds"] = pod.Status.StartTime.Sub(pod.CreationTimestamp.Time).Seconds()
+			}
+		}
+		// Task-internal phase boundaries, reported by the SDK at close().
+		// Absent for tasks whose image predates the instrumented SDK.
+		if podPhase == "Succeeded" || podPhase == "Failed" {
+			if ni := assignMap[taskName]; ni.ip != "" {
+				if tm := queryTimings(ni.ip, odagName, taskName); tm != nil {
+					if v, ok := tm["computeSeconds"].(float64); ok {
+						ts["computeSeconds"] = v
+					}
+					if v, ok := tm["handoffSeconds"].(float64); ok {
+						ts["handoffSeconds"] = v
+					}
+					if v, ok := tm["inputReadSeconds"].(float64); ok {
+						ts["inputReadSeconds"] = v
+					}
+				}
+			}
+			// Data-availability gate: when the last dependency's output
+			// finished installing on this task's node. Source tasks have no
+			// gate and are left unset.
+			if rt := inputsReadyTime(taskName, tasks, assignMap, odagName); rt != "" {
+				ts["inputsReadyTime"] = rt
+			}
 		}
 		taskStatuses = append(taskStatuses, ts)
 	}

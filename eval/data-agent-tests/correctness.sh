@@ -117,6 +117,31 @@ def run():
         s, b = get("/metrics")
         print(f"STATUS={s}")
         print(b.decode())
+    elif cmd == "installed-record":
+        # An install must stamp a data-availability record, and must
+        # attribute local (SDK) vs remote (agent-to-agent) installs.
+        odag = sys.argv[2]
+        body = os.urandom(4096); digest = sha256(body)
+        hdrs = {"X-Wayline-Content-SHA256": digest, "X-Wayline-Uncompressed-Length": "4096"}
+        t_before = time.time()
+        put(step_to_path(odag, "local"), body, hdrs)
+        s1, b1 = get(f"/installed/{odag}/local")
+        put(step_to_path(odag, "remote"), body, dict(hdrs, **{"X-Wayline-Source-Node": "othernode"}))
+        s2, b2 = get(f"/installed/{odag}/remote")
+        s3, _ = get(f"/installed/{odag}/never-installed")
+        print(f"LOCAL_STATUS={s1} LOCAL_BODY={b1.decode()}")
+        print(f"REMOTE_STATUS={s2} REMOTE_BODY={b2.decode()}")
+        print(f"MISSING_STATUS={s3} T_BEFORE={t_before}")
+    elif cmd == "timings-roundtrip":
+        # The agent stores SDK timing reports verbatim and rejects
+        # non-JSON bodies; a missing report is a 404, not an empty object.
+        odag = sys.argv[2]
+        rec = b'{"computeSeconds":8.5,"handoffSeconds":0.4,"bytesOut":2048}'
+        s1, _ = put(f"/timings/{odag}/t", rec, {"Content-Type": "application/json"})
+        s2, b2 = get(f"/timings/{odag}/t")
+        s3, _ = put(f"/timings/{odag}/t", b"not json", {"Content-Type": "application/json"})
+        s4, _ = get(f"/timings/{odag}/absent")
+        print(f"PUT_STATUS={s1} GET_STATUS={s2} GET_BODY={b2.decode()} BADJSON_STATUS={s3} MISSING_STATUS={s4}")
 
 run()
 PYEOF
@@ -271,6 +296,47 @@ status=$(echo "$out" | grep -oP 'STATUS=\K-?\d+')
 case "$status" in 4*|5*) report PASS "Path traversal cannot read host paths" "status=$status (Go path-normalize then 4xx/5xx — no leak)" ;;
                     *)   report FAIL "Path traversal cannot read host paths" "status=$status" ;;
 esac
+
+echo
+echo "== test 9: Install stamps a data-availability record =================="
+ODAG="tst-${ts}-t9"
+out=$(run_py installed-record "$ODAG")
+local_status=$(echo "$out" | grep -oP 'LOCAL_STATUS=\K\d+')
+local_body=$(echo "$out" | grep -oP 'LOCAL_BODY=\K.*')
+remote_body=$(echo "$out" | grep -oP 'REMOTE_BODY=\K.*')
+missing_status=$(echo "$out" | grep -oP 'MISSING_STATUS=\K\d+')
+if [ "$local_status" = "200" ] && echo "$local_body" | grep -q '"source":"local"' \
+   && echo "$local_body" | grep -q '"bytes":4096'; then
+    report PASS "Local install records source + byte count" "$local_body"
+else
+    report FAIL "Local install records source + byte count" "status=$local_status body=$local_body"
+fi
+if echo "$remote_body" | grep -q '"source":"remote"' && echo "$remote_body" | grep -q '"fromNode":"othernode"'; then
+    report PASS "Remote install attributed to sending node"
+else
+    report FAIL "Remote install attributed to sending node" "body=$remote_body"
+fi
+if [ "$missing_status" = "404" ]; then
+    report PASS "Install record absent before install (404)"
+else
+    report FAIL "Install record absent before install (404)" "got=$missing_status"
+fi
+
+echo
+echo "== test 10: SDK timing reports round-trip ============================="
+ODAG="tst-${ts}-t10"
+out=$(run_py timings-roundtrip "$ODAG")
+put_status=$(echo "$out" | grep -oP 'PUT_STATUS=\K\d+')
+get_body=$(echo "$out" | grep -oP 'GET_BODY=\K.*')
+badjson=$(echo "$out" | grep -oP 'BADJSON_STATUS=\K\d+')
+missing=$(echo "$out" | grep -oP 'MISSING_STATUS=\K\d+')
+if [ "$put_status" = "200" ] && echo "$get_body" | grep -q '"computeSeconds":8.5'; then
+    report PASS "Timing report stored and returned verbatim"
+else
+    report FAIL "Timing report stored and returned verbatim" "put=$put_status body=$get_body"
+fi
+if [ "$badjson" = "400" ]; then report PASS "Non-JSON timing body rejected (400)"; else report FAIL "Non-JSON timing body rejected (400)" "got=$badjson"; fi
+if [ "$missing" = "404" ]; then report PASS "Absent timing report returns 404"; else report FAIL "Absent timing report returns 404" "got=$missing"; fi
 
 echo
 echo "== cleanup ============================================================"
