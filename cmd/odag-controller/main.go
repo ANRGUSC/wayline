@@ -1216,6 +1216,14 @@ func queryInstalled(nodeIP, odagName, taskName string) float64 {
 	return rec.UnixTime
 }
 
+// unixToRFC3339 renders epoch seconds (float) as an RFC3339Nano UTC string,
+// preserving the sub-second precision the SDK reports.
+func unixToRFC3339(t float64) string {
+	sec := int64(t)
+	nsec := int64((t - float64(sec)) * 1e9)
+	return time.Unix(sec, nsec).UTC().Format(time.RFC3339Nano)
+}
+
 // inputsReadyTime returns when the LAST dependency of taskName finished
 // installing on the node where taskName runs — the moment the controller's
 // data-readiness gate could open. Returns "" for source tasks, and for
@@ -1249,9 +1257,7 @@ func inputsReadyTime(taskName string, tasks []taskSpec, assignMap map[string]nod
 			latest = ts
 		}
 	}
-	sec := int64(latest)
-	nsec := int64((latest - float64(sec)) * 1e9)
-	return time.Unix(sec, nsec).UTC().Format(time.RFC3339Nano)
+	return unixToRFC3339(latest)
 }
 
 // --------------------------------------------------------------------------
@@ -1333,6 +1339,18 @@ func updateTaskStatuses(dynClient dynamic.Interface,
 		if podPhase == "Succeeded" || podPhase == "Failed" {
 			if ni := assignMap[taskName]; ni.ip != "" {
 				if tm := queryTimings(ni.ip, odagName, taskName); tm != nil {
+					// Task-code boundaries at sub-millisecond resolution.
+					// Kubernetes pod timestamps are second-granularity, so
+					// these are what make the wall-clock accounting add up:
+					// everything between podStart and taskStart is runtime
+					// bootstrap (interpreter, imports, SDK init), and
+					// everything after close is pod teardown.
+					if v, ok := tm["taskStartUnix"].(float64); ok && v > 0 {
+						ts["taskStartTime"] = unixToRFC3339(v)
+					}
+					if v, ok := tm["closeUnix"].(float64); ok && v > 0 {
+						ts["taskCloseTime"] = unixToRFC3339(v)
+					}
 					if v, ok := tm["computeSeconds"].(float64); ok {
 						ts["computeSeconds"] = v
 					}
