@@ -18,8 +18,7 @@ sidecar*, which is what the rest of this page is about.
 
 | value | meaning |
 |---|---|
-| `constraints` | **default.** Enforces `constraints.nodeNames` and nothing else — the neutral placement, and the fallback when an external scheduler fails |
-| `random` | compiled-in random placement |
+| `random` | **default.** Random placement among each task's allowed nodes |
 | `heft` | compiled-in HEFT (resource- and contention-aware) |
 | `saga/heft`, `saga/cpop`, `saga/minmin`, … | a built-in SAGA algorithm |
 | `saga/pkg.module.ClassName` | **any importable `saga.Scheduler` subclass** |
@@ -27,10 +26,11 @@ sidecar*, which is what the rest of this page is about.
 
 If an external scheduler fails for any reason — unreachable, import error,
 exception, a placement that violates task constraints — the controller logs
-the reason and falls back to the **constraint-only** placement, never to an
-optimising one. Falling back to HEFT would mean a broken scheduler silently
-produces a good placement, and your measurement would describe HEFT while
-claiming to describe your scheduler.
+the reason and falls back to random placement — not to an optimising
+scheduler, which would silently produce a good placement and leave you
+measuring HEFT while you believed you were measuring your own scheduler.
+
+All placements, including random, honour `constraints.nodeNames`.
 
 ## Writing the scheduler
 
@@ -144,5 +144,5 @@ kubectl logs deploy/odag-controller -n wl-system -c odag-controller | grep '\[sa
 # [saga] mypkg.MyScheduler placed 14 tasks (makespan estimate 21.4s, cost-model fit RMSE 0.163)
 ```
 
-A line mentioning "falling back to constraint-only placement" means your scheduler was
-not used; the same log line says why.
+A line mentioning "falling back to random placement" means your scheduler
+was not used; the same log line says why.

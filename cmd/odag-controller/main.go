@@ -374,33 +374,23 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 			log.Printf("[odag-ctrl] using external scheduler %q for %s (endpoint %s)", schedulerName, key, url)
 			am, err := sagaAssignTasks(algo, url, schedCfg.Options, tasks, nodeMap, rtRes, dsRes, bwRes)
 			if err != nil {
-				// Fall back to the NEUTRAL placement, never to an optimising
-				// one. Substituting HEFT here would mean a failed external
-				// scheduler silently produces an optimised placement, and the
-				// run would measure HEFT while claiming to measure the
-				// scheduler under test.
-				log.Printf("[odag-ctrl] external scheduler %q failed for %s: %v — falling back to constraint-only placement",
+				// A dead or buggy scheduler service degrades placement
+				// quality, never availability: fall back to built-in HEFT.
+				// Fall back to random placement, not to an optimising
+				// scheduler: substituting HEFT would silently produce a good
+				// placement, so the run would measure HEFT while claiming to
+				// measure the scheduler under test.
+				log.Printf("[odag-ctrl] external scheduler %q failed for %s: %v — falling back to random placement",
 					schedulerName, key, err)
-				assignMap = constraintOnlyAssign(tasks, nodeMap)
+				assignMap = assignTasks(tasks, nodeMap)
 			} else {
 				assignMap = am
 			}
 			predicted, flows = computePredictedSchedule(tasks, assignMap, rtRes, dsRes, bwRes)
 			break
 		}
-		if schedulerName == "random" {
-			log.Printf("[odag-ctrl] using random scheduler for %s", key)
-			assignMap = assignTasks(tasks, nodeMap)
-		} else {
-			// Default: enforce the user's declared constraints and nothing else.
-			if schedulerName != "" && schedulerName != "constraints" {
-				log.Printf("[odag-ctrl] unknown scheduler %q for %s; using constraint-only placement",
-					schedulerName, key)
-			} else {
-				log.Printf("[odag-ctrl] using constraint-only placement for %s", key)
-			}
-			assignMap = constraintOnlyAssign(tasks, nodeMap)
-		}
+		log.Printf("[odag-ctrl] using random scheduler for %s", key)
+		assignMap = assignTasks(tasks, nodeMap)
 		predicted, flows = computePredictedSchedule(tasks, assignMap, rtRes, dsRes, bwRes)
 	}
 	assignmentCache.Store(key, assignMap)
