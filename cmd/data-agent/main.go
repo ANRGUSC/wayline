@@ -143,6 +143,7 @@ var (
 	metricPushSuccess    atomic.Int64 // pushToNode returned nil
 	metricPushFailed     atomic.Int64 // pushToNode returned error after retries
 	metricBytesOut       atomic.Int64 // bytes sent via successful pushes
+	metricAliasOK        atomic.Int64 // POST /alias materialized an output
 )
 
 // acquirePushSlot blocks until a push slot is available. No-op if unbounded.
@@ -975,6 +976,7 @@ func main() {
 				"put_checksum_mismatch": metricPutMismatch.Load(),
 				"put_conflict":          metricPutConflict.Load(),
 				"put_idempotent":        metricPutIdempotent.Load(),
+				"alias_ok":              metricAliasOK.Load(),
 				"bytes_in":              metricBytesIn.Load(),
 			},
 			"push": map[string]int64{
@@ -994,6 +996,119 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
+	})
+
+	// POST /alias/<odag>/<task>
+	// Body: JSON {"from":"<odag>/<task>"}.
+	//
+	// Materializes <odag>/<task>/output from an output already installed on
+	// THIS node, without moving bytes: the payload is hardlinked, the size
+	// and digest sidecars are copied, an install record with source "alias"
+	// is written, and .wl-ready is set. The alias is a first-class installed
+	// output afterwards — consumers read it and /push serves it exactly as
+	// if a task had produced it here.
+	//
+	// Two callers, one mechanism:
+	//   - the controller executing a data vertex (same-run alias: the
+	//     vertex re-emits its dependency's payload under its own name);
+	//   - cross-run reuse (cache hit: a new run's input aliased to a
+	//     completed run's output; hardlinks keep the bytes alive even if
+	//     the source run is later retired by retention).
+	//
+	// Idempotent: aliasing onto an already-ready target with the same
+	// digest is a 200 no-op; a differing digest is 409, mirroring PUT.
+	http.HandleFunc("/alias/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		parts, status, msg := parsePathComponents(r.URL.Path, "/alias/", 2)
+		if status != http.StatusOK {
+			http.Error(w, msg, status)
+			return
+		}
+		var req struct {
+			From string `json:"from"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		fromSegs := strings.Split(strings.Trim(req.From, "/"), "/")
+		if len(fromSegs) != 2 {
+			http.Error(w, `"from" must be "<odag>/<task>"`, http.StatusBadRequest)
+			return
+		}
+		for _, s := range append([]string{}, fromSegs...) {
+			if err := validName(s); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		srcRel := fromSegs[0] + "/" + fromSegs[1]
+		dstRel := parts[0] + "/" + parts[1]
+		if srcRel == dstRel {
+			http.Error(w, "alias onto itself", http.StatusBadRequest)
+			return
+		}
+		if !isReady(srcRel) {
+			http.Error(w, "source not ready on this node", http.StatusConflict)
+			return
+		}
+		srcDigest := readInstalledDigest(srcRel)
+		if isReady(dstRel) {
+			if existing := readInstalledDigest(dstRel); existing != "" && existing == srcDigest {
+				log.Printf("[data-agent/%s] ALIAS %s ← %s: idempotent", nodeName, dstRel, srcRel)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			http.Error(w, "target already installed with different content", http.StatusConflict)
+			return
+		}
+		srcPath := filepath.Join(dataDir, srcRel, "output")
+		dstPath := filepath.Join(dataDir, dstRel, "output")
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+			http.Error(w, "mkdir failed", http.StatusInternalServerError)
+			return
+		}
+		// Hardlink so the alias shares the payload without copying and
+		// survives retention deleting the source run's directory. Fall back
+		// to a copy if the link fails (e.g. filesystem without link support).
+		_ = os.Remove(dstPath)
+		if err := os.Link(srcPath, dstPath); err != nil {
+			if _, _, cerr := func() (string, int64, error) {
+				f, ferr := os.Open(srcPath)
+				if ferr != nil {
+					return "", 0, ferr
+				}
+				defer f.Close()
+				return installAtomically(dstPath, f, srcDigest)
+			}(); cerr != nil {
+				log.Printf("[data-agent/%s] ALIAS %s ← %s: link+copy failed: %v / %v",
+					nodeName, dstRel, srcRel, err, cerr)
+				http.Error(w, "alias failed", http.StatusInternalServerError)
+				return
+			}
+		}
+		var size int64
+		if st, err := os.Stat(dstPath); err == nil {
+			size = st.Size()
+		}
+		_ = writeFile(bytesFile(dstRel), fmt.Sprintf("%d", size))
+		if srcDigest != "" {
+			writeInstalledDigest(dstRel, srcDigest)
+		}
+		recordInstalled(dstRel, installRecord{
+			UnixTime: float64(time.Now().UnixNano()) / 1e9,
+			Bytes:    size,
+			Source:   "alias",
+			FromNode: srcRel, // provenance: the aliased source path
+		})
+		setReady(dstRel)
+		metricAliasOK.Add(1)
+		log.Printf("[data-agent/%s] ALIAS %s ← %s (%d bytes, sha256=%s) → ReadyLocal",
+			nodeName, dstRel, srcRel, size, srcDigest)
+		w.WriteHeader(http.StatusOK)
 	})
 
 	// POST /push/<odag>/<task>

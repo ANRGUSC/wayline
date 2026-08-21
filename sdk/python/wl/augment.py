@@ -25,9 +25,9 @@ not graph structure, and are deliberately not expressible here.
 
 The data vertex is a real task in the physical DAG: the scheduler sees it,
 places it (within its constraints), and its transfers appear in the same
-per-edge state as any other. The prototype realizes it as a passthrough
-container; agent-native execution (no pod) removes the dispatch overhead
-without changing this translation.
+per-edge state as any other. Marked `type: data`, the controller executes it
+agent-natively (alias + push, no pod); the image/command fields are the
+fallback the controller uses if the vertex declaration is malformed.
 """
 from __future__ import annotations
 
@@ -118,6 +118,7 @@ def augment(
             raise AugmentError(f"name collision: {store_name} already exists")
         vertex = {
             "name": store_name,
+            "type": "data",     # no pod: realized via data-agent alias+push
             "image": image or src["image"],
             "command": command or src.get("command", ["python", "task.py"]),
             "dependencies": [a],

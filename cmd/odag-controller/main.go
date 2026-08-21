@@ -541,16 +541,40 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		podPhases[taskName] = pod.Status.Phase
 	}
 
+	// Classify data vertices (physical-DAG nodes that hold/move bytes but
+	// run no code — see datavertex.go). They dispatch through the data-agent
+	// instead of a pod.
+	succs := successorCounts(tasks)
+	vertex := make(map[string]bool, len(tasks))
+	podTaskCount := 0
+	for _, t := range tasks {
+		if isDataVertex(t, succs[t.Name]) {
+			vertex[t.Name] = true
+		} else {
+			podTaskCount++
+		}
+	}
+
 	// For each task: if it has no pod yet AND all dependencies have DataReady on
 	// THIS task's node (Proposal-1 per-child-node DataReady), create its pod now.
 	for _, task := range tasks {
 		if existingPods[task.Name] {
 			continue
 		}
+		if vertex[task.Name] && dataVertexExecuted(assignMap[task.Name], namespace, odagName, task.Name) {
+			continue
+		}
 		childNi := assignMap[task.Name]
 		allDepsDone := true
 		for _, dep := range task.Dependencies {
-			if !existingPods[dep] {
+			if vertex[dep] {
+				// A data-vertex dep has no pod; its execution marker is
+				// its installed output on ITS OWN node.
+				if !dataVertexExecuted(assignMap[dep], namespace, odagName, dep) {
+					allDepsDone = false
+					break
+				}
+			} else if !existingPods[dep] {
 				// Dep pod hasn't been created yet — not ready.
 				allDepsDone = false
 				break
@@ -561,7 +585,7 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 					allDepsDone = false
 					break
 				}
-			} else {
+			} else if !vertex[dep] {
 				// No data-agent reachable for child: fall back to dep PodSucceeded.
 				if podPhases[dep] != corev1.PodSucceeded {
 					allDepsDone = false
@@ -570,6 +594,13 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 			}
 		}
 		if !allDepsDone {
+			continue
+		}
+
+		if vertex[task.Name] {
+			if err := executeDataVertex(namespace, odagName, task, assignMap, tasks); err != nil {
+				log.Printf("[odag-ctrl] data vertex %s/%s: %v (will retry)", key, task.Name, err)
+			}
 			continue
 		}
 
@@ -586,10 +617,13 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		}
 	}
 
-	// Update per-task statuses and check overall completion.
+	// Update per-task statuses and check overall completion. A data vertex
+	// has no pod, so completion counts pod tasks only: every sink is a pod
+	// (a data vertex must have successors), so all pods Succeeded implies
+	// every vertex on a path to a sink has executed.
 	updateTaskStatuses(dynClient, namespace, odagName, podItems, assignMap, tasks)
 	updateActualFlows(dynClient, namespace, odagName, assignMap, podItems)
-	checkODAGCompletion(dynClient, client, podItems, namespace, odagName, len(tasks))
+	checkODAGCompletion(dynClient, client, podItems, namespace, odagName, podTaskCount)
 }
 
 // --------------------------------------------------------------------------
@@ -598,6 +632,7 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 
 type taskSpec struct {
 	Name           string
+	Type           string // "" = compute (pod); "data" = data vertex (no pod)
 	Image          string
 	Command        []string
 	Args           []string
@@ -718,6 +753,7 @@ func extractTasks(obj *unstructured.Unstructured) []taskSpec {
 		if name == "" || image == "" {
 			continue
 		}
+		typ, _ := t["type"].(string)
 		cmd, _, _ := unstructured.NestedStringSlice(t, "command")
 		args, _, _ := unstructured.NestedStringSlice(t, "args")
 		deps, _, _ := unstructured.NestedStringSlice(t, "dependencies")
@@ -768,6 +804,7 @@ func extractTasks(obj *unstructured.Unstructured) []taskSpec {
 
 		tasks = append(tasks, taskSpec{
 			Name:           name,
+			Type:           typ,
 			Image:          image,
 			Command:        cmd,
 			Args:           args,
@@ -1385,6 +1422,37 @@ func updateTaskStatuses(dynClient dynamic.Interface,
 			if rt := inputsReadyTime(taskName, tasks, assignMap, odagName); rt != "" {
 				ts["inputsReadyTime"] = rt
 			}
+		}
+		taskStatuses = append(taskStatuses, ts)
+	}
+
+	// Data vertices have no pod; synthesize their entries from agent state
+	// so status consumers see every task in the physical DAG. completionTime
+	// comes from the install record — the moment the aliased output became
+	// readable on the vertex's node.
+	succs := successorCounts(tasks)
+	for _, t := range tasks {
+		if !isDataVertex(t, succs[t.Name]) {
+			continue
+		}
+		ni := assignMap[t.Name]
+		ts := map[string]interface{}{
+			"name":  t.Name,
+			"node":  ni.name,
+			"state": "DataVertex",
+		}
+		if ds := dataSizeMap[t.Name]; ds != "" {
+			ts["dataSize"] = ds
+		}
+		if dataVertexExecuted(ni, namespace, odagName, t.Name) {
+			ts["phase"] = "Succeeded"
+			if ni.ip != "" {
+				if at := queryInstalled(ni.ip, odagName, t.Name); at > 0 {
+					ts["completionTime"] = unixToRFC3339(at)
+				}
+			}
+		} else {
+			ts["phase"] = "Pending"
 		}
 		taskStatuses = append(taskStatuses, ts)
 	}

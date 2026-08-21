@@ -53,6 +53,7 @@ def test_fan_out_is_one_upload():
 def test_vertex_shape():
     out = augment(tpl(), store_node="s9")
     v = next(x for x in out["spec"]["tasks"] if x["name"] == "store-a")
+    assert v["type"] == "data"
     assert v["runtime"] == 0
     assert v["dataSize"] == "100MB"           # re-emits producer's payload
     assert v["image"] == "img:1"              # defaults to producer's image
