@@ -69,16 +69,25 @@ func dataVertexExecuted(ni nodeInfo, namespace, odagName, taskName string) bool 
 // so a partial failure is safe to retry on the next reconcile.
 func executeDataVertex(namespace, odagName string, task taskSpec,
 	assignMap map[string]nodeInfo, allTasks []taskSpec) error {
+	return realizeVertex(namespace, odagName, task,
+		odagName+"/"+task.Dependencies[0], assignMap, allTasks)
+}
+
+// realizeVertex materializes <odagName>/<task> on the task's assigned node
+// by aliasing an output already installed there (aliasFrom, "<odag>/<task>"
+// form — same-run for a data vertex, cross-run for a cache hit), then pushes
+// it to every remote successor. Idempotent end to end.
+func realizeVertex(namespace, odagName string, task taskSpec,
+	aliasFrom string, assignMap map[string]nodeInfo, allTasks []taskSpec) error {
 
 	ni := assignMap[task.Name]
 	if ni.ip == "" {
 		return fmt.Errorf("no data-agent for node %q", ni.name)
 	}
-	dep := task.Dependencies[0]
 
-	// 1. Materialize <odag>/<task> from <odag>/<dep> on this node.
+	// 1. Materialize <odag>/<task> from aliasFrom on this node.
 	aliasBody, _ := json.Marshal(map[string]string{
-		"from": odagName + "/" + dep,
+		"from": aliasFrom,
 	})
 	aliasURL := fmt.Sprintf("http://%s:%d/alias/%s/%s",
 		ni.ip, dataAgentPort, odagName, task.Name)
@@ -130,7 +139,7 @@ func executeDataVertex(namespace, odagName string, task taskSpec,
 	dataVertexDone.Store(namespace+"/"+odagName+"/"+task.Name, true)
 	log.Printf("[odag-ctrl] data vertex %s/%s executed on %s "+
 		"(alias %s, %d remote successor(s), no pod)",
-		odagName, task.Name, ni.name, dep, len(remote))
+		odagName, task.Name, ni.name, aliasFrom, len(remote))
 	return nil
 }
 

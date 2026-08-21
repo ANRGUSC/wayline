@@ -110,6 +110,10 @@ func main() {
 	// (typically left over by a previous controller crash or rollout).
 	reconcileStaleODAGs(dynClient, client)
 
+	// Repopulate the cross-run cache registry from surviving ODAG objects
+	// (all namespaces — the watcher is cluster-wide too).
+	rebuildCacheRegistry(dynClient, "")
+
 	go watchBandwidthConfigMap(client)
 	go watchODAGTemplates(dynClient)
 	go watchODAGs(dynClient, client)
@@ -322,6 +326,14 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 	} else {
 		// Non-template ODAG: use ConfigMap bandwidth only.
 		bwRes = buildBandwidthResolver(nil, 3, "external")
+	}
+
+	// Bind cross-run cache hits BEFORE scheduling: a satisfied task is
+	// pinned to the node holding the copy with runtime 0, so any external
+	// scheduler places consumers near the cached bytes through the ordinary
+	// cost model (see cache.go).
+	if n := markCacheHits(namespace, odagName, tasks, nodeMap); n > 0 {
+		log.Printf("[odag-ctrl] %s: %d task(s) satisfied from cache", key, n)
 	}
 
 	schedulerName, _, _ := unstructured.NestedString(obj.Object, "spec", "scheduler")
@@ -546,10 +558,13 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 	// instead of a pod.
 	succs := successorCounts(tasks)
 	vertex := make(map[string]bool, len(tasks))
+	cached := make(map[string]cacheEntry, 0)
 	podTaskCount := 0
 	for _, t := range tasks {
 		if isDataVertex(t, succs[t.Name]) {
 			vertex[t.Name] = true
+		} else if e, ok := cacheHitFor(namespace, odagName, t.Name); ok {
+			cached[t.Name] = e
 		} else {
 			podTaskCount++
 		}
@@ -561,15 +576,24 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		if existingPods[task.Name] {
 			continue
 		}
-		if vertex[task.Name] && dataVertexExecuted(assignMap[task.Name], namespace, odagName, task.Name) {
+		if (vertex[task.Name] || cached[task.Name] != (cacheEntry{})) &&
+			dataVertexExecuted(assignMap[task.Name], namespace, odagName, task.Name) {
+			continue
+		}
+		// A cache-satisfied task waits for nothing: its payload already
+		// exists; dependencies (if any) feed only its skipped execution.
+		if e, ok := cached[task.Name]; ok {
+			if err := executeCachedTask(namespace, odagName, task, e, assignMap, tasks); err != nil {
+				log.Printf("[odag-ctrl] cached task %s/%s: %v (will retry)", key, task.Name, err)
+			}
 			continue
 		}
 		childNi := assignMap[task.Name]
 		allDepsDone := true
 		for _, dep := range task.Dependencies {
-			if vertex[dep] {
-				// A data-vertex dep has no pod; its execution marker is
-				// its installed output on ITS OWN node.
+			if vertex[dep] || cached[dep] != (cacheEntry{}) {
+				// A data-vertex or cache-satisfied dep has no pod; its
+				// execution marker is its installed output on ITS OWN node.
 				if !dataVertexExecuted(assignMap[dep], namespace, odagName, dep) {
 					allDepsDone = false
 					break
@@ -585,7 +609,7 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 					allDepsDone = false
 					break
 				}
-			} else if !vertex[dep] {
+			} else if !vertex[dep] && cached[dep] == (cacheEntry{}) {
 				// No data-agent reachable for child: fall back to dep PodSucceeded.
 				if podPhases[dep] != corev1.PodSucceeded {
 					allDepsDone = false
@@ -633,6 +657,7 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 type taskSpec struct {
 	Name           string
 	Type           string // "" = compute (pod); "data" = data vertex (no pod)
+	CacheKey       string // non-empty: eligible for cross-run reuse
 	Image          string
 	Command        []string
 	Args           []string
@@ -754,6 +779,7 @@ func extractTasks(obj *unstructured.Unstructured) []taskSpec {
 			continue
 		}
 		typ, _ := t["type"].(string)
+		cacheKey, _ := t["cacheKey"].(string)
 		cmd, _, _ := unstructured.NestedStringSlice(t, "command")
 		args, _, _ := unstructured.NestedStringSlice(t, "args")
 		deps, _, _ := unstructured.NestedStringSlice(t, "dependencies")
@@ -805,6 +831,7 @@ func extractTasks(obj *unstructured.Unstructured) []taskSpec {
 		tasks = append(tasks, taskSpec{
 			Name:           name,
 			Type:           typ,
+			CacheKey:       cacheKey,
 			Image:          image,
 			Command:        cmd,
 			Args:           args,
@@ -1426,20 +1453,44 @@ func updateTaskStatuses(dynClient dynamic.Interface,
 		taskStatuses = append(taskStatuses, ts)
 	}
 
-	// Data vertices have no pod; synthesize their entries from agent state
-	// so status consumers see every task in the physical DAG. completionTime
-	// comes from the install record — the moment the aliased output became
-	// readable on the vertex's node.
+	// Completed cacheKey outputs become registry entries for future runs.
+	for _, pod := range pods {
+		if pod.Status.Phase != corev1.PodSucceeded {
+			continue
+		}
+		name := pod.Labels[labelTaskName]
+		for _, t := range tasks {
+			if t.Name == name && t.CacheKey != "" {
+				recordCacheEntry(t.CacheKey, cacheEntry{
+					Odag: odagName, Task: name, Node: pod.Spec.NodeName,
+					Unix: float64(time.Now().UnixNano()) / 1e9,
+				})
+			}
+		}
+	}
+
+	// Data vertices and cache-satisfied tasks have no pod; synthesize their
+	// entries from agent state so status consumers see every task in the
+	// physical DAG. completionTime comes from the install record — the
+	// moment the aliased output became readable on the task's node.
 	succs := successorCounts(tasks)
 	for _, t := range tasks {
-		if !isDataVertex(t, succs[t.Name]) {
+		hit, isCached := cacheHitFor(namespace, odagName, t.Name)
+		if !isDataVertex(t, succs[t.Name]) && !isCached {
 			continue
 		}
 		ni := assignMap[t.Name]
+		state := "DataVertex"
+		if isCached {
+			state = "CacheHit"
+		}
 		ts := map[string]interface{}{
 			"name":  t.Name,
 			"node":  ni.name,
-			"state": "DataVertex",
+			"state": state,
+		}
+		if isCached {
+			ts["cachedFrom"] = hit.Odag + "/" + hit.Task
 		}
 		if ds := dataSizeMap[t.Name]; ds != "" {
 			ts["dataSize"] = ds
