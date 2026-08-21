@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Auto-generate template.yml (ODAGTemplate) for the IoBT Mission Snapshot example.
+Auto-generate template.yml (ODAGTemplate) for the IoT Mission Snapshot example.
 
 Queries the cluster for schedulable nodes and assigns them to roles:
   - First 4 schedulable nodes  -> sensor (capture + preprocess pinned)
@@ -32,7 +32,7 @@ metadata:
   name: {name}
   namespace: wl-system
 spec:
-  description: "IoBT rapid ISR snapshot: 4 sensors -> preprocess -> infer -> fuse -> report"
+  description: "IoT rapid ISR snapshot: 4 sensors -> preprocess -> infer -> fuse -> report"
   scheduler: heft
   profiling:
     enabled: true
@@ -148,7 +148,7 @@ def generate(nodes, registry, template_name):
         idx = i + 1
         capture_blocks.append(make_task_block(
             name=f"capture-{idx}",
-            image=f"{registry}/wl-iobt-capture:latest",
+            image=f"{registry}/wl-iot-capture:latest",
             deps=[],
             data_size=CAPTURE_SIZES[i],
             runtime=3,
@@ -157,7 +157,7 @@ def generate(nodes, registry, template_name):
         ))
         preprocess_blocks.append(make_task_block(
             name=f"preprocess-{idx}",
-            image=f"{registry}/wl-iobt-preprocess:latest",
+            image=f"{registry}/wl-iot-preprocess:latest",
             deps=[f"capture-{idx}"],
             data_size=PREPROCESS_SIZES[i],
             runtime=4,
@@ -166,7 +166,7 @@ def generate(nodes, registry, template_name):
         ))
         infer_blocks.append(make_task_block(
             name=f"infer-{idx}",
-            image=f"{registry}/wl-iobt-infer:latest",
+            image=f"{registry}/wl-iot-infer:latest",
             deps=[f"preprocess-{idx}"],
             data_size=1_000_000,
             runtime=10,
@@ -176,7 +176,7 @@ def generate(nodes, registry, template_name):
 
     fuse_block = make_task_block(
         name="fuse-tracks",
-        image=f"{registry}/wl-iobt-fuse:latest",
+        image=f"{registry}/wl-iot-fuse:latest",
         deps=["infer-1", "infer-2", "infer-3", "infer-4"],
         data_size=1_000_000,
         runtime=3,
@@ -186,7 +186,7 @@ def generate(nodes, registry, template_name):
 
     report_block = make_task_block(
         name="generate-report",
-        image=f"{registry}/wl-iobt-report:latest",
+        image=f"{registry}/wl-iot-report:latest",
         deps=["fuse-tracks"],
         data_size=0,
         runtime=2,
@@ -206,7 +206,7 @@ def generate(nodes, registry, template_name):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate IoBT Mission Snapshot ODAGTemplate YAML with real node names",
+        description="Generate IoT Mission Snapshot ODAGTemplate YAML with real node names",
     )
     parser.add_argument(
         "--registry", default="192.168.1.163:5000",
@@ -217,8 +217,8 @@ def main():
         help="Output file path (default: template.yml)",
     )
     parser.add_argument(
-        "--name", default="iobt-mission-snapshot",
-        help="ODAGTemplate metadata.name (default: iobt-mission-snapshot)",
+        "--name", default="iot-mission-snapshot",
+        help="ODAGTemplate metadata.name (default: iot-mission-snapshot)",
     )
     args = parser.parse_args()
 

@@ -1,6 +1,6 @@
-# IoBT Rapid ISR Snapshot - Mission Report (ODAGTemplate)
+# IoT Rapid ISR Snapshot - Mission Report (ODAGTemplate)
 
-A realistic Internet of Battlefield Things (IoBT) example demonstrating a
+A realistic Internet of Battlefield Things (IoT) example demonstrating a
 one-shot DAG template that simulates a rapid ISR (Intelligence, Surveillance,
 Reconnaissance) snapshot pipeline across distributed sensor and compute nodes.
 
@@ -39,7 +39,7 @@ capture-4 -> preprocess-4 -> infer-4  /
 ### 1. Generate template with real node names
 
 ```bash
-cd examples/iobt-mission-snapshot-odag
+cd examples/iot-mission-snapshot-odag
 python gen_odag.py --registry 192.168.1.163:5000
 ```
 
@@ -56,30 +56,30 @@ REGISTRY=192.168.1.163:5000
 
 for task in capture preprocess infer fuse report; do
   docker build \
-    -f examples/iobt-mission-snapshot-odag/tasks/$task/Dockerfile \
-    -t $REGISTRY/wl-iobt-$task:latest . \
-  && docker push $REGISTRY/wl-iobt-$task:latest
+    -f examples/iot-mission-snapshot-odag/tasks/$task/Dockerfile \
+    -t $REGISTRY/wl-iot-$task:latest . \
+  && docker push $REGISTRY/wl-iot-$task:latest
 done
 ```
 
 ### 3. Apply the ODAGTemplate
 
 ```bash
-kubectl apply -f examples/iobt-mission-snapshot-odag/template.yml
+kubectl apply -f examples/iot-mission-snapshot-odag/template.yml
 ```
 
 ### 4. Trigger a run
 
 ```bash
-wayline run iobt-mission-snapshot
+wayline run iot-mission-snapshot
 ```
 
 ### 5. Monitor
 
 ```bash
-wayline status iobt-mission-snapshot-run-1
-wayline logs iobt-mission-snapshot-run-1 capture-1
-wayline logs iobt-mission-snapshot-run-1 generate-report
+wayline status iot-mission-snapshot-run-1
+wayline logs iot-mission-snapshot-run-1 capture-1
+wayline logs iot-mission-snapshot-run-1 generate-report
 ```
 
 Or view in the UI at `http://localhost:8080`.
@@ -89,7 +89,7 @@ Or view in the UI at `http://localhost:8080`.
 Submit again to trigger another profiled run:
 
 ```bash
-wayline run iobt-mission-snapshot
+wayline run iot-mission-snapshot
 ```
 
 The controller increments the run number automatically. Old runs are garbage-collected

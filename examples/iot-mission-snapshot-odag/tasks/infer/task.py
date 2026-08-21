@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-IoBT Mission Snapshot — infer task (infer-1 .. infer-4).
+IoT Mission Snapshot — infer task (infer-1 .. infer-4).
 
 Receives preprocessed features from preprocess-i, simulates heavy
 inference via a CPU busy loop, and outputs a small JSON dict of

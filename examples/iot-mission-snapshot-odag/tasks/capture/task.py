@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-IoBT Mission Snapshot — capture task (capture-1 .. capture-4).
+IoT Mission Snapshot — capture task (capture-1 .. capture-4).
 
 Simulates a sensor node capturing a raw ISR image burst.
 Produces a large raw blob of WL_DATA_SIZE bytes with a deterministic
