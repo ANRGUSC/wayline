@@ -13,12 +13,12 @@
 # Usage:
 #   ./sweep-scheduler.sh <odag-dir> [N]
 #
-#   <odag-dir>   e.g. iobt, hetero-compute, wide-pipeline-flex
+#   <odag-dir>   e.g. iot, hetero-compute, wide-pipeline-flex
 #   N            number of runs per config (default: 20)
 #
 # Env knobs:
 #   CONFIGS     space-separated list of config suffixes (default:
-#               "random heft heft-eps"). For the iobt epsilon sweep,
+#               "random heft heft-eps"). For the iot epsilon sweep,
 #               set CONFIGS="random heft heft-eps05 heft-eps heft-eps20".
 #   NS          namespace (default wl-system)
 #   TIMEOUT     per-run timeout in seconds (default 300)

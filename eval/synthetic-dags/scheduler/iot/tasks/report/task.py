@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-IoBT Mission Snapshot — generate-report task.
+IoT Mission Snapshot — generate-report task.
 
 Receives fused track data from fuse-tracks and produces a final
 mission report with summary counts, timestamps, provenance, and
@@ -14,6 +14,8 @@ import time
 from wl_sdk import WlTask
 
 task = WlTask()
+RUNTIME = task.expected_runtime or 2.0
+_work_t0 = time.perf_counter()
 
 run_id = task.run_id or "unknown"
 
@@ -40,7 +42,7 @@ for infer_name, node in infer_provenance.items():
 # --- build final report ---
 tracks = fused.get("fused_tracks", [])
 report = {
-    "title": "IoBT Rapid ISR Snapshot - Mission Report",
+    "title": "IoT Rapid ISR Snapshot - Mission Report",
     "run_id": run_id,
     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "summary": {
@@ -83,6 +85,11 @@ for stage, node in sorted(stage_nodes.items()):
 
 print("=" * 72, flush=True)
 print("", flush=True)
+
+# --- simulate the declared report workload (work-inclusive) ---
+remaining = RUNTIME - (time.perf_counter() - _work_t0)
+if remaining > 0:
+    time.sleep(remaining)
 
 # --- send report as final artifact ---
 t1 = time.perf_counter()

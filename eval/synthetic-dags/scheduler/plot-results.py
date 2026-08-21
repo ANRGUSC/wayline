@@ -4,7 +4,7 @@ Plot the scheduler sweep:
  1. Makespan distribution (box+swarm) per config, per ODAG.
  2. Makespan vs. run index (convergence).
  3. Predicted vs. actual makespan scatter (per HEFT config).
- 4. Per-task node placement heatmap (iobt only).
+ 4. Per-task node placement heatmap (iot only).
 Writes PNGs to figures/.
 """
 import json
@@ -23,7 +23,7 @@ RESULTS = Path(os.environ.get("RESULTS_DIR", EVAL / "results")).resolve()
 FIGS = Path(os.environ.get("FIGS_DIR", EVAL / "figures")).resolve()
 FIGS.mkdir(parents=True, exist_ok=True)
 
-ODAG_ORDER = ["iobt", "hetero-compute", "wide-pipeline-flex"]
+ODAG_ORDER = ["iot", "hetero-compute", "wide-pipeline-flex"]
 CONFIG_COLORS = {
     "random": "#888888",
     "heft": "#1f77b4",
@@ -234,9 +234,9 @@ def plot_prediction_scatter(all_data):
     print(f"wrote {FIGS / 'prediction-scatter.png'}")
 
 
-def plot_iobt_placement(all_data):
+def plot_iot_placement(all_data):
     """Fraction of infer-i assignments to each compute node, per config."""
-    odag = "iobt"
+    odag = "iot"
     data = all_data.get(odag, {})
     if not data:
         return
@@ -268,13 +268,13 @@ def plot_iobt_placement(all_data):
     ax.set_xticklabels(configs, rotation=20)
     ax.set_ylabel("share of infer-i placements")
     ax.set_ylim(0, 1)
-    ax.set_title("iobt — infer-i placement share across compute nodes")
+    ax.set_title("iot — infer-i placement share across compute nodes")
     ax.legend()
     ax.grid(True, alpha=0.3, axis="y")
     fig.tight_layout()
-    fig.savefig(FIGS / "iobt-infer-placement.png", dpi=140)
+    fig.savefig(FIGS / "iot-infer-placement.png", dpi=140)
     plt.close(fig)
-    print(f"wrote {FIGS / 'iobt-infer-placement.png'}")
+    print(f"wrote {FIGS / 'iot-infer-placement.png'}")
 
 
 def main():
@@ -283,7 +283,7 @@ def main():
     plot_convergence(all_data)
     plot_prediction_scatter(all_data)
     plot_prediction_pairs(all_data)
-    plot_iobt_placement(all_data)
+    plot_iot_placement(all_data)
 
     # Print a concise summary table.
     print("\n=== Summary (mean makespan of runs 5+) ===")

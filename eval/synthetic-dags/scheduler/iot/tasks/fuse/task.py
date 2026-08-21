@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-IoBT Mission Snapshot — fuse-tracks task.
+IoT Mission Snapshot — fuse-tracks task.
 
 Fan-in: receives detection JSON from infer-1 .. infer-4, fuses into
 a unified track list grouped by class with averaged confidences,
@@ -13,8 +13,10 @@ import time
 from wl_sdk import WlTask
 
 task = WlTask()
+RUNTIME = task.expected_runtime or 3.0
+_work_t0 = time.perf_counter()
 
-print(f"[{task.name}] node={task.node}", flush=True)
+print(f"[{task.name}] node={task.node}  runtime={RUNTIME}s", flush=True)
 print(f"[{task.name}] dependencies={task.dependencies}", flush=True)
 
 # --- receive all infer results ---
@@ -81,6 +83,14 @@ fused_result = {
 
 for track in fused_tracks:
     print(f"[{task.name}]   class={track['class']}  count={track['count']}  avg_conf={track['avg_confidence']}", flush=True)
+
+# --- simulate the declared fusion workload (work-inclusive, like
+# preprocess): the JSON fusion above is real but takes milliseconds, so
+# without this the task occupies its node for ~0s while the spec — and
+# every schedule computed from it — assumes RUNTIME seconds.
+remaining = RUNTIME - (time.perf_counter() - _work_t0)
+if remaining > 0:
+    time.sleep(remaining)
 
 # --- send to generate-report ---
 t1 = time.perf_counter()

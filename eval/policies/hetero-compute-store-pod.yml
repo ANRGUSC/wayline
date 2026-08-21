@@ -1,0 +1,166 @@
+apiVersion: wl.io/v1
+kind: ODAGTemplate
+metadata:
+  name: hetero-heft-store-pod
+  namespace: wl-system
+spec:
+  description: "Heterogeneous-compute \u2014 HEFT strict (spreadEpsilon=0)."
+  scheduler: heft
+  schedulerConfig:
+    spreadEpsilon: 0
+  profiling:
+    enabled: true
+    warmupRuns: 0
+    minSamples: 2
+    emaAlpha: 0.7
+    maxSamples: 50
+    runtimeSource: profiler
+    bandwidthSource: external
+  retention:
+    maxRuns: 20
+    data:
+      policy: immediate
+  defaults:
+    runtime: 10
+    dataSize: 20MB
+  tasks:
+  - name: preprocess
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: &id003
+    - python
+    - task.py
+    dependencies: []
+    dataSize: 20MB
+    runtime: 8
+    runtimeProfile:
+      anrg-3: 6
+      anrg-4: 7
+      anrg-8: 12
+    constraints:
+      nodeNames:
+      - anrg-3
+      - anrg-4
+      - anrg-8
+  - name: train
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: &id004
+    - python
+    - task.py
+    dependencies:
+    - store-preprocess
+    dataSize: 100MB
+    runtime: 20
+    runtimeProfile:
+      anrg-5: 15
+      anrg-6: 28
+    constraints:
+      nodeNames:
+      - anrg-5
+      - anrg-6
+  - name: evaluate
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: &id001
+    - python
+    - task.py
+    dependencies:
+    - store-train
+    dataSize: 5MB
+    runtime: 4
+    runtimeProfile:
+      anrg-3: 3
+      anrg-4: 3.5
+      anrg-7: 5
+      anrg-9: 5
+    constraints:
+      nodeNames:
+      - anrg-3
+      - anrg-4
+      - anrg-7
+      - anrg-9
+  - name: export
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: &id002
+    - python
+    - task.py
+    dependencies:
+    - store-train
+    dataSize: 50MB
+    runtime: 6
+    runtimeProfile:
+      anrg-1: 5
+      anrg-7: 7
+      anrg-9: 7
+    constraints:
+      nodeNames:
+      - anrg-1
+      - anrg-7
+      - anrg-9
+  - name: report
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - store-evaluate
+    - store-export
+    dataSize: '0'
+    runtime: 3
+    runtimeProfile:
+      anrg-1: 2
+      anrg-7: 4
+    constraints:
+      nodeNames:
+      - anrg-1
+      - anrg-7
+  - name: store-evaluate
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: *id001
+    dependencies:
+    - evaluate
+    dataSize: 5MB
+    runtime: 0
+    resources:
+      cpu: 100m
+      memory: 256Mi
+    constraints:
+      nodeNames:
+      - anrg-9
+  - name: store-export
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: *id002
+    dependencies:
+    - export
+    dataSize: 50MB
+    runtime: 0
+    resources:
+      cpu: 100m
+      memory: 256Mi
+    constraints:
+      nodeNames:
+      - anrg-9
+  - name: store-preprocess
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: *id003
+    dependencies:
+    - preprocess
+    dataSize: 20MB
+    runtime: 0
+    resources:
+      cpu: 100m
+      memory: 256Mi
+    constraints:
+      nodeNames:
+      - anrg-9
+  - name: store-train
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: *id004
+    dependencies:
+    - train
+    dataSize: 100MB
+    runtime: 0
+    resources:
+      cpu: 100m
+      memory: 256Mi
+    constraints:
+      nodeNames:
+      - anrg-9

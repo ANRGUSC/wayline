@@ -7,7 +7,7 @@
 #
 # Override via env:
 #   N_RUNS         runs per config (default 20)
-#   IOBT_CONFIGS   configs for iobt (default: "random heft heft-eps05 heft-eps heft-eps20")
+#   IOBT_CONFIGS   configs for iot (default: "random heft heft-eps05 heft-eps heft-eps20")
 #   OTHER_CONFIGS  configs for hetero-compute / wide-pipeline-flex
 #                  (default: "random heft heft-eps")
 set -euo pipefail
@@ -24,14 +24,14 @@ echo "#  $(date)"
 echo "#  Runs per config: $N_RUNS"
 echo "################################################################"
 
-for odag in iobt hetero-compute wide-pipeline-flex; do
+for odag in iot hetero-compute wide-pipeline-flex; do
   echo ""
   echo "================================================================"
   echo " Cleaning cluster before $odag sweep"
   echo "================================================================"
   "$EVAL/cleanup-cluster.sh"
 
-  if [[ "$odag" == "iobt" ]]; then
+  if [[ "$odag" == "iot" ]]; then
     CONFIGS="$IOBT_CONFIGS" "$EVAL/sweep-scheduler.sh" "$odag" "$N_RUNS"
   else
     CONFIGS="$OTHER_CONFIGS" "$EVAL/sweep-scheduler.sh" "$odag" "$N_RUNS"
@@ -47,7 +47,7 @@ echo "################################################################"
 
 echo ""
 echo "Summary tables:"
-for odag in iobt hetero-compute wide-pipeline-flex; do
+for odag in iot hetero-compute wide-pipeline-flex; do
   echo ""
   echo "=== $odag ==="
   for cfg_dir in "$EVAL/results/$odag"/*/; do

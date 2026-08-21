@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-IoBT Mission Snapshot — preprocess task (preprocess-1 .. preprocess-4).
+IoT Mission Snapshot — preprocess task (preprocess-1 .. preprocess-4).
 
 Receives raw image bytes from capture-i, computes a sha256 digest over
 64 KB chunks (simulating feature extraction), and produces a feature blob

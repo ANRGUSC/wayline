@@ -10,7 +10,7 @@ the experiment on a fresh cluster.
 
 | ODAG | Role | Tasks | Data profile | Where |
 |---|---|---|---|---|
-| `iobt` | Realistic IoBT ISR snapshot | 14 | 80–150 MB sensor bursts → ~1 MB detections → fused report | `iobt/` |
+| `iot` | Realistic IoT ISR snapshot | 14 | 80–150 MB sensor bursts → ~1 MB detections → fused report | `iot/` |
 | `hetero-compute` | Minimal controlled microbenchmark | 5 | 5–100 MB mixed; explicit per-node `runtimeProfile` hints | `hetero-compute/` |
 | `wide-pipeline-flex` | Structural stress test (fan-out × 2, fan-in × 2) | 10 | 10–100 MB per edge, two ingress contention points | `wide-pipeline-flex/` |
 
@@ -22,7 +22,7 @@ Each ODAG has three scheduler-config variants:
 | `template-heft.yml` | heft | 0 | Network-aware HEFT with strict EFT selection |
 | `template-heft-eps.yml` | heft | 1.0 | HEFT + ε-tolerant tie-breaking (Contribution 5) |
 
-For the iobt ε-sweep ablation figure, `iobt/` additionally ships
+For the iot ε-sweep ablation figure, `iot/` additionally ships
 `template-heft-eps05.yml` (ε=0.5) and `template-heft-eps20.yml` (ε=2.0).
 
 All variants share identical profiling settings so EMA behavior is
@@ -87,7 +87,7 @@ Apply with `./setup-tc-matrix.sh`, remove with `./teardown-tc-matrix.sh`.
 ./setup-tc-matrix.sh
 
 # Smoke-test each ODAG with HEFT once (stops on first failure).
-for d in iobt hetero-compute wide-pipeline-flex; do
+for d in iot hetero-compute wide-pipeline-flex; do
   kubectl apply -f $d/template-heft.yml
   ../../bin/wayline odag run "$(awk '/^metadata:/{in_meta=1;next} in_meta && /^ *name:/{print $2; exit}' $d/template-heft.yml)" -n wl-system
 done
@@ -102,7 +102,7 @@ In a tmux session (so the SSH connection dying doesn't kill the sweep):
 ```bash
 tmux new -s wl-eval
 ./cleanup-cluster.sh
-./sweep-scheduler.sh iobt 20
+./sweep-scheduler.sh iot 20
 ./cleanup-cluster.sh
 ./sweep-scheduler.sh hetero-compute 20
 ./cleanup-cluster.sh
@@ -112,14 +112,14 @@ tmux new -s wl-eval
 
 Total wall-clock: ~2–3 hours (180 runs plus cleanup/reset overhead).
 
-### ε-sweep ablation (iobt only)
+### ε-sweep ablation (iot only)
 
 ```bash
 ./cleanup-cluster.sh
-CONFIGS="random heft heft-eps05 heft-eps heft-eps20" ./sweep-scheduler.sh iobt 20
+CONFIGS="random heft heft-eps05 heft-eps heft-eps20" ./sweep-scheduler.sh iot 20
 ```
 
-Adds 2 more configs × 20 runs on iobt (~40 min extra).
+Adds 2 more configs × 20 runs on iot (~40 min extra).
 
 ## What each script does
 
@@ -138,11 +138,11 @@ After a sweep, `results/` contains:
 
 ```
 results/
-  iobt/
+  iot/
     random/
       summary.csv              # iteration,run_name,phase,makespan,wall_s
       repeat-template.log      # full driver output
-      iobt-random-run-001.json # per-run ODAG status (placement + predictedSchedule)
+      iot-random-run-001.json # per-run ODAG status (placement + predictedSchedule)
       ...
       profiler-final.db        # profiler state at end of config
     heft/
@@ -159,7 +159,7 @@ results/
 1. `makespan-distribution.png` — box plots of warm makespans per config
 2. `makespan-convergence.png` — makespan vs run index, one line per config
 3. `prediction-scatter.png` — predicted vs actual makespan (HEFT configs only)
-4. `iobt-infer-placement.png` — share of infer-i placements per compute node
+4. `iot-infer-placement.png` — share of infer-i placements per compute node
 
 ## Expected outcomes
 
@@ -167,7 +167,7 @@ Consistent with `docs/paper-notes.md` Contribution 1 and
 Contribution 5:
 
 - **HEFT vs random**: ~25–35% mean makespan reduction (depends on
-  ODAG; largest on iobt where transfers dominate). Variance collapses
+  ODAG; largest on iot where transfers dominate). Variance collapses
   substantially under HEFT once the profiler warms up (3–4 runs).
 - **ε-HEFT vs strict HEFT**: mean makespan roughly unchanged, p95
   tightens, `infer-i` placement spreads across all three compute
@@ -179,7 +179,7 @@ Contribution 5:
 - 8 schedulable workers: anrg-1, anrg-3..9 (anrg-2 is master, NoSchedule)
 - `odag-controller`, `data-agent` DaemonSet, `ui-server` already deployed
 - Image registry at `192.168.1.163:5000` with the following tags pushed:
-  - `wl-iobt-{capture,preprocess,infer,fuse,report}:latest`
+  - `wl-iot-{capture,preprocess,infer,fuse,report}:latest`
   - `multi-odag-task:latest` (used by hetero-compute and wide-pipeline-flex)
 
 If any image is missing, build + push from each ODAG's `tasks/`
@@ -192,10 +192,10 @@ Fresh cluster, no pre-built images:
 ```bash
 # 1. Build and push all task images.
 REGISTRY=192.168.1.163:5000
-cd eval/synthetic-dags/scheduler/iobt/tasks
+cd eval/synthetic-dags/scheduler/iot/tasks
 for t in capture preprocess infer fuse report; do
-  docker build -f $t/Dockerfile -t $REGISTRY/wl-iobt-$t:latest ../../../.. \
-    && docker push $REGISTRY/wl-iobt-$t:latest
+  docker build -f $t/Dockerfile -t $REGISTRY/wl-iot-$t:latest ../../../.. \
+    && docker push $REGISTRY/wl-iot-$t:latest
 done
 cd ../../hetero-compute/tasks
 docker build -f Dockerfile -t $REGISTRY/multi-odag-task:latest ../../../.. \

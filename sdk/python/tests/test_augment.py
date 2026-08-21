@@ -110,3 +110,10 @@ def test_parse_edges_forms():
                                          ("b", "d"), ("c", "d")}
     assert parse_edges("a>b, c>d", tasks) == {("a", "b"), ("c", "d")}
     assert parse_edges("a", tasks) == {("a", "b"), ("a", "c")}
+
+
+def test_pod_realized_omits_type():
+    out = augment(tpl(), store_node="s", pod_realized=True)
+    v = next(x for x in out["spec"]["tasks"] if x["name"] == "store-a")
+    assert "type" not in v          # runs as a passthrough container
+    assert v["runtime"] == 0

@@ -84,6 +84,7 @@ def augment(
     command: list[str] | None = None,
     cpu: str = "100m",
     memory: str = "256Mi",
+    pod_realized: bool = False,
 ) -> dict[str, Any]:
     """Return a deep-copied template with `edges` realized through a data
     vertex on `store_node`.
@@ -96,6 +97,10 @@ def augment(
     `image`/`command` default to the producer's own image and command: the
     generic task contract (receive deps, sleep runtime, emit dataSize,
     push successors) is a passthrough at runtime 0.
+
+    pod_realized=True omits `type: data`, so the vertex runs as a real
+    passthrough container instead of agent-natively — the measured-overhead
+    comparison arm (and the compatibility mode for old controllers).
     """
     out = copy.deepcopy(template)
     tasks = _tasks(out)
@@ -118,7 +123,6 @@ def augment(
             raise AugmentError(f"name collision: {store_name} already exists")
         vertex = {
             "name": store_name,
-            "type": "data",     # no pod: realized via data-agent alias+push
             "image": image or src["image"],
             "command": command or src.get("command", ["python", "task.py"]),
             "dependencies": [a],
@@ -128,6 +132,9 @@ def augment(
             "resources": {"cpu": cpu, "memory": memory},
             "constraints": {"nodeNames": [store_node]},
         }
+        if not pod_realized:
+            # no pod: realized via data-agent alias+push
+            vertex["type"] = "data"
         tasks.append(vertex)
         by_name[store_name] = vertex
 
@@ -161,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="data-vertex image (default: producer's image)")
     ap.add_argument("--cpu", default="100m")
     ap.add_argument("--memory", default="256Mi")
+    ap.add_argument("--pod-realized", action="store_true",
+                    help="vertices as passthrough containers (overhead arm)")
     ap.add_argument("--suffix", default=None,
                     help="append to metadata.name (default: '-store' when "
                     "edges=all, '-ckpt' otherwise)")
@@ -169,8 +178,11 @@ def main(argv: list[str] | None = None) -> int:
     text = sys.stdin.read() if args.template == "-" else open(args.template).read()
     tpl = yaml.safe_load(text)
     out = augment(tpl, store_node=args.store_node, edges=args.edges,
-                  image=args.image, cpu=args.cpu, memory=args.memory)
+                  image=args.image, cpu=args.cpu, memory=args.memory,
+                  pod_realized=args.pod_realized)
     suffix = args.suffix or ("-store" if args.edges == "all" else "-ckpt")
+    if args.pod_realized:
+        suffix += "-pod"
     if out.get("metadata", {}).get("name"):
         out["metadata"]["name"] += suffix
     yaml.safe_dump(out, sys.stdout, sort_keys=False)

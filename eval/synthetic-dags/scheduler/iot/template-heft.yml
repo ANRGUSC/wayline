@@ -1,0 +1,40 @@
+apiVersion: wl.io/v1
+kind: ODAGTemplate
+metadata:
+  name: iot-heft
+  namespace: wl-system
+spec:
+  description: "IoT rapid ISR snapshot — HEFT strict (spreadEpsilon=0)."
+  scheduler: heft
+  schedulerConfig:
+    spreadEpsilon: 0
+  profiling:
+    enabled: true
+    warmupRuns: 0
+    minSamples: 2
+    emaAlpha: 0.7
+    maxSamples: 50
+    runtimeSource: profiler
+    bandwidthSource: external
+  retention:
+    maxRuns: 20
+    data:
+      policy: immediate
+  defaults:
+    runtime: 5
+    dataSize: "20MB"
+  tasks:
+    - { name: capture-1, image: 192.168.1.163:5000/wl-iot-capture:latest, command: ["python", "task.py"], dependencies: [], dataSize: "100MB", runtime: 3, resources: { cpu: "200m", memory: "512Mi" }, constraints: { nodeNames: [anrg-1] } }
+    - { name: capture-2, image: 192.168.1.163:5000/wl-iot-capture:latest, command: ["python", "task.py"], dependencies: [], dataSize: "120MB", runtime: 3, resources: { cpu: "200m", memory: "512Mi" }, constraints: { nodeNames: [anrg-3] } }
+    - { name: capture-3, image: 192.168.1.163:5000/wl-iot-capture:latest, command: ["python", "task.py"], dependencies: [], dataSize: "80MB",  runtime: 3, resources: { cpu: "200m", memory: "512Mi" }, constraints: { nodeNames: [anrg-4] } }
+    - { name: capture-4, image: 192.168.1.163:5000/wl-iot-capture:latest, command: ["python", "task.py"], dependencies: [], dataSize: "150MB", runtime: 3, resources: { cpu: "200m", memory: "512Mi" }, constraints: { nodeNames: [anrg-5] } }
+    - { name: preprocess-1, image: 192.168.1.163:5000/wl-iot-preprocess:latest, command: ["python", "task.py"], dependencies: [capture-1], dataSize: "100MB", runtime: 4, resources: { cpu: "300m", memory: "512Mi" }, constraints: { nodeNames: [anrg-1] } }
+    - { name: preprocess-2, image: 192.168.1.163:5000/wl-iot-preprocess:latest, command: ["python", "task.py"], dependencies: [capture-2], dataSize: "120MB", runtime: 4, resources: { cpu: "300m", memory: "512Mi" }, constraints: { nodeNames: [anrg-3] } }
+    - { name: preprocess-3, image: 192.168.1.163:5000/wl-iot-preprocess:latest, command: ["python", "task.py"], dependencies: [capture-3], dataSize: "80MB",  runtime: 4, resources: { cpu: "300m", memory: "512Mi" }, constraints: { nodeNames: [anrg-4] } }
+    - { name: preprocess-4, image: 192.168.1.163:5000/wl-iot-preprocess:latest, command: ["python", "task.py"], dependencies: [capture-4], dataSize: "150MB", runtime: 4, resources: { cpu: "300m", memory: "512Mi" }, constraints: { nodeNames: [anrg-5] } }
+    - { name: infer-1, image: 192.168.1.163:5000/wl-iot-infer:latest, command: ["python", "task.py"], dependencies: [preprocess-1], dataSize: "1MB", runtime: 10, resources: { cpu: "500m", memory: "512Mi" }, constraints: { nodeNames: [anrg-6, anrg-7, anrg-8] } }
+    - { name: infer-2, image: 192.168.1.163:5000/wl-iot-infer:latest, command: ["python", "task.py"], dependencies: [preprocess-2], dataSize: "1MB", runtime: 10, resources: { cpu: "500m", memory: "512Mi" }, constraints: { nodeNames: [anrg-6, anrg-7, anrg-8] } }
+    - { name: infer-3, image: 192.168.1.163:5000/wl-iot-infer:latest, command: ["python", "task.py"], dependencies: [preprocess-3], dataSize: "1MB", runtime: 10, resources: { cpu: "500m", memory: "512Mi" }, constraints: { nodeNames: [anrg-6, anrg-7, anrg-8] } }
+    - { name: infer-4, image: 192.168.1.163:5000/wl-iot-infer:latest, command: ["python", "task.py"], dependencies: [preprocess-4], dataSize: "1MB", runtime: 10, resources: { cpu: "500m", memory: "512Mi" }, constraints: { nodeNames: [anrg-6, anrg-7, anrg-8] } }
+    - { name: fuse-tracks, image: 192.168.1.163:5000/wl-iot-fuse:latest, command: ["python", "task.py"], dependencies: [infer-1, infer-2, infer-3, infer-4], dataSize: "1MB", runtime: 3, resources: { cpu: "300m", memory: "256Mi" }, constraints: { nodeNames: [anrg-7, anrg-8] } }
+    - { name: generate-report, image: 192.168.1.163:5000/wl-iot-report:latest, command: ["python", "task.py"], dependencies: [fuse-tracks], dataSize: "0", runtime: 2, resources: { cpu: "200m", memory: "128Mi" }, constraints: { nodeNames: [anrg-9] } }
