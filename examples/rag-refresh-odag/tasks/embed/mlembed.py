@@ -13,7 +13,7 @@ import numpy as np
 import onnxruntime as ort
 from tokenizers import Tokenizer
 
-MAX_LEN = 256
+MAX_LEN = 128
 BATCH = 32
 
 
