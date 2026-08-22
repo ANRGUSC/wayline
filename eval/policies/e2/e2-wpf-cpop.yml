@@ -1,0 +1,153 @@
+apiVersion: wl.io/v1
+kind: ODAGTemplate
+metadata:
+  name: e2-wpf-cpop
+  namespace: wl-system
+spec:
+  description: "Wide-pipeline-flex \u2014 HEFT strict (spreadEpsilon=0)."
+  scheduler: saga/cpop
+  profiling:
+    enabled: true
+    warmupRuns: 0
+    minSamples: 2
+    emaAlpha: 0.7
+    maxSamples: 50
+    runtimeSource: profiler
+    bandwidthSource: external
+  retention:
+    maxRuns: 20
+    data:
+      policy: immediate
+  defaults:
+    runtime: 3
+    dataSize: 50MB
+  tasks:
+  - name: source
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies: []
+    runtime: 3
+    dataSize: 100MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+    constraints:
+      nodeNames:
+      - anrg-1
+  - name: extract
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - source
+    runtime: 4
+    dataSize: 50MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+  - name: scan
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - source
+    runtime: 4
+    dataSize: 50MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+  - name: index
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - source
+    runtime: 4
+    dataSize: 50MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+  - name: merge
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - extract
+    - scan
+    - index
+    runtime: 3
+    dataSize: 100MB
+    resources:
+      cpu: 300m
+      memory: 256Mi
+  - name: filter-a
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - merge
+    runtime: 3
+    dataSize: 30MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+  - name: filter-b
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - merge
+    runtime: 3
+    dataSize: 30MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+  - name: filter-c
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - merge
+    runtime: 3
+    dataSize: 30MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+  - name: aggregate
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - filter-a
+    - filter-b
+    - filter-c
+    runtime: 2
+    dataSize: 10MB
+    resources:
+      cpu: 300m
+      memory: 256Mi
+  - name: output
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - aggregate
+    runtime: 1
+    dataSize: '0'
+    resources:
+      cpu: 100m
+      memory: 64Mi
+    constraints:
+      nodeNames:
+      - anrg-9

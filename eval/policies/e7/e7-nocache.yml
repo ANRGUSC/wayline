@@ -1,0 +1,58 @@
+apiVersion: wl.io/v1
+kind: ODAGTemplate
+metadata:
+  name: e7-nocache
+  namespace: wl-system
+spec:
+  description: 'Cross-run reuse smoke: expensive prep cached across runs.'
+  scheduler: heft
+  profiling:
+    enabled: true
+    warmupRuns: 0
+    minSamples: 2
+    emaAlpha: 0.7
+    runtimeSource: profiler
+    bandwidthSource: external
+  retention:
+    maxRuns: 10
+    data:
+      policy: keepLatest
+      keepRuns: 3
+  defaults:
+    runtime: 5
+    dataSize: 10MB
+  tasks:
+  - name: prep
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies: []
+    dataSize: 150MB
+    runtime: 20
+    constraints:
+      nodeNames:
+      - anrg-3
+      - anrg-4
+      - anrg-5
+  - name: consume
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - prep
+    dataSize: 1MB
+    runtime: 4
+  - name: report
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - consume
+    dataSize: 1MB
+    runtime: 2
+    constraints:
+      nodeNames:
+      - anrg-9
