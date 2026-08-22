@@ -103,3 +103,17 @@ for dag, key in DAGS:
     print(f"  {dag:<8} argo median {st.median(am):6.1f}s (n={len(am)})  "
           f"emulation {em:.1f}s  direct {dm:.1f}s  "
           f"-> topology explains {frac:.0f}% of the gap")
+
+E1C = os.path.join(HERE, "results-e1c")
+if os.path.isdir(E1C):
+    print()
+    print("Argo+MinIO referent, FLAT network (e1c runs, store on anrg-9)")
+    for dag, key in DAGS:
+        rows = csv.DictReader(open(os.path.join(E1C, f"e1c-argo-{key}-summary.csv")))
+        am = [float(r["makespan"]) for r in rows if r["phase"] == "Succeeded"]
+        dm = st.median(mks(FLAT, f"{dag}-direct"))
+        em = st.median(mks(FLAT, f"{dag}-store"))
+        frac = (em - dm) / (st.median(am) - dm) * 100
+        print(f"  {dag:<8} argo median {st.median(am):6.1f}s (n={len(am)})  "
+              f"emulation {em:.1f}s  direct {dm:.1f}s  "
+              f"-> topology explains {frac:.0f}% of the gap")
