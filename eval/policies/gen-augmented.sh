@@ -41,3 +41,17 @@ $PY -m wl.augment "$SCHED/wide-pipeline-flex/template-heft.yml" \
     --store-node $STORE --edges "source,merge,extract,scan,index" --suffix=-ckpt5 > wpf-ckpt5.yml
 
 echo "rendered: $(ls *.yml | tr '\n' ' ')"
+
+# E3b: iot checkpoint sweep, largest payloads first (ties broken
+# preprocess-before-capture: the preprocess outputs are the ones that
+# already move cross-node). Producers by size: preprocess-4/capture-4
+# 150MB, preprocess-2/capture-2 120MB, preprocess-1/capture-1 100MB,
+# preprocess-3/capture-3 80MB, infer-* and fuse-tracks 1MB.
+$PY -m wl.augment "$SCHED/iot/template-heft.yml" \
+    --store-node $STORE --edges "preprocess-4" --suffix=-ckpt1 > iot-ckpt1.yml
+$PY -m wl.augment "$SCHED/iot/template-heft.yml" \
+    --store-node $STORE --edges "preprocess-4,capture-4" --suffix=-ckpt2 > iot-ckpt2.yml
+$PY -m wl.augment "$SCHED/iot/template-heft.yml" \
+    --store-node $STORE --edges "preprocess-4,capture-4,preprocess-2,capture-2" --suffix=-ckpt4 > iot-ckpt4.yml
+$PY -m wl.augment "$SCHED/iot/template-heft.yml" \
+    --store-node $STORE --edges "preprocess-4,capture-4,preprocess-2,capture-2,preprocess-1,capture-1,preprocess-3,capture-3" --suffix=-ckpt8 > iot-ckpt8.yml
