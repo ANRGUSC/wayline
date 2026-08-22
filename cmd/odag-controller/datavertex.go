@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"sync"
 )
 
@@ -97,7 +96,7 @@ func realizeVertex(namespace, odagName string, task taskSpec,
 		return fmt.Errorf("alias: %w", err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("alias: HTTP %d", resp.StatusCode)
 	}
 
@@ -131,7 +130,8 @@ func realizeVertex(namespace, odagName string, task taskSpec,
 			return fmt.Errorf("push: %w", err)
 		}
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
+		// The push endpoint answers 202 Accepted: the transfer has begun.
+		if resp.StatusCode/100 != 2 {
 			return fmt.Errorf("push: HTTP %d", resp.StatusCode)
 		}
 	}
