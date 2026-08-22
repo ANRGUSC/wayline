@@ -1,11 +1,25 @@
 # RAG Knowledge Base Refresh + QA Regression (ODAGTemplate)
 
-Simulates a periodic RAG (Retrieval-Augmented Generation) knowledge base refresh
-pipeline: ingest documents, chunk, embed in parallel shards, build per-shard
-indices, merge into a global index, run an evaluation query suite, and produce
-a QA regression report.
+A periodic RAG (Retrieval-Augmented Generation) knowledge base refresh
+pipeline with a real embedding model: materialize the model, ingest
+documents, chunk, embed in parallel shards (ONNX MiniLM-L6-v2, D=384),
+build per-shard indices, merge into a global index, run an evaluation
+query suite, and produce a QA regression report.
 
-Uses `ODAGTemplate` for profiling, retention, and repeated runs.
+Two properties make this the LLM-workflow benchmark for the paper:
+
+* **The model is a data object.** `prepare-model` materializes the
+  ~90MB ONNX model + tokenizer as a Wayline object that fans out to
+  five consumers (4 embed shards + eval). How those bytes move is a
+  per-object realization choice.
+* **The model is reused across runs.** `prepare-model` declares
+  `cacheKey: rag-minilm-l6-v2-onnx-v1`; after run 1 the controller
+  binds it to the previous run's installed copy (alias, no pod), and
+  the scheduler places embed/eval near the cached bytes through its
+  ordinary cost model.
+
+Uses `ODAGTemplate` for profiling, retention (`keepLatest` — required
+for cross-run reuse), and repeated runs.
 
 ## DAG Structure (19 tasks)
 
@@ -31,7 +45,7 @@ ingest-shard --+--> chunk-shard-2 --> embed-shard-2 --> build-index-2 ---+--> me
 - **Data locality**: ingest and chunk tasks co-located on the same node (zero-hop shard extraction)
 - **Feasible-node constraints**: embed tasks restricted to "embedding-capable" node subset
 - **Fan-out / fan-in**: ingest fans out to 4 chunk pipelines; merge fans in from 4 indices
-- **Deterministic embeddings**: feature-hash method (SHA-256 token hashing into D=128 vector space) -- no ML dependencies, fully reproducible
+- **Real embeddings**: ONNX MiniLM-L6-v2 via onnxruntime CPU (D=384), tokenizer + mean-pooling + L2-norm; deterministic for a fixed corpus
 - **Non-trivial artifacts**: binary embedding blobs (header JSON + packed float32 arrays) flow through index/merge/eval
 
 ## Quick Start
@@ -52,12 +66,7 @@ From the **repo root**:
 ```bash
 REGISTRY=192.168.1.163:5000
 
-for task in ingest chunk embed index merge eval report; do
-  docker build \
-    -f examples/rag-refresh-odag/tasks/$task/Dockerfile \
-    -t $REGISTRY/wl-rag-$task:latest . \
-  && docker push $REGISTRY/wl-rag-$task:latest
-done
+examples/rag-refresh-odag/build.sh   # builds + pushes all 8 images
 ```
 
 ### 3. Apply the ODAGTemplate
