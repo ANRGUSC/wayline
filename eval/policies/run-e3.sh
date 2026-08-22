@@ -15,8 +15,8 @@ mkdir -p "$RES"
 
 # Shaped-network guard: anrg-9's root qdisc must be htb (matrix applied).
 q=$(kubectl run tc-check --rm -i --restart=Never -n "$NS" --image=alpine \
-    --overrides='{"spec":{"nodeName":"anrg-9","hostNetwork":true,"containers":[{"name":"tc-check","image":"alpine","command":["sh","-c","apk add -q iproute2 >/dev/null && tc qdisc show | head -2"],"securityContext":{"privileged":true}}]}}' \
-    2>/dev/null | head -2)
+    --overrides='{"spec":{"nodeName":"anrg-9","hostNetwork":true,"containers":[{"name":"tc-check","image":"alpine","command":["sh","-c","apk add -q iproute2 >/dev/null && tc qdisc show"],"securityContext":{"privileged":true}}]}}' \
+    2>/dev/null)
 echo "$q" | grep -q htb || { echo "ABORT: network is not shaped (no htb qdisc). Run setup-tc-matrix.sh first."; exit 1; }
 echo "shaped network confirmed: $q"
 
