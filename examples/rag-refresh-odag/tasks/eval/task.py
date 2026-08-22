@@ -3,36 +3,23 @@
 RAG KB Refresh — eval-queries task.
 
 Loads the global index from merge-index, embeds each evaluation query with
-the same feature-hash method, runs brute-force cosine retrieval, and outputs
-evaluation results JSON to report.
+the same ONNX model the embed shards used (received from prepare-model),
+runs brute-force cosine retrieval, and outputs evaluation results JSON
+to report.
 """
 
-import array
-import hashlib
 import json
-import math
 import os
 import struct
+import tempfile
 import time
 
+import numpy as np
+
 from wl import WlTask
+from mlembed import Embedder, unpack_model
 
-DIM = 128
 TOP_K = 5
-
-
-def feature_hash_embed(text, dim=DIM):
-    """Deterministic feature-hash embedding (must match embed task)."""
-    vec = [0.0] * dim
-    for token in text.lower().split():
-        h = hashlib.sha256(token.encode()).digest()
-        idx = int.from_bytes(h[:4], 'big') % dim
-        sign = 1.0 if h[4] & 1 else -1.0
-        vec[idx] += sign
-    norm = math.sqrt(sum(x * x for x in vec))
-    if norm > 0:
-        vec = [x / norm for x in vec]
-    return vec
 
 
 def load_queries():
@@ -60,11 +47,19 @@ task = WlTask()
 
 print(f"[{task.name}] node={task.node}", flush=True)
 
-# Receive global index
+# Receive the model, then the global index (two upstream peers).
 t0 = time.perf_counter()
-raw = task.recv_raw()
+model_blob = task.recv_raw(peer="prepare-model")
+print(f"[{task.name}] recv model: {len(model_blob)} bytes "
+      f"in {time.perf_counter() - t0:.3f}s", flush=True)
+model_dir = tempfile.mkdtemp()
+unpack_model(model_blob, model_dir)
+emb = Embedder(model_dir)
+
+t0 = time.perf_counter()
+raw = task.recv_raw(peer="merge-index")
 elapsed_recv = time.perf_counter() - t0
-print(f"[{task.name}] recv_raw() -> {len(raw)} bytes in {elapsed_recv:.3f}s", flush=True)
+print(f"[{task.name}] recv index: {len(raw)} bytes in {elapsed_recv:.3f}s", flush=True)
 
 # Unpack
 header_len = struct.unpack('>I', raw[:4])[0]
@@ -75,8 +70,7 @@ num_vectors = header["num_vectors"]
 dim = header["dim"]
 chunk_ids = header["chunk_ids"]
 
-vectors = array.array('f')
-vectors.frombytes(vectors_raw)
+vectors = np.frombuffer(vectors_raw, dtype=np.float32).reshape(num_vectors, dim)
 print(f"[{task.name}] index: {num_vectors} vectors x {dim}d", flush=True)
 
 # Load queries
@@ -88,18 +82,13 @@ t1 = time.perf_counter()
 results = []
 latencies = []
 
-for q in queries:
+qvecs = emb.embed([q["text"] for q in queries])
+for qi, q in enumerate(queries):
     tq = time.perf_counter()
-    qvec = feature_hash_embed(q["text"], dim)
-
-    # Brute-force dot product (vectors are L2-normalised → cosine = dot)
-    scores = []
-    for i in range(num_vectors):
-        off = i * dim
-        dot = sum(qvec[d] * vectors[off + d] for d in range(dim))
-        scores.append((dot, i))
-    scores.sort(key=lambda x: x[0], reverse=True)
-    top = scores[:TOP_K]
+    # Brute-force dot product (vectors are L2-normalised -> cosine = dot)
+    dots = vectors @ qvecs[qi]
+    idxs = np.argsort(-dots)[:TOP_K]
+    top = [(float(dots[i]), int(i)) for i in idxs]
 
     lat = time.perf_counter() - tq
     latencies.append(lat)

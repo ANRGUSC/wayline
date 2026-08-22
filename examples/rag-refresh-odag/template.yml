@@ -4,7 +4,7 @@ metadata:
   name: rag-refresh
   namespace: wl-system
 spec:
-  description: "RAG KB refresh: ingest → chunk → embed → index → merge → eval → report"
+  description: "RAG KB refresh with a real ONNX embedding model: prepare-model (cached across runs) + ingest -> chunk -> embed -> index -> merge -> eval -> report"
   scheduler: heft
   profiling:
     enabled: true
@@ -22,6 +22,27 @@ spec:
       keepRuns: 3
       maxSizePerNode: "2Gi"
   tasks:
+    # ====================================================================
+    # Layer 0a — Prepare model (cross-run reuse via cacheKey)
+    # Materializes the ONNX MiniLM-L6-v2 model (~90MB) as a data object.
+    # After run 1 the controller binds this task to the previous run's
+    # installed copy: no re-materialization, and the scheduler places
+    # the embed/eval consumers near the cached bytes.
+    # ====================================================================
+
+    - name: prepare-model
+      image: 192.168.1.163:5000/wl-rag-model:latest
+      command: ["python", "task.py"]
+      dependencies: []
+      dataSize: "90MB"
+      runtime: 6
+      cacheKey: rag-minilm-l6-v2-onnx-v1
+      resources:
+        cpu: "300m"
+        memory: "512Mi"
+      constraints:
+        nodeNames: [anrg-3, anrg-4, anrg-5]
+
     # ====================================================================
     # Layer 0 — Ingest & Shard (data-local node)
     # Generates synthetic corpus, packs 4 shards into a single blob.
@@ -101,48 +122,48 @@ spec:
     - name: embed-shard-1
       image: 192.168.1.163:5000/wl-rag-embed:latest
       command: ["python", "task.py"]
-      dependencies: ["chunk-shard-1"]
-      dataSize: "5MB"
-      runtime: 20
+      dependencies: ["chunk-shard-1", "prepare-model"]
+      dataSize: "16MB"
+      runtime: 60
       resources:
         cpu: "500m"
-        memory: "256Mi"
+        memory: "1Gi"
       constraints:
         nodeNames: [anrg-6, anrg-7, anrg-8, anrg-9]
 
     - name: embed-shard-2
       image: 192.168.1.163:5000/wl-rag-embed:latest
       command: ["python", "task.py"]
-      dependencies: ["chunk-shard-2"]
-      dataSize: "5MB"
-      runtime: 20
+      dependencies: ["chunk-shard-2", "prepare-model"]
+      dataSize: "16MB"
+      runtime: 60
       resources:
         cpu: "500m"
-        memory: "256Mi"
+        memory: "1Gi"
       constraints:
         nodeNames: [anrg-6, anrg-7, anrg-8, anrg-9]
 
     - name: embed-shard-3
       image: 192.168.1.163:5000/wl-rag-embed:latest
       command: ["python", "task.py"]
-      dependencies: ["chunk-shard-3"]
-      dataSize: "5MB"
-      runtime: 20
+      dependencies: ["chunk-shard-3", "prepare-model"]
+      dataSize: "16MB"
+      runtime: 60
       resources:
         cpu: "500m"
-        memory: "256Mi"
+        memory: "1Gi"
       constraints:
         nodeNames: [anrg-6, anrg-7, anrg-8, anrg-9]
 
     - name: embed-shard-4
       image: 192.168.1.163:5000/wl-rag-embed:latest
       command: ["python", "task.py"]
-      dependencies: ["chunk-shard-4"]
-      dataSize: "5MB"
-      runtime: 20
+      dependencies: ["chunk-shard-4", "prepare-model"]
+      dataSize: "16MB"
+      runtime: 60
       resources:
         cpu: "500m"
-        memory: "256Mi"
+        memory: "1Gi"
       constraints:
         nodeNames: [anrg-6, anrg-7, anrg-8, anrg-9]
 
@@ -155,7 +176,7 @@ spec:
       image: 192.168.1.163:5000/wl-rag-index:latest
       command: ["python", "task.py"]
       dependencies: ["embed-shard-1"]
-      dataSize: "6MB"
+      dataSize: "16MB"
       runtime: 3
       resources:
         cpu: "300m"
@@ -165,7 +186,7 @@ spec:
       image: 192.168.1.163:5000/wl-rag-index:latest
       command: ["python", "task.py"]
       dependencies: ["embed-shard-2"]
-      dataSize: "6MB"
+      dataSize: "16MB"
       runtime: 3
       resources:
         cpu: "300m"
@@ -175,7 +196,7 @@ spec:
       image: 192.168.1.163:5000/wl-rag-index:latest
       command: ["python", "task.py"]
       dependencies: ["embed-shard-3"]
-      dataSize: "6MB"
+      dataSize: "16MB"
       runtime: 3
       resources:
         cpu: "300m"
@@ -185,7 +206,7 @@ spec:
       image: 192.168.1.163:5000/wl-rag-index:latest
       command: ["python", "task.py"]
       dependencies: ["embed-shard-4"]
-      dataSize: "6MB"
+      dataSize: "16MB"
       runtime: 3
       resources:
         cpu: "300m"
@@ -199,7 +220,7 @@ spec:
       image: 192.168.1.163:5000/wl-rag-merge:latest
       command: ["python", "task.py"]
       dependencies: ["build-index-1", "build-index-2", "build-index-3", "build-index-4"]
-      dataSize: "22MB"
+      dataSize: "64MB"
       runtime: 5
       resources:
         cpu: "300m"
@@ -214,12 +235,12 @@ spec:
     - name: eval-queries
       image: 192.168.1.163:5000/wl-rag-eval:latest
       command: ["python", "task.py"]
-      dependencies: ["merge-index"]
+      dependencies: ["merge-index", "prepare-model"]
       dataSize: "1MB"
       runtime: 15
       resources:
         cpu: "500m"
-        memory: "256Mi"
+        memory: "1Gi"
       constraints:
         nodeNames: [anrg-8, anrg-9]
 
