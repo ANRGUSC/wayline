@@ -1,0 +1,237 @@
+apiVersion: wl.io/v1
+kind: ODAGTemplate
+metadata:
+  name: wpf-heft-ckpt3
+  namespace: wl-system
+spec:
+  description: "Wide-pipeline-flex \u2014 HEFT strict (spreadEpsilon=0)."
+  scheduler: heft
+  schedulerConfig:
+    spreadEpsilon: 0
+  profiling:
+    enabled: true
+    warmupRuns: 0
+    minSamples: 2
+    emaAlpha: 0.7
+    maxSamples: 50
+    runtimeSource: profiler
+    bandwidthSource: external
+  retention:
+    maxRuns: 20
+    data:
+      policy: immediate
+  defaults:
+    runtime: 3
+    dataSize: 50MB
+  tasks:
+  - name: source
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: &id003
+    - python
+    - task.py
+    dependencies: []
+    runtime: 3
+    dataSize: 100MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+    constraints:
+      nodeNames:
+      - anrg-1
+  - name: extract
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: &id001
+    - python
+    - task.py
+    dependencies:
+    - store-source
+    runtime: 4
+    dataSize: 50MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+    constraints:
+      nodeNames:
+      - anrg-3
+      - anrg-4
+      - anrg-5
+  - name: scan
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - store-source
+    runtime: 4
+    dataSize: 50MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+    constraints:
+      nodeNames:
+      - anrg-3
+      - anrg-4
+      - anrg-5
+  - name: index
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - store-source
+    runtime: 4
+    dataSize: 50MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+    constraints:
+      nodeNames:
+      - anrg-3
+      - anrg-4
+      - anrg-5
+  - name: merge
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: &id002
+    - python
+    - task.py
+    dependencies:
+    - store-extract
+    - scan
+    - index
+    runtime: 3
+    dataSize: 100MB
+    resources:
+      cpu: 300m
+      memory: 256Mi
+    constraints:
+      nodeNames:
+      - anrg-6
+      - anrg-7
+      - anrg-8
+  - name: filter-a
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - store-merge
+    runtime: 3
+    dataSize: 30MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+    constraints:
+      nodeNames:
+      - anrg-6
+      - anrg-7
+      - anrg-8
+  - name: filter-b
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - store-merge
+    runtime: 3
+    dataSize: 30MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+    constraints:
+      nodeNames:
+      - anrg-6
+      - anrg-7
+      - anrg-8
+  - name: filter-c
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - store-merge
+    runtime: 3
+    dataSize: 30MB
+    resources:
+      cpu: 200m
+      memory: 128Mi
+    constraints:
+      nodeNames:
+      - anrg-6
+      - anrg-7
+      - anrg-8
+  - name: aggregate
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - filter-a
+    - filter-b
+    - filter-c
+    runtime: 2
+    dataSize: 10MB
+    resources:
+      cpu: 300m
+      memory: 256Mi
+    constraints:
+      nodeNames:
+      - anrg-6
+      - anrg-7
+      - anrg-8
+  - name: output
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - aggregate
+    runtime: 1
+    dataSize: '0'
+    resources:
+      cpu: 100m
+      memory: 64Mi
+    constraints:
+      nodeNames:
+      - anrg-9
+  - name: store-extract
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: *id001
+    dependencies:
+    - extract
+    dataSize: 50MB
+    runtime: 0
+    resources:
+      cpu: 100m
+      memory: 256Mi
+    constraints:
+      nodeNames:
+      - anrg-9
+    type: data
+  - name: store-merge
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: *id002
+    dependencies:
+    - merge
+    dataSize: 100MB
+    runtime: 0
+    resources:
+      cpu: 100m
+      memory: 256Mi
+    constraints:
+      nodeNames:
+      - anrg-9
+    type: data
+  - name: store-source
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: *id003
+    dependencies:
+    - source
+    dataSize: 100MB
+    runtime: 0
+    resources:
+      cpu: 100m
+      memory: 256Mi
+    constraints:
+      nodeNames:
+      - anrg-9
+    type: data
