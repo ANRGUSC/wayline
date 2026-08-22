@@ -71,9 +71,15 @@ done
 
 echo "=== E1C restoring shaped matrix $(date +%F' '%T) ==="
 "$SCHED/setup-tc-matrix.sh"
-sleep 5
+# The tc-setup pods pull alpine + apk add before applying; give each
+# node up to 3 minutes rather than racing a fixed sleep.
 for node in $NODES; do
-  if ! tc_state "$node" | grep -q htb; then
+  ok=""
+  for _ in $(seq 1 18); do
+    if tc_state "$node" | grep -q htb; then ok=1; break; fi
+    sleep 10
+  done
+  if [ -z "$ok" ]; then
     echo "RESTORE FAILED: no htb on $node. Fix before running shaped campaigns."
     exit 1
   fi
