@@ -1,0 +1,61 @@
+apiVersion: wl.io/v1
+kind: ODAGTemplate
+metadata:
+  name: e7b-far
+  namespace: wl-system
+spec:
+  description: 'E7b steering: copy seeded at anrg-6, consumer must choose {anrg-3, anrg-6} across an S-tier link.'
+  scheduler: heft
+  profiling:
+    enabled: true
+    warmupRuns: 0
+    minSamples: 2
+    emaAlpha: 0.7
+    runtimeSource: profiler
+    bandwidthSource: external
+  retention:
+    maxRuns: 30
+    data:
+      policy: keepLatest
+      keepRuns: 3
+  defaults:
+    runtime: 5
+    dataSize: 10MB
+  tasks:
+  - name: prep
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies: []
+    dataSize: 150MB
+    runtime: 20
+    cacheKey: e7b-dataset-far
+    constraints:
+      nodeNames:
+      - anrg-6
+  - name: consume
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - prep
+    dataSize: 1MB
+    runtime: 4
+    constraints:
+      nodeNames:
+      - anrg-3
+      - anrg-6
+  - name: report
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command:
+    - python
+    - task.py
+    dependencies:
+    - consume
+    dataSize: 1MB
+    runtime: 2
+    constraints:
+      nodeNames:
+      - anrg-9
