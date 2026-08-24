@@ -45,6 +45,7 @@ type realizationEntry struct {
 // reconcileGen dedupes concurrent reconciles per run: only the goroutine
 // holding the latest generation keeps converging.
 var reconcileGen sync.Map // key -> int64
+var lastSpecGen sync.Map  // key -> generation last reconciled
 
 func parseRealization(obj *unstructured.Unstructured) []realizationEntry {
 	items, found, _ := unstructured.NestedSlice(obj.Object, "spec", "realization")
@@ -140,6 +141,13 @@ func reconcileRealization(dynClient dynamic.Interface, client *kubernetes.Client
 	if len(entries) == 0 {
 		return
 	}
+	// Status patches also fire MODIFIED; only spec changes bump the
+	// object's generation, so reconcile once per generation.
+	specGen := obj.GetGeneration()
+	if g, ok := lastSpecGen.Load(key); ok && g.(int64) >= specGen {
+		return
+	}
+	lastSpecGen.Store(key, specGen)
 	gen := time.Now().UnixNano()
 	reconcileGen.Store(key, gen)
 
