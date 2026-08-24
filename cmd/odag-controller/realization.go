@@ -170,12 +170,13 @@ func reconcileRealization(dynClient dynamic.Interface, client *kubernetes.Client
 		}
 	}
 
+	posted := make(map[string]bool)
 	for attempt := 0; attempt < 120; attempt++ {
 		if g, _ := reconcileGen.Load(key); g != gen {
 			return // superseded by a newer revision
 		}
 		converged := reconcileOnce(key, odagName, entries, taskByName,
-			consumersOf, nodeMap)
+			consumersOf, nodeMap, posted)
 		writeObjectStatus(dynClient, namespace, odagName, entries, nodeMap)
 		if converged {
 			log.Printf("[realize] %s: realization converged", key)
@@ -188,9 +189,13 @@ func reconcileRealization(dynClient dynamic.Interface, client *kubernetes.Client
 
 // reconcileOnce performs one pass of actions; returns true when every
 // desired copy is installed and every evict target is gone.
+// posted remembers which (object, node) copies this reconcile generation
+// has already enqueued: re-POSTing would rewrite the durable transfer
+// entry back to Pending and restart the copy, so each target is enqueued
+// exactly once and then polled to readiness.
 func reconcileOnce(key, odagName string, entries []realizationEntry,
 	taskByName map[string]taskSpec, consumersOf map[string][]string,
-	nodeMap map[string]nodeInfo) bool {
+	nodeMap map[string]nodeInfo, posted map[string]bool) bool {
 
 	converged := true
 	for _, e := range entries {
@@ -247,6 +252,9 @@ func reconcileOnce(key, odagName string, entries []realizationEntry,
 				continue
 			}
 			converged = false
+			if posted[e.Object+"/"+n] {
+				continue // already enqueued; the agent is transferring
+			}
 			ni, ok := nodeMap[n]
 			if !ok || ni.ip == "" {
 				log.Printf("[realize] %s: %s: no agent for copy target %s", key, e.Object, n)
@@ -259,6 +267,7 @@ func reconcileOnce(key, odagName string, entries []realizationEntry,
 			if err := pushCopy(nodeMap[source].ip, odagName, e.Object, n, ni.ip); err != nil {
 				log.Printf("[realize] %s: %s: copy %s->%s: %v", key, e.Object, source, n, err)
 			} else {
+				posted[e.Object+"/"+n] = true
 				log.Printf("[realize] %s: %s: copy enqueued %s->%s", key, e.Object, source, n)
 			}
 		}
