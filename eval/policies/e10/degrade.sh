@@ -7,7 +7,7 @@
 set -uo pipefail
 MODE=${1:?usage: degrade.sh on|off}
 NS=wl-system
-if [ "$MODE" = on ]; then M=16mbit; S=16mbit; else M=100mbit; S=50mbit; fi
+if [ "$MODE" = on ]; then M=24mbit; S=24mbit; else M=100mbit; S=50mbit; fi
 POD=tc-degrade-$$
 kubectl run "$POD" --restart=Never --image=alpine -n "$NS" \
   --overrides='{"spec":{"nodeName":"anrg-3","hostNetwork":true,"containers":[{"name":"c","image":"alpine","command":["sh","-c","apk add -q iproute2 >/dev/null; IFACE=; for i in $(ls /sys/class/net); do tc qdisc show dev $i 2>/dev/null | grep -q htb && IFACE=$i; done; [ -n \"$IFACE\" ] || { echo no-htb-iface; exit 1; }; tc class change dev $IFACE parent 1: classid 1:20 htb rate '"$M"' ceil '"$M"' && tc class change dev $IFACE parent 1: classid 1:30 htb rate '"$S"' ceil '"$S"' && echo degrade-done $IFACE"],"securityContext":{"privileged":true}}]}}' \
