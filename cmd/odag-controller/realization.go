@@ -47,6 +47,32 @@ type realizationEntry struct {
 var reconcileGen sync.Map // key -> int64
 var lastSpecGen sync.Map  // key -> generation last reconciled
 
+// realizationCache holds the parsed spec.realization per run
+// ("namespace/odag" -> []realizationEntry), refreshed on every
+// processReadyTasks pass and every reconcile, so the dispatch path can
+// resolve serving-copy overrides without an API round-trip.
+var realizationCache sync.Map
+
+// nodeIPCache maps node name -> internal IP for every schedulable node,
+// refreshed whenever getNodeInfoMap runs. Lets the vertex path resolve
+// agents on nodes outside the run's assignment.
+var nodeIPCache sync.Map
+
+// servingOverride returns the servingCopy node for an object if a
+// revision names one, else "".
+func servingOverride(key, object string) string {
+	raw, ok := realizationCache.Load(key)
+	if !ok {
+		return ""
+	}
+	for _, e := range raw.([]realizationEntry) {
+		if e.Object == object {
+			return e.ServingCopy
+		}
+	}
+	return ""
+}
+
 func parseRealization(obj *unstructured.Unstructured) []realizationEntry {
 	items, found, _ := unstructured.NestedSlice(obj.Object, "spec", "realization")
 	if !found {
@@ -148,6 +174,7 @@ func reconcileRealization(dynClient dynamic.Interface, client *kubernetes.Client
 		return
 	}
 	lastSpecGen.Store(key, specGen)
+	realizationCache.Store(key, entries)
 	gen := time.Now().UnixNano()
 	reconcileGen.Store(key, gen)
 

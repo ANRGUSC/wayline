@@ -62,13 +62,41 @@ func dataVertexExecuted(ni nodeInfo, namespace, odagName, taskName string) bool 
 	return false
 }
 
-// executeDataVertex realizes a data vertex on its assigned node: alias the
+// vertexNode resolves where a data vertex executes: its assigned node,
+// unless a runtime revision names a servingCopy for its input object
+// whose bytes are installed there — then the vertex serves from that
+// node instead. This is the serving-point rebinding of the revision
+// interface: the template binds the initial serving node, a policy
+// patch rebinds it, and no pod or compute placement changes either way.
+func vertexNode(namespace, odagName string, task taskSpec,
+	assignMap map[string]nodeInfo) nodeInfo {
+	assigned := assignMap[task.Name]
+	if len(task.Dependencies) != 1 {
+		return assigned
+	}
+	over := servingOverride(namespace+"/"+odagName, task.Dependencies[0])
+	if over == "" || over == assigned.name {
+		return assigned
+	}
+	ipRaw, ok := nodeIPCache.Load(over)
+	if !ok {
+		return assigned
+	}
+	ip := ipRaw.(string)
+	if !isDataReady(ip, odagName, task.Dependencies[0]) {
+		return assigned // override bytes not (yet) there; serve as assigned
+	}
+	return nodeInfo{name: over, ip: ip}
+}
+
+// executeDataVertex realizes a data vertex on its serving node: alias the
 // dependency's (already delivered) payload under the vertex's name, then
 // push it to every remote successor. Both agent operations are idempotent,
 // so a partial failure is safe to retry on the next reconcile.
 func executeDataVertex(namespace, odagName string, task taskSpec,
 	assignMap map[string]nodeInfo, allTasks []taskSpec) error {
-	return realizeVertex(namespace, odagName, task,
+	ni := vertexNode(namespace, odagName, task, assignMap)
+	return realizeVertexOn(namespace, odagName, task, ni,
 		odagName+"/"+task.Dependencies[0], assignMap, allTasks)
 }
 
@@ -78,8 +106,13 @@ func executeDataVertex(namespace, odagName string, task taskSpec,
 // it to every remote successor. Idempotent end to end.
 func realizeVertex(namespace, odagName string, task taskSpec,
 	aliasFrom string, assignMap map[string]nodeInfo, allTasks []taskSpec) error {
+	return realizeVertexOn(namespace, odagName, task, assignMap[task.Name],
+		aliasFrom, assignMap, allTasks)
+}
 
-	ni := assignMap[task.Name]
+func realizeVertexOn(namespace, odagName string, task taskSpec, ni nodeInfo,
+	aliasFrom string, assignMap map[string]nodeInfo, allTasks []taskSpec) error {
+
 	if ni.ip == "" {
 		return fmt.Errorf("no data-agent for node %q", ni.name)
 	}
@@ -152,4 +185,14 @@ func successorCounts(tasks []taskSpec) map[string]int {
 		}
 	}
 	return out
+}
+
+// taskByNameIn finds a task spec by name.
+func taskByNameIn(tasks []taskSpec, name string) (taskSpec, bool) {
+	for _, t := range tasks {
+		if t.Name == name {
+			return t, true
+		}
+	}
+	return taskSpec{}, false
 }

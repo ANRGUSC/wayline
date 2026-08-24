@@ -522,6 +522,7 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 
 	// Extract tasks from the passed ODAG object (no extra API call needed).
 	tasks := extractTasks(odagObj)
+	realizationCache.Store(key, parseRealization(odagObj))
 
 	// Collect pods for this ODAG from the in-memory cache (no API call).
 	// Filter by OwnerReferences UID, not just the ODAG name label — when an
@@ -581,8 +582,12 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		if existingPods[task.Name] {
 			continue
 		}
+		vertexNi := assignMap[task.Name]
+		if vertex[task.Name] {
+			vertexNi = vertexNode(namespace, odagName, task, assignMap)
+		}
 		if (vertex[task.Name] || cached[task.Name] != (cacheEntry{})) &&
-			dataVertexExecuted(assignMap[task.Name], namespace, odagName, task.Name) {
+			dataVertexExecuted(vertexNi, namespace, odagName, task.Name) {
 			continue
 		}
 		// A cache-satisfied task waits for nothing: its payload already
@@ -608,8 +613,15 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 			}
 			if vertex[dep] || cached[dep] != (cacheEntry{}) {
 				// A data-vertex or cache-satisfied dep has no pod; its
-				// execution marker is its installed output on ITS OWN node.
-				if !dataVertexExecuted(assignMap[dep], namespace, odagName, dep) {
+				// execution marker is its installed output on its serving
+				// node (assigned, unless a revision rebound it).
+				depNi := assignMap[dep]
+				if vertex[dep] {
+					if dt, ok := taskByNameIn(tasks, dep); ok {
+						depNi = vertexNode(namespace, odagName, dt, assignMap)
+					}
+				}
+				if !dataVertexExecuted(depNi, namespace, odagName, dep) {
 					allDepsDone = false
 					break
 				}
@@ -892,6 +904,9 @@ func getNodeInfoMap(client *kubernetes.Clientset) (map[string]nodeInfo, error) {
 				ip = addr.Address
 				break
 			}
+		}
+		if ip != "" {
+			nodeIPCache.Store(n.Name, ip)
 		}
 		// Read allocatable resources for resource-aware scheduling.
 		cpuMillis := int64(0)
