@@ -244,10 +244,15 @@ func watchODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
 			switch string(event.Type) {
 			case "ADDED":
 				go deployODAG(dynClient, client, obj)
+			case "MODIFIED":
+				// Runtime revision: a policy patched spec.realization on
+				// the live run. Converge the data plane toward it.
+				go reconcileRealization(dynClient, client, obj)
 			case "DELETED":
 				key := obj.GetNamespace() + "/" + obj.GetName()
 				processedODAGs.Delete(key)
 				assignmentCache.Delete(key)
+				reconcileGen.Delete(key)
 			}
 		}
 		log.Println("[odag-ctrl] ODAG watcher closed; reconnecting in 2s")
