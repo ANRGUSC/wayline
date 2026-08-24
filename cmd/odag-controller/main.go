@@ -591,6 +591,16 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		childNi := assignMap[task.Name]
 		allDepsDone := true
 		for _, dep := range task.Dependencies {
+			// Any-valid-copy gate: a dependency names an OBJECT, and any
+			// installed copy on this task's node satisfies it, regardless of
+			// how it got here (producer push, alias, or a policy revision
+			// serving from another copy). Installation is atomic and
+			// digest-guarded, so bytes-present is sufficient. Only when the
+			// bytes are absent do we fall back to requiring the producer's
+			// own execution path below.
+			if childNi.ip != "" && isDataReady(childNi.ip, odagName, dep) {
+				continue
+			}
 			if vertex[dep] || cached[dep] != (cacheEntry{}) {
 				// A data-vertex or cache-satisfied dep has no pod; its
 				// execution marker is its installed output on ITS OWN node.

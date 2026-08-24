@@ -1570,24 +1570,34 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		parts, status, msg := parsePathComponents(r.URL.Path, "/data/", 1)
-		if status != http.StatusOK {
-			http.Error(w, msg, status)
+		// DELETE /data/<odag> removes a whole run; DELETE /data/<odag>/<task>
+		// evicts one object copy (the revision reconciler's evict primitive).
+		// Both are idempotent.
+		rel := strings.TrimPrefix(r.URL.Path, "/data/")
+		parts := strings.Split(strings.Trim(rel, "/"), "/")
+		if len(parts) < 1 || len(parts) > 2 || parts[0] == "" {
+			http.Error(w, "expected /data/<odag> or /data/<odag>/<task>", http.StatusBadRequest)
 			return
 		}
-		odag := parts[0]
-		target := filepath.Join(dataDir, odag)
+		for _, p := range parts {
+			if err := validName(p); err != nil {
+				http.Error(w, fmt.Sprintf("path component %q invalid: %v", p, err), http.StatusBadRequest)
+				return
+			}
+		}
+		label := strings.Join(parts, "/")
+		target := filepath.Join(dataDir, filepath.Join(parts...))
 		if _, err := os.Stat(target); os.IsNotExist(err) {
 			w.WriteHeader(http.StatusOK) // idempotent
-			log.Printf("[data-agent/%s] DELETE %s: not found (already clean)", nodeName, odag)
+			log.Printf("[data-agent/%s] DELETE %s: not found (already clean)", nodeName, label)
 			return
 		}
 		if err := os.RemoveAll(target); err != nil {
 			http.Error(w, "failed to remove", http.StatusInternalServerError)
-			log.Printf("[data-agent/%s] DELETE %s: %v", nodeName, odag, err)
+			log.Printf("[data-agent/%s] DELETE %s: %v", nodeName, label, err)
 			return
 		}
-		log.Printf("[data-agent/%s] DELETE %s: removed", nodeName, odag)
+		log.Printf("[data-agent/%s] DELETE %s: removed", nodeName, label)
 		w.WriteHeader(http.StatusOK)
 	})
 
