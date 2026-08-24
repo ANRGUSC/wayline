@@ -80,13 +80,15 @@ func vertexNode(namespace, odagName string, task taskSpec,
 	}
 	ipRaw, ok := nodeIPCache.Load(over)
 	if !ok {
+		log.Printf("[odag-ctrl] vertex %s/%s: servingCopy %q unknown; serving as assigned",
+			odagName, task.Name, over)
 		return assigned
 	}
-	ip := ipRaw.(string)
-	if !isDataReady(ip, odagName, task.Dependencies[0]) {
-		return assigned // override bytes not (yet) there; serve as assigned
-	}
-	return nodeInfo{name: over, ip: ip}
+	// A declared override BINDS the serving point even before its bytes
+	// arrive: executing from the assigned node anyway would race the
+	// migration onto the very path the policy is avoiding. Execution
+	// simply retries until the reconciler lands the copy.
+	return nodeInfo{name: over, ip: ipRaw.(string)}
 }
 
 // executeDataVertex realizes a data vertex on its serving node: alias the
