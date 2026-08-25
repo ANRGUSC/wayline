@@ -31,6 +31,13 @@ import (
 // against re-issuing HTTP calls every reconcile tick.
 var dataVertexDone sync.Map
 
+// vertexInFlight guards concurrent dispatch passes (pod events fire
+// processReadyTasks in parallel) from executing the same vertex more
+// than once in the window before the done-marker lands: duplicate
+// executions are harmless for correctness (idempotent alias + install)
+// but issue duplicate pushes that multiply bytes on the wire.
+var vertexInFlight sync.Map
+
 // isDataVertex reports whether a task is a well-formed data vertex given
 // the number of successors it has in this DAG. Malformed declarations are
 // logged once per reconcile and executed as ordinary pods.
@@ -129,6 +136,11 @@ func realizeVertexOn(namespace, odagName string, task taskSpec, ni nodeInfo,
 	if ni.ip == "" {
 		return fmt.Errorf("no data-agent for node %q", ni.name)
 	}
+	flightKey := namespace + "/" + odagName + "/" + task.Name + "@" + ni.name
+	if _, loaded := vertexInFlight.LoadOrStore(flightKey, true); loaded {
+		return nil // another dispatch pass is already executing this vertex
+	}
+	defer vertexInFlight.Delete(flightKey)
 
 	// 1. Materialize <odag>/<task> from aliasFrom on this node.
 	aliasBody, _ := json.Marshal(map[string]string{
