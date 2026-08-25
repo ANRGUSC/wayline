@@ -1,0 +1,77 @@
+apiVersion: wl.io/v1
+kind: ODAGTemplate
+metadata:
+  name: e1
+  namespace: wl-system
+spec:
+  description: 'E1 source-uplink degradation: serving-copy migration under link degradation.'
+  scheduler: heft
+  profiling:
+    enabled: true
+    warmupRuns: 0
+    minSamples: 2
+    emaAlpha: 0.7
+    runtimeSource: profiler
+    bandwidthSource: external
+  retention:
+    maxRuns: 30
+    data:
+      policy: keepLatest
+      keepRuns: 2
+  defaults:
+    runtime: 5
+    dataSize: 1MB
+  tasks:
+  - name: produce
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: [python, task.py]
+    dependencies: []
+    dataSize: 300MB
+    runtime: 30
+    constraints:
+      nodeNames: [anrg-3]
+  # The serving point: producer's object re-emitted from a chosen node.
+  # Initially co-located with the producer (local alias, then fan-out).
+  # The adaptive arm's policy rebinds this vertex's serving node at
+  # runtime by patching spec.realization on the live run.
+  - name: serve
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: [python, task.py]
+    dependencies: [produce]
+    dataSize: 300MB
+    runtime: 0
+    type: data
+    constraints:
+      nodeNames: [anrg-3]
+  - name: consume-1
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: [python, task.py]
+    dependencies: [serve]
+    dataSize: 1MB
+    runtime: 4
+    constraints:
+      nodeNames: [anrg-6]
+  - name: consume-2
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: [python, task.py]
+    dependencies: [serve]
+    dataSize: 1MB
+    runtime: 4
+    constraints:
+      nodeNames: [anrg-7]
+  - name: consume-3
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: [python, task.py]
+    dependencies: [serve]
+    dataSize: 1MB
+    runtime: 4
+    constraints:
+      nodeNames: [anrg-8]
+  - name: report
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: [python, task.py]
+    dependencies: [consume-1, consume-2, consume-3]
+    dataSize: 1MB
+    runtime: 2
+    constraints:
+      nodeNames: [anrg-9]
