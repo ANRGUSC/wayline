@@ -41,6 +41,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -55,6 +56,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -88,10 +90,26 @@ const (
 	//
 	// pushMinThroughput is set conservatively to 5 MB/s (~40 Mbps) — well
 	// below the slowest link in the matrix (50 Mbps minus protocol overhead).
-	pushTimeoutBase     = 60 * time.Second
-	pushTimeoutSafety   = 30 * time.Second
-	pushMinThroughputBs = 5 * 1024 * 1024 // 5 MB/s
 )
+
+// Transport-deadline parameters, overridable per deployment so the
+// contract is an operator policy, not a compile-time constant:
+//   WL_PUSH_TIMEOUT_BASE_S, WL_PUSH_TIMEOUT_SAFETY_S,
+//   WL_PUSH_MIN_THROUGHPUT_KBS.
+var (
+	pushTimeoutBase     = time.Duration(envInt("WL_PUSH_TIMEOUT_BASE_S", 60)) * time.Second
+	pushTimeoutSafety   = time.Duration(envInt("WL_PUSH_TIMEOUT_SAFETY_S", 30)) * time.Second
+	pushMinThroughputBs = int64(envInt("WL_PUSH_MIN_THROUGHPUT_KBS", 5*1024)) * 1024
+)
+
+func envInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
 
 // pushTimeoutFor returns the HTTP client timeout for one PUT of `size`
 // bytes. Replaces the old fixed 120s constant (post-experiment-todos #3).
@@ -307,6 +325,7 @@ var validTransferStates = map[string]bool{
 	"Transferring": true, // pushToNode is running
 	"ReadyRemote":  true, // push succeeded; consumer's node has the data
 	"Failed":       true, // push failed after retries
+	"Canceled":     true, // revoked by a realization revision; never resumed
 }
 
 // Per-(producer, consumer) transfer paths. All live under the producer's
@@ -335,6 +354,18 @@ type transferEntry struct {
 	Retries   int     `json:"retries"`
 	LastError string  `json:"lastError,omitempty"`
 	UpdatedAt float64 `json:"updatedAt"` // seconds since epoch
+}
+
+// Transfer revocation: a revision that rebinds an object's serving point
+// cancels the old node's outbound transfers. canceledTransfers marks
+// (rel, consumer) pairs revoked; inflightCancels holds the context cancel
+// for pushes currently on the wire.
+var canceledTransfers sync.Map // "rel/consumer" -> true
+var inflightCancels sync.Map   // "rel/consumer" -> context.CancelFunc
+
+func transferCanceled(rel, consumer string) bool {
+	_, ok := canceledTransfers.Load(rel + "/" + consumer)
+	return ok
 }
 
 // setTransferState writes the per-consumer transfer state file atomically and
@@ -685,10 +716,21 @@ func resumeTransfer(nodeName, odag, task, rel, consumer string, entry transferEn
 		setTransferState(rel, consumer, "Failed")
 		return
 	}
+	if transferCanceled(rel, consumer) {
+		setTransferState(rel, consumer, "Canceled")
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	inflightCancels.Store(rel+"/"+consumer, cancel)
+	defer inflightCancels.Delete(rel + "/" + consumer)
 	setTransferState(rel, consumer, "Transferring")
 	start := time.Now()
-	err = pushToNode(odag, task, entry.Host, localFile, contentDigest, size)
+	err = pushToNode(ctx, odag, task, entry.Host, localFile, contentDigest, size)
 	end := time.Now()
+	if transferCanceled(rel, consumer) || errors.Is(err, context.Canceled) {
+		setTransferState(rel, consumer, "Canceled")
+		return
+	}
 	if err != nil {
 		log.Printf("[data-agent/%s] recover: %s/%s -> %s FAILED: %v", nodeName, odag, task, consumer, err)
 		writeTransferEntry(rel, consumer, transferEntry{
@@ -818,7 +860,7 @@ func sha256OfFile(path string) (string, int64, error) {
 // integrity digest and the canonical (uncompressed) size so the receiver
 // can verify end-to-end after optional gzip decoding. On retry the file is
 // reopened.
-func pushToNode(odag, task, host, localFile, contentDigest string, size int64) error {
+func pushToNode(ctx context.Context, odag, task, host, localFile, contentDigest string, size int64) error {
 	metricPushAttempts.Add(1)
 	url := fmt.Sprintf("http://%s:%d/%s/%s/output", host, dataAgentPort, odag, task)
 	client := &http.Client{Timeout: pushTimeoutFor(size)}
@@ -854,6 +896,7 @@ func pushToNode(odag, task, host, localFile, contentDigest string, size int64) e
 			setLen = false
 		}
 		req, _ := http.NewRequest(http.MethodPut, url, body)
+		req = req.WithContext(ctx)
 		if setLen {
 			req.ContentLength = size
 		}
@@ -886,6 +929,9 @@ func pushToNode(odag, task, host, localFile, contentDigest string, size int64) e
 		} else {
 			resp.Body.Close()
 			log.Printf("[data-agent] push to %s attempt %d/%d: status %d", host, attempt, pushRetries, resp.StatusCode)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		if attempt < pushRetries {
 			time.Sleep(pushRetryDelay)
@@ -1235,12 +1281,24 @@ func main() {
 					defer wg.Done()
 					acquirePushSlot()
 					defer releasePushSlot()
+					if transferCanceled(rel, succ.Name) {
+						setTransferState(rel, succ.Name, "Canceled")
+						return
+					}
+					ctx, cancel := context.WithCancel(context.Background())
+					inflightCancels.Store(rel+"/"+succ.Name, cancel)
+					defer inflightCancels.Delete(rel + "/" + succ.Name)
 					log.Printf("[data-agent/%s] PUSH %s/%s -> %s (%s)", nodeName, odag, task, succ.Name, succ.Host)
 					setTransferState(rel, succ.Name, "Transferring")
 					start := time.Now()
-					err := pushToNode(odag, task, succ.Host, localFile, contentDigest, size)
+					err := pushToNode(ctx, odag, task, succ.Host, localFile, contentDigest, size)
 					end := time.Now()
 					ok := err == nil
+					if transferCanceled(rel, succ.Name) || errors.Is(err, context.Canceled) {
+						log.Printf("[data-agent/%s] PUSH %s/%s -> %s CANCELED (revoked)", nodeName, odag, task, succ.Name)
+						setTransferState(rel, succ.Name, "Canceled")
+						return
+					}
 					if err != nil {
 						log.Printf("[data-agent/%s] PUSH %s/%s -> %s FAILED: %v", nodeName, odag, task, succ.Name, err)
 						writeTransferEntry(rel, succ.Name, transferEntry{
@@ -1274,6 +1332,52 @@ func main() {
 	})
 
 	// GET /bytes/<odag>/<task> — query actual output bytes for a task
+	// POST /cancel/<odag>/<task> — revoke every outbound transfer of the
+	// object: queued entries are marked Canceled (never resumed), in-flight
+	// pushes have their contexts canceled. Idempotent. Used by the
+	// controller when a realization revision rebinds an object's serving
+	// point away from this node.
+	http.HandleFunc("/cancel/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		parts, status, msg := parsePathComponents(r.URL.Path, "/cancel/", 2)
+		if status != http.StatusOK {
+			http.Error(w, msg, status)
+			return
+		}
+		odag, task := parts[0], parts[1]
+		rel := odag + "/" + task
+		n := 0
+		transfersPath := transfersDir(rel)
+		if entries, err := os.ReadDir(transfersPath); err == nil {
+			for _, se := range entries {
+				if !strings.HasSuffix(se.Name(), ".state") {
+					continue
+				}
+				consumer := strings.TrimSuffix(se.Name(), ".state")
+				stateBytes, err := os.ReadFile(filepath.Join(transfersPath, se.Name()))
+				if err != nil {
+					continue
+				}
+				state := strings.TrimSpace(string(stateBytes))
+				if state != "Pending" && state != "Transferring" {
+					continue
+				}
+				canceledTransfers.Store(rel+"/"+consumer, true)
+				if c, ok := inflightCancels.Load(rel + "/" + consumer); ok {
+					c.(context.CancelFunc)()
+				}
+				setTransferState(rel, consumer, "Canceled")
+				n++
+			}
+		}
+		log.Printf("[data-agent/%s] CANCEL %s: %d transfer(s) revoked", nodeName, rel, n)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "{\"canceled\": %d}", n)
+	})
+
 	http.HandleFunc("/bytes/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

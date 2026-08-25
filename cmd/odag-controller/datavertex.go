@@ -51,7 +51,7 @@ func isDataVertex(t taskSpec, successorCount int) bool {
 // own node. Fast path is the in-memory guard; the agent's .wl-ready marker
 // is checked so execution state survives a controller restart.
 func dataVertexExecuted(ni nodeInfo, namespace, odagName, taskName string) bool {
-	key := namespace + "/" + odagName + "/" + taskName
+	key := namespace + "/" + odagName + "/" + taskName + "@" + ni.name
 	if _, ok := dataVertexDone.Load(key); ok {
 		return true
 	}
@@ -98,6 +98,17 @@ func vertexNode(namespace, odagName string, task taskSpec,
 func executeDataVertex(namespace, odagName string, task taskSpec,
 	assignMap map[string]nodeInfo, allTasks []taskSpec) error {
 	ni := vertexNode(namespace, odagName, task, assignMap)
+	assigned := assignMap[task.Name]
+	if ni.name != assigned.name && assigned.ip != "" {
+		// The serving point moved: revoke the old node's outbound
+		// transfers of this object so the revised realization does not
+		// compete with the flows it replaces. Idempotent; best-effort.
+		cancelURL := fmt.Sprintf("http://%s:%d/cancel/%s/%s",
+			assigned.ip, dataAgentPort, odagName, task.Name)
+		if resp, err := httpClient.Post(cancelURL, "application/json", nil); err == nil {
+			resp.Body.Close()
+		}
+	}
 	return realizeVertexOn(namespace, odagName, task, ni,
 		odagName+"/"+task.Dependencies[0], assignMap, allTasks)
 }
@@ -171,7 +182,7 @@ func realizeVertexOn(namespace, odagName string, task taskSpec, ni nodeInfo,
 		}
 	}
 
-	dataVertexDone.Store(namespace+"/"+odagName+"/"+task.Name, true)
+	dataVertexDone.Store(namespace+"/"+odagName+"/"+task.Name+"@"+ni.name, true)
 	log.Printf("[odag-ctrl] data vertex %s/%s executed on %s "+
 		"(alias %s, %d remote successor(s), no pod)",
 		odagName, task.Name, ni.name, aliasFrom, len(remote))
