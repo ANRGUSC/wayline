@@ -13,10 +13,14 @@ T_DEG=${T_DEG:-15}
 RES=${RES:-$HOME/e10-results}
 mkdir -p "$RES"
 
-# Shaped-network guard.
-q=$(kubectl run tc-check --rm -i --restart=Never -n "$NS" --image=alpine \
-    --overrides='{"spec":{"nodeName":"anrg-3","hostNetwork":true,"containers":[{"name":"tc-check","image":"alpine","command":["sh","-c","apk add -q iproute2 >/dev/null && tc qdisc show"],"securityContext":{"privileged":true}}]}}' \
-    2>/dev/null)
+# Shaped-network guard (wait+logs; kubectl run -i attach output is racy).
+POD=tc-check-$$
+kubectl run "$POD" --restart=Never -n "$NS" --image=alpine \
+  --overrides='{"spec":{"nodeName":"anrg-3","hostNetwork":true,"containers":[{"name":"c","image":"alpine","command":["sh","-c","apk add -q iproute2 >/dev/null && tc qdisc show"],"securityContext":{"privileged":true}}]}}' \
+  >/dev/null 2>&1
+kubectl -n "$NS" wait "pod/$POD" --for=jsonpath='{.status.phase}'=Succeeded --timeout=90s >/dev/null 2>&1
+q=$(kubectl -n "$NS" logs "$POD" 2>/dev/null)
+kubectl -n "$NS" delete pod "$POD" --ignore-not-found >/dev/null 2>&1
 echo "$q" | grep -q htb || { echo "ABORT: network is not shaped."; exit 1; }
 
 kubectl apply -f e10.yml >/dev/null
