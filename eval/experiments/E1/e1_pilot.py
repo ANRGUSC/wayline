@@ -107,7 +107,7 @@ def cap_on(iface, mbit):
            f"tc class add dev {iface} parent 1: classid 1:10 htb "
            f"rate {mbit}mbit ceil {mbit}mbit && {filters}")
     out = shaper(f"tc class show dev {iface}").stdout
-    m = re.search(r"1:10 htb.*?rate (\S+)", out)
+    m = re.search(r"htb 1:10.*?rate (\S+)", out)
     return m.group(1) if m else "MISSING"
 
 
