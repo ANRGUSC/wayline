@@ -1,0 +1,138 @@
+{
+    "apiVersion": "wl.io/v1",
+    "kind": "ODAG",
+    "metadata": {
+        "creationTimestamp": "2026-08-26T14:29:32Z",
+        "generateName": "e2relay-run-",
+        "generation": 1,
+        "labels": {
+            "wl.io/run": "58",
+            "wl.io/template": "e2relay"
+        },
+        "name": "e2relay-run-mbhnp",
+        "namespace": "wl-system",
+        "resourceVersion": "54337413",
+        "uid": "e16e1ec4-5420-4449-bc67-c9e2de54dac6"
+    },
+    "spec": {
+        "scheduler": "heft",
+        "tasks": [
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-3"
+                    ]
+                },
+                "dataSize": "300MB",
+                "dependencies": [],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "produce",
+                "runtime": 30
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-8"
+                    ]
+                },
+                "dataSize": "1MB",
+                "dependencies": [
+                    "produce"
+                ],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "consume",
+                "runtime": 4
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-9"
+                    ]
+                },
+                "dataSize": "1MB",
+                "dependencies": [
+                    "consume"
+                ],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "report",
+                "runtime": 2
+            }
+        ]
+    },
+    "status": {
+        "message": "",
+        "phase": "Running",
+        "predictedNetworkFlows": [
+            {
+                "dataSize": 300000000,
+                "dstNode": "anrg-8",
+                "end": 56.87186954458267,
+                "fromTask": "produce",
+                "srcNode": "anrg-3",
+                "start": 32.87186954458267,
+                "toTask": "consume"
+            },
+            {
+                "dataSize": 1000000,
+                "dstNode": "anrg-9",
+                "end": 61.95187942120213,
+                "fromTask": "consume",
+                "srcNode": "anrg-8",
+                "start": 61.87187942120213,
+                "toTask": "report"
+            }
+        ],
+        "predictedTasks": [
+            {
+                "estEnd": 32.87186954458267,
+                "estStart": 0,
+                "name": "produce",
+                "node": "anrg-3"
+            },
+            {
+                "estEnd": 61.87187942120213,
+                "estStart": 56.87186954458267,
+                "name": "consume",
+                "node": "anrg-8"
+            },
+            {
+                "estEnd": 64.32954934616535,
+                "estStart": 61.95187942120212,
+                "name": "report",
+                "node": "anrg-9"
+            }
+        ],
+        "startTime": "2026-08-26T14:29:32.603825221Z",
+        "tasks": [
+            {
+                "completionTime": "2026-08-26T14:30:07Z",
+                "computeSeconds": 30.1120183467865,
+                "createdTime": "2026-08-26T14:29:32Z",
+                "dataSize": "300000000",
+                "handoffSeconds": 4.048194646835327,
+                "inputReadSeconds": 0,
+                "name": "produce",
+                "node": "anrg-3",
+                "phase": "Succeeded",
+                "podName": "e2relay-run-mbhnp-produce",
+                "startTime": "2026-08-26T14:29:32Z",
+                "startupSeconds": 0,
+                "state": "ComputeDone",
+                "taskCloseTime": "2026-08-26T14:30:07.48669219Z",
+                "taskStartTime": "2026-08-26T14:29:33.297086715Z"
+            }
+        ]
+    }
+}
