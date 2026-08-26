@@ -1,0 +1,56 @@
+apiVersion: wl.io/v1
+kind: ODAGTemplate
+metadata:
+  name: named-outputs
+  namespace: wl-system
+spec:
+  description: 'Named outputs: one computation, three independently realizable objects.'
+  scheduler: heft
+  retention:
+    maxRuns: 5
+    data:
+      policy: keepLatest
+      keepRuns: 2
+  defaults:
+    runtime: 3
+    dataSize: 1MB
+  tasks:
+  - name: produce
+    image: 192.168.1.163:5000/wl-named-outputs:latest
+    command: [python, task.py]
+    dependencies: []
+    runtime: 4
+    outputs:
+    - name: alert
+      dataSize: 1KB
+    - name: features
+      dataSize: 50MB
+    constraints:
+      nodeNames: [anrg-3]
+  - name: actuator
+    image: 192.168.1.163:5000/wl-named-outputs:latest
+    command: [python, task.py]
+    dependencies: [produce]
+    inputs:
+    - producer: produce
+      object: alert
+    runtime: 2
+    constraints:
+      nodeNames: [anrg-6]
+  - name: analyzer
+    image: 192.168.1.163:5000/wl-named-outputs:latest
+    command: [python, task.py]
+    dependencies: [produce]
+    inputs:
+    - producer: produce
+      object: features
+    runtime: 2
+    constraints:
+      nodeNames: [anrg-8]
+  - name: report
+    image: 192.168.1.163:5000/wl-named-outputs:latest
+    command: [python, task.py]
+    dependencies: [actuator, analyzer]
+    runtime: 1
+    constraints:
+      nodeNames: [anrg-9]
