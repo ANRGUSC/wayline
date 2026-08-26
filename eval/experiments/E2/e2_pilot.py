@@ -145,7 +145,7 @@ def run_one(idx, arm, rep, wcsv, f):
             print(f"[e2] #{idx} {arm}/{rep}: INIT NOT VERIFIED, run skipped",
                   flush=True)
             wcsv.writerow([idx, arm, rep, "", "InfraFail-init", "", "",
-                           "", "", "", "", "", "", "", "", "", 0])
+                           "", "", "", "", "", "", "", "", "", 0, "", ""])
             f.flush()
             return
     else:
@@ -240,6 +240,9 @@ def run_one(idx, arm, rep, wcsv, f):
     b78 = total(fl7, "anrg-8", True)
     a37, a38 = total(fl3, "anrg-7", False), total(fl3, "anrg-8", False)
     a78 = total(fl7, "anrg-8", False)
+    allfl = fl3 + fl7
+    ok_flows = sum(1 for x in allfl if x.get("ok", x.get("Ok", False)))
+    failed_flows = len(allfl) - ok_flows
     dg = digest_map(run)
     dg_ok = "ok" if len(set(dg.values())) == 1 and dg else f"vals={len(set(dg.values()))}"
     open(f"{RES}/odag-{run}.json", "w").write(
@@ -254,7 +257,8 @@ def run_one(idx, arm, rep, wcsv, f):
     wcsv.writerow([idx, arm, rep, run, ph, mk,
                    round(t0 - t_start, 1) if t0 else "",
                    b37, b38, b78, a37, a38, a78,
-                   dg_ok, relay_pods, placements, len(events)])
+                   dg_ok, relay_pods, placements, len(events),
+                   ok_flows, failed_flows])
     f.flush()
     print(f"[e2] #{idx} {arm} rep={rep}: {ph} makespan={mk}s "
           f"delivered 3->7={b37} 3->8={b38} 7->8={b78} | "
@@ -286,7 +290,8 @@ def main():
                         "t0_rel_s", "delivered_3_7", "delivered_3_8",
                         "delivered_7_8", "attempted_3_7", "attempted_3_8",
                         "attempted_7_8", "digest", "relay_pods",
-                        "placements", "n_events"])
+                        "placements", "n_events", "ok_flows",
+                        "failed_flows"])
             idx = 1
             for rep in range(1, REPS + 1):
                 for arm in ("clean-direct", "fixed-direct", "static-relay",
