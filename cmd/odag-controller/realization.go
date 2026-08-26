@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -234,7 +235,13 @@ func reconcileOnce(key, odagName string, entries []realizationEntry,
 
 	converged := true
 	for _, e := range entries {
-		if _, ok := taskByName[e.Object]; !ok {
+		// e.Object is a producing task, or "task.output" for a named
+		// output; either way the key is used verbatim on the data plane.
+		producer := e.Object
+		if i := strings.IndexByte(producer, '.'); i > 0 {
+			producer = producer[:i]
+		}
+		if _, ok := taskByName[producer]; !ok {
 			log.Printf("[realize] %s: unknown object %q (skipped)", key, e.Object)
 			continue
 		}
@@ -319,7 +326,7 @@ func reconcileOnce(key, odagName string, entries []realizationEntry,
 					others++
 				}
 			}
-			if others == 0 && len(consumersOf[e.Object]) > 0 {
+			if others == 0 && len(consumersOf[producer]) > 0 {
 				log.Printf("[realize] %s: %s: refusing to evict last copy on %s", key, e.Object, n)
 				converged = false
 				continue

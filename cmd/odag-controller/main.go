@@ -601,15 +601,24 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		childNi := assignMap[task.Name]
 		allDepsDone := true
 		for _, dep := range task.Dependencies {
-			// Any-valid-copy gate: a dependency names an OBJECT, and any
-			// installed copy on this task's node satisfies it, regardless of
-			// how it got here (producer push, alias, or a policy revision
+			// Any-valid-copy gate: a dependency names OBJECT(s), and any
+			// installed copy on this task's node satisfies each, regardless
+			// of how it got here (producer push, alias, or a policy revision
 			// serving from another copy). Installation is atomic and
-			// digest-guarded, so bytes-present is sufficient. Only when the
+			// digest-guarded, so bytes-present is sufficient. Only when
 			// bytes are absent do we fall back to requiring the producer's
 			// own execution path below.
-			if childNi.ip != "" && isDataReady(childNi.ip, odagName, dep) {
-				continue
+			if childNi.ip != "" {
+				allObjs := true
+				for _, key := range consumedKeys(task, dep) {
+					if !isDataReady(childNi.ip, odagName, key) {
+						allObjs = false
+						break
+					}
+				}
+				if allObjs {
+					continue
+				}
 			}
 			if vertex[dep] || cached[dep] != (cacheEntry{}) {
 				// A data-vertex or cache-satisfied dep has no pod; its
@@ -631,8 +640,16 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 				break
 			}
 			if childNi.ip != "" {
-				// Check DataReady on this child's node: has dep's data arrived here?
-				if !isDataReady(childNi.ip, odagName, dep) {
+				// Check DataReady on this child's node: has every consumed
+				// object of this dep arrived here?
+				ready := true
+				for _, key := range consumedKeys(task, dep) {
+					if !isDataReady(childNi.ip, odagName, key) {
+						ready = false
+						break
+					}
+				}
+				if !ready {
 					allDepsDone = false
 					break
 				}
@@ -681,10 +698,22 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 // Helpers: extract task specs from unstructured ODAG CR
 // --------------------------------------------------------------------------
 
+type outputSpec struct {
+	Name     string
+	DataSize string
+}
+
+type inputSpec struct {
+	Producer string
+	Object   string // "" = the producer's default output
+}
+
 type taskSpec struct {
 	Name           string
-	Type           string // "" = compute (pod); "data" = data vertex (no pod)
-	CacheKey       string // non-empty: eligible for cross-run reuse
+	Type           string       // "" = compute (pod); "data" = data vertex (no pod)
+	CacheKey       string       // non-empty: eligible for cross-run reuse
+	Outputs        []outputSpec // named outputs; empty = single default output
+	Inputs         []inputSpec  // which named object each dependency supplies
 	Image          string
 	Command        []string
 	Args           []string
@@ -807,6 +836,30 @@ func extractTasks(obj *unstructured.Unstructured) []taskSpec {
 		}
 		typ, _ := t["type"].(string)
 		cacheKey, _ := t["cacheKey"].(string)
+		var outputs []outputSpec
+		if rawOuts, ok := t["outputs"].([]interface{}); ok {
+			for _, ro := range rawOuts {
+				if m, ok := ro.(map[string]interface{}); ok {
+					n, _ := m["name"].(string)
+					ds, _ := m["dataSize"].(string)
+					if n != "" {
+						outputs = append(outputs, outputSpec{Name: n, DataSize: ds})
+					}
+				}
+			}
+		}
+		var inputs []inputSpec
+		if rawIns, ok := t["inputs"].([]interface{}); ok {
+			for _, ri := range rawIns {
+				if m, ok := ri.(map[string]interface{}); ok {
+					pr, _ := m["producer"].(string)
+					ob, _ := m["object"].(string)
+					if pr != "" {
+						inputs = append(inputs, inputSpec{Producer: pr, Object: ob})
+					}
+				}
+			}
+		}
 		cmd, _, _ := unstructured.NestedStringSlice(t, "command")
 		args, _, _ := unstructured.NestedStringSlice(t, "args")
 		deps, _, _ := unstructured.NestedStringSlice(t, "dependencies")
@@ -856,26 +909,55 @@ func extractTasks(obj *unstructured.Unstructured) []taskSpec {
 		secCtx := parsePodSecurityContext(t["securityContext"], name)
 
 		tasks = append(tasks, taskSpec{
-			Name:           name,
-			Type:           typ,
-			CacheKey:       cacheKey,
-			Image:          image,
-			Command:        cmd,
-			Args:           args,
-			Dependencies:   deps,
-			DataSize:       dataSize,
-			Runtime:        runtimeF,
-			RuntimeProfile: rtProfile,
-			Constraints:    constraints,
-			CPU:            cpu,
-			Memory:         mem,
-			UserEnv:        userEnv,
-			Volumes:        vols,
-			VolumeMounts:   vmounts,
+			Name:            name,
+			Type:            typ,
+			CacheKey:        cacheKey,
+			Outputs:         outputs,
+			Inputs:          inputs,
+			Image:           image,
+			Command:         cmd,
+			Args:            args,
+			Dependencies:    deps,
+			DataSize:        dataSize,
+			Runtime:         runtimeF,
+			RuntimeProfile:  rtProfile,
+			Constraints:     constraints,
+			CPU:             cpu,
+			Memory:          mem,
+			UserEnv:         userEnv,
+			Volumes:         vols,
+			VolumeMounts:    vmounts,
 			SecurityContext: secCtx,
 		})
 	}
 	return tasks
+}
+
+// objectKey is the data-plane identity of a producer's output: the task
+// name alone for the default output, "task.name" for a named one. The
+// agent's path grammar already admits the dotted form, so every agent
+// verb (install, ready, push, alias, evict, cancel) works on either.
+func objectKey(producer, object string) string {
+	if object == "" || object == "output" {
+		return producer
+	}
+	return producer + "." + object
+}
+
+// consumedKeys returns the object keys task t consumes from dependency
+// dep: the refined named objects when spec.inputs says so, else the
+// producer's default output.
+func consumedKeys(t taskSpec, dep string) []string {
+	var keys []string
+	for _, in := range t.Inputs {
+		if in.Producer == dep {
+			keys = append(keys, objectKey(dep, in.Object))
+		}
+	}
+	if len(keys) == 0 {
+		return []string{dep}
+	}
+	return keys
 }
 
 // getNodeInfoMap returns a map of node name -> nodeInfo for all schedulable nodes.
@@ -921,7 +1003,6 @@ func getNodeInfoMap(client *kubernetes.Clientset) (map[string]nodeInfo, error) {
 	}
 	return result, nil
 }
-
 
 // buildEnvVars builds file-transport environment variables for a task pod.
 //
@@ -1000,6 +1081,36 @@ func buildEnvVars(odagName string, task taskSpec, assignMap map[string]nodeInfo,
 			corev1.EnvVar{Name: fmt.Sprintf("WL_SUCC_%s_NODE", succKey), Value: ni.name},
 			corev1.EnvVar{Name: fmt.Sprintf("WL_SUCC_%s_HOST", succKey), Value: ni.ip},
 		)
+	}
+
+	// Named outputs: each is an independent object with its own consumer
+	// set. For output o, the consumers are the tasks whose spec.inputs
+	// name (this task, o); send("o", data) pushes to exactly those.
+	if len(task.Outputs) > 0 {
+		var outNames []string
+		for _, out := range task.Outputs {
+			outNames = append(outNames, out.Name)
+			oKey := strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(out.Name))
+			var oSuccs []string
+			for _, t := range allTasks {
+				for _, in := range t.Inputs {
+					if in.Producer == task.Name && in.Object == out.Name {
+						oSuccs = append(oSuccs, t.Name)
+						ni := assignMap[t.Name]
+						sKey := strings.ToUpper(strings.ReplaceAll(t.Name, "-", "_"))
+						env = append(env,
+							corev1.EnvVar{Name: fmt.Sprintf("WL_OUT_%s_SUCC_%s_NODE", oKey, sKey), Value: ni.name},
+							corev1.EnvVar{Name: fmt.Sprintf("WL_OUT_%s_SUCC_%s_HOST", oKey, sKey), Value: ni.ip},
+						)
+					}
+				}
+			}
+			env = append(env, corev1.EnvVar{
+				Name:  fmt.Sprintf("WL_OUT_%s_SUCCESSORS", oKey),
+				Value: strings.Join(oSuccs, ","),
+			})
+		}
+		env = append(env, corev1.EnvVar{Name: "WL_OUTPUTS", Value: strings.Join(outNames, ",")})
 	}
 
 	env = append(env, task.UserEnv...)

@@ -44,6 +44,9 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(line_buffering=True)  # type: ignore[union-attr]
 
 
+_UNSET = object()
+
+
 class WlTask:
     """
     Entry point for Wayline task communication.
@@ -113,31 +116,42 @@ class WlTask:
         key = dep.upper().replace("-", "_")
         return os.environ.get(f"WL_DEP_{key}_NODE", "")
 
-    def send(self, data: Any) -> None:
+    def send(self, data: Any, _payload: Any = _UNSET) -> None:
         """
-        Send data to all downstream successors.
+        Emit an output object.
 
-        For file transport (ODAG): routes to each successor automatically
-        based on WL_SUCCESSORS env vars injected by the controller.
-        Same-node successors receive a local file copy; remote successors
-        receive an HTTP PUT via the data-agent.
+        One-argument form emits the task's single default output to all
+        successors: send(data).
 
-        For pubsub transport (CDAG): publishes to all subscribers.
+        Two-argument form emits a NAMED output: send("alert", data). A
+        named output is an independent, immutable object with identity
+        <run, task, name>; it is delivered to exactly the consumers whose
+        spec.inputs name it, and external policy can revise its
+        realization (copies, serving source, lifetime) independently of
+        the task's other outputs. The name must be declared in the
+        task's spec.outputs.
 
         Args:
-            data: JSON-serializable value.
+            data: output name (two-arg form) or JSON-serializable value.
+            _payload: JSON-serializable value (two-arg form only).
         """
-        payload = json.dumps(data).encode()
-        self._transport.send(payload)
+        if _payload is _UNSET:
+            self._transport.send(json.dumps(data).encode())
+        else:
+            self._transport.send(json.dumps(_payload).encode(),
+                                 output=str(data))
 
-    def send_raw(self, data: bytes) -> None:
+    def send_raw(self, data: Any, _payload: bytes = _UNSET) -> None:
         """
-        Send raw bytes to all downstream successors.
+        Raw-bytes variant of send(); same one/two-argument forms.
 
-        Unlike send(), this skips JSON serialization, avoiding a second
-        in-memory copy. Use for large payloads where memory is tight.
+        Skips JSON serialization, avoiding a second in-memory copy. Use
+        for large payloads where memory is tight.
         """
-        self._transport.send(data)
+        if _payload is _UNSET:
+            self._transport.send(data)
+        else:
+            self._transport.send(_payload, output=str(data))
 
     def recv(self, peer: str | None = None) -> Any:
         """

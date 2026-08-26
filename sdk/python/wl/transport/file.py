@@ -124,7 +124,14 @@ class FileTransport:
         except Exception as e:
             print(f"[{self.task_name}] WARNING: failed to set task state={state}: {e}", flush=True)
 
-    def _install_local(self, payload: bytes) -> None:
+    def _object_key(self, output: str | None) -> str:
+        """Data-plane identity of an output: task name for the default
+        output, "task.name" for a named one."""
+        if not output or output == "output":
+            return self.task_name
+        return f"{self.task_name}.{output}"
+
+    def _install_local(self, payload: bytes, output: str | None = None) -> None:
         """
         PUT payload through the local data-agent so it goes through the
         same atomic install path (temp → fsync → rename → fsync parent →
@@ -138,7 +145,8 @@ class FileTransport:
         if not self.node_ip:
             raise RuntimeError("WL_NODE_IP not set; cannot install via data-agent")
         digest = hashlib.sha256(payload).hexdigest()
-        url = f"http://{self.node_ip}:{_DATA_AGENT_PORT}/{self.odag_name}/{self.task_name}/output"
+        url = (f"http://{self.node_ip}:{_DATA_AGENT_PORT}/"
+               f"{self.odag_name}/{self._object_key(output)}/output")
         req = urllib.request.Request(
             url,
             data=payload,
@@ -160,11 +168,16 @@ class FileTransport:
     # send                                                                  #
     # ------------------------------------------------------------------ #
 
-    def send(self, payload: bytes) -> None:
+    def send(self, payload: bytes, output: str | None = None) -> None:
         """
         Install payload via the local data-agent (atomic + marker), then
         ask the agent to push to remote successors. Returns once the local
         install completes; remote transfers happen in the background.
+
+        With `output`, the payload becomes the NAMED object
+        <run, task, output>: it is installed under its own key and pushed
+        only to the consumers the controller wired for that object
+        (WL_OUT_<NAME>_SUCCESSORS), not to every successor.
         """
         # 1. Local install via the data-agent. The agent writes a temp file,
         # fsyncs, renames into place, fsyncs the parent dir, then writes the
@@ -172,7 +185,7 @@ class FileTransport:
         # call returns. The SDK never touches the hostPath directly.
         if self._t_send_start is None:
             self._t_send_start = time.time()
-        self._install_local(payload)
+        self._install_local(payload, output=output)
         self._t_send_installed = time.time()
         self._bytes_out += len(payload)
         print(
@@ -180,13 +193,24 @@ class FileTransport:
             flush=True,
         )
 
-        # 2. Build list of cross-node successors for the data-agent to push to.
-        succs_env = os.environ.get("WL_SUCCESSORS", "")
+        # 2. Build list of cross-node successors for the data-agent to push
+        # to. A named output has its own consumer set (spec.inputs).
+        if output:
+            out_key = output.upper().replace("-", "_").replace(".", "_")
+            succs_env = os.environ.get(f"WL_OUT_{out_key}_SUCCESSORS", "")
+        else:
+            succs_env = os.environ.get("WL_SUCCESSORS", "")
         successors = []
         for succ in [s for s in succs_env.split(",") if s]:
             succ_key = succ.upper().replace("-", "_")
-            succ_node = os.environ.get(f"WL_SUCC_{succ_key}_NODE", "")
-            succ_host = os.environ.get(f"WL_SUCC_{succ_key}_HOST", "")
+            if output:
+                succ_node = os.environ.get(
+                    f"WL_OUT_{out_key}_SUCC_{succ_key}_NODE", "")
+                succ_host = os.environ.get(
+                    f"WL_OUT_{out_key}_SUCC_{succ_key}_HOST", "")
+            else:
+                succ_node = os.environ.get(f"WL_SUCC_{succ_key}_NODE", "")
+                succ_host = os.environ.get(f"WL_SUCC_{succ_key}_HOST", "")
             if succ_node == self.node_name:
                 continue  # same-node: file already present on shared hostPath
             if not succ_host:
@@ -200,12 +224,13 @@ class FileTransport:
         # 3. Hand off to data-agent. The agent durably persists the per-successor
         # queue entries and Pending state files before responding 202, so
         # this call may take a few hundred ms for many successors.
-        self._request_push(successors)
+        self._request_push(successors, output=output)
 
-    def _request_push(self, successors: list) -> None:
+    def _request_push(self, successors: list, output: str | None = None) -> None:
         if not self.node_ip:
             return
-        url = f"http://{self.node_ip}:{_DATA_AGENT_PORT}/push/{self.odag_name}/{self.task_name}"
+        url = (f"http://{self.node_ip}:{_DATA_AGENT_PORT}/push/"
+               f"{self.odag_name}/{self._object_key(output)}")
         body = json.dumps({"successors": successors}).encode()
         req = urllib.request.Request(
             url, data=body, method="POST",

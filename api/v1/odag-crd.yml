@@ -69,7 +69,7 @@ spec:
                     copies, change which copy serves future consumers). The
                     template's graph is the initial binding; entries here
                     override it per object without any graph change. Objects
-                    are named by their producing task.
+                    are named by their producing task, or "task.output" for a named output.
                   items:
                     type: object
                     required: [object]
@@ -115,6 +115,40 @@ spec:
                           exactly one dependency and at least one successor.
                       image:
                         type: string
+                      outputs:
+                        type: array
+                        description: >
+                          Named outputs. A task may emit several
+                          semantically distinct, immutable objects via
+                          send("<name>", data); each has identity
+                          <run, task, name> (data-plane key
+                          "task.name"), its own consumer set (see
+                          inputs), and an independently revisable
+                          realization. Omit for the single default
+                          output.
+                        items:
+                          type: object
+                          required: [name]
+                          properties:
+                            name:
+                              type: string
+                            dataSize:
+                              type: string
+                      inputs:
+                        type: array
+                        description: >
+                          Which named object of a producer this task
+                          consumes. Refines an entry in dependencies;
+                          producers listed in dependencies without an
+                          inputs entry supply their default output.
+                        items:
+                          type: object
+                          required: [producer]
+                          properties:
+                            producer:
+                              type: string
+                            object:
+                              type: string
                       cacheKey:
                         type: string
                         description: >-

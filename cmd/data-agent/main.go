@@ -7,33 +7,40 @@
 //   - Per-successor transfer state: <rel>/transfers/<consumer>.state (added later)
 //
 // Data endpoints (body = raw bytes):
-//   PUT /<odag>/<task>/output        — upstream task pushes output to this node;
-//                                      receiver verifies X-Wayline-Content-SHA256,
-//                                      then writes .wl-ready on success
-//   GET /<odag>/<task>/output        — read output (requires .wl-ready unless ?unsafe=1)
+//
+//	PUT /<odag>/<task>/output        — upstream task pushes output to this node;
+//	                                   receiver verifies X-Wayline-Content-SHA256,
+//	                                   then writes .wl-ready on success
+//	GET /<odag>/<task>/output        — read output (requires .wl-ready unless ?unsafe=1)
 //
 // Task-state endpoints (body = plain text):
-//   PUT /state/<odag>/<task>         — SDK/controller writes one of
-//                                      {Pending, Running, ComputeDone, Failed}
-//   GET /state/<odag>/<task>         — controller queries task state
+//
+//	PUT /state/<odag>/<task>         — SDK/controller writes one of
+//	                                   {Pending, Running, ComputeDone, Failed}
+//	GET /state/<odag>/<task>         — controller queries task state
 //
 // Data-readiness endpoints (presence-only marker, no body):
-//   GET  /ready/<odag>/<task>        — body "true" if marker present, else "false"
-//   DEL  /ready/<odag>/<task>        — clear the marker (used on reset)
+//
+//	GET  /ready/<odag>/<task>        — body "true" if marker present, else "false"
+//	DEL  /ready/<odag>/<task>        — clear the marker (used on reset)
+//
 // (PUT is intentionally not exposed: readiness is only ever set as a side
 // effect of a successful atomic install via PUT /<odag>/<task>/output.)
 //
 // Sending endpoints (mid-transfer indicator, unchanged):
-//   PUT /sending/<odag>/<task>       — body "true"/"false"
-//   GET /sending/<odag>/<task>
+//
+//	PUT /sending/<odag>/<task>       — body "true"/"false"
+//	GET /sending/<odag>/<task>
 //
 // Push endpoint:
-//   POST /push/<odag>/<task>         — agent pushes local output to remote
-//                                      successor nodes in the background.
-//                                      Body: JSON {"successors":[{"name":"x","host":"1.2.3.4","node":"anrg-5"},...]}
+//
+//	POST /push/<odag>/<task>         — agent pushes local output to remote
+//	                                   successor nodes in the background.
+//	                                   Body: JSON {"successors":[{"name":"x","host":"1.2.3.4","node":"anrg-5"},...]}
 //
 // Flow endpoints:
-//   GET /flows/<odag>                — per-push flow records on this node
+//
+//	GET /flows/<odag>                — per-push flow records on this node
 //
 // GET /healthz  — liveness probe
 package main
@@ -68,8 +75,8 @@ import (
 // not affect the digest. Receivers verify the digest after decoding the
 // optional Content-Encoding, so idempotency stays canonical.
 const (
-	headerContentSHA256       = "X-Wayline-Content-SHA256"
-	headerUncompressedLength  = "X-Wayline-Uncompressed-Length"
+	headerContentSHA256      = "X-Wayline-Content-SHA256"
+	headerUncompressedLength = "X-Wayline-Uncompressed-Length"
 	// headerSourceNode is set by a pushing agent so the receiver can tell an
 	// agent-to-agent install apart from a local SDK install when it records
 	// the data-availability timestamp. Absent ⇒ local install.
@@ -94,8 +101,9 @@ const (
 
 // Transport-deadline parameters, overridable per deployment so the
 // contract is an operator policy, not a compile-time constant:
-//   WL_PUSH_TIMEOUT_BASE_S, WL_PUSH_TIMEOUT_SAFETY_S,
-//   WL_PUSH_MIN_THROUGHPUT_KBS.
+//
+//	WL_PUSH_TIMEOUT_BASE_S, WL_PUSH_TIMEOUT_SAFETY_S,
+//	WL_PUSH_MIN_THROUGHPUT_KBS.
 var (
 	pushTimeoutBase     = time.Duration(envInt("WL_PUSH_TIMEOUT_BASE_S", 60)) * time.Second
 	pushTimeoutSafety   = time.Duration(envInt("WL_PUSH_TIMEOUT_SAFETY_S", 30)) * time.Second
@@ -151,17 +159,17 @@ var startTime = time.Now()
 var localNodeName string
 
 var (
-	metricPutTotal       atomic.Int64 // every PUT received (success + fail)
-	metricPutOK          atomic.Int64 // PUT installed successfully
-	metricPutMismatch    atomic.Int64 // X-Wayline-Content-SHA256 mismatch (400)
-	metricPutConflict    atomic.Int64 // 409 — existing md5 differs from claimed
-	metricPutIdempotent  atomic.Int64 // 200 fast-path (same md5 already installed)
-	metricBytesIn        atomic.Int64 // bytes accepted via PUT
-	metricPushAttempts   atomic.Int64 // pushToNode calls (live + recovery)
-	metricPushSuccess    atomic.Int64 // pushToNode returned nil
-	metricPushFailed     atomic.Int64 // pushToNode returned error after retries
-	metricBytesOut       atomic.Int64 // bytes sent via successful pushes
-	metricAliasOK        atomic.Int64 // POST /alias materialized an output
+	metricPutTotal      atomic.Int64 // every PUT received (success + fail)
+	metricPutOK         atomic.Int64 // PUT installed successfully
+	metricPutMismatch   atomic.Int64 // X-Wayline-Content-SHA256 mismatch (400)
+	metricPutConflict   atomic.Int64 // 409 — existing md5 differs from claimed
+	metricPutIdempotent atomic.Int64 // 200 fast-path (same md5 already installed)
+	metricBytesIn       atomic.Int64 // bytes accepted via PUT
+	metricPushAttempts  atomic.Int64 // pushToNode calls (live + recovery)
+	metricPushSuccess   atomic.Int64 // pushToNode returned nil
+	metricPushFailed    atomic.Int64 // pushToNode returned error after retries
+	metricBytesOut      atomic.Int64 // bytes sent via successful pushes
+	metricAliasOK       atomic.Int64 // POST /alias materialized an output
 )
 
 // acquirePushSlot blocks until a push slot is available. No-op if unbounded.
@@ -234,20 +242,28 @@ func parsePathComponents(urlPath, prefix string, want int) ([]string, int, strin
 
 // Per-task control files. Each path is keyed by <odag>/<task>.
 //
-//   taskStateFile  →  .wl-task-state  (text: one of {Pending, Running,
-//                                       ComputeDone, Failed}; task lifecycle only,
-//                                       independent of data availability)
-//   readyFile      →  .wl-ready       (presence-only marker: the producer's
-//                                       output is atomically installed on this
-//                                       node and safe for a consumer to read)
-//   sendingFile    →  .wl-sending     (true/false: data-agent is mid-transfer)
-//   bytesFile      →  .wl-bytes       (size of the installed output)
-func taskStateFile(rel string) string  { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-task-state") }
-func readyFile(rel string) string      { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-ready") }
-func sendingFile(rel string) string    { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-sending") }
-func bytesFile(rel string) string      { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-bytes") }
-func digestSidecarFile(rel string) string { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-sha256") }
-func flowsFile(odag string) string     { return filepath.Join(dataDir, filepath.Clean(odag), ".wl-flows.jsonl") }
+//	taskStateFile  →  .wl-task-state  (text: one of {Pending, Running,
+//	                                    ComputeDone, Failed}; task lifecycle only,
+//	                                    independent of data availability)
+//	readyFile      →  .wl-ready       (presence-only marker: the producer's
+//	                                    output is atomically installed on this
+//	                                    node and safe for a consumer to read)
+//	sendingFile    →  .wl-sending     (true/false: data-agent is mid-transfer)
+//	bytesFile      →  .wl-bytes       (size of the installed output)
+func taskStateFile(rel string) string {
+	return filepath.Join(dataDir, filepath.Clean(rel), ".wl-task-state")
+}
+func readyFile(rel string) string { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-ready") }
+func sendingFile(rel string) string {
+	return filepath.Join(dataDir, filepath.Clean(rel), ".wl-sending")
+}
+func bytesFile(rel string) string { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-bytes") }
+func digestSidecarFile(rel string) string {
+	return filepath.Join(dataDir, filepath.Clean(rel), ".wl-sha256")
+}
+func flowsFile(odag string) string {
+	return filepath.Join(dataDir, filepath.Clean(odag), ".wl-flows.jsonl")
+}
 
 // Instrumentation sidecars. Both are per-(odag, task) and are removed with
 // the rest of the run's data by DELETE /data/<odag>.
@@ -260,8 +276,12 @@ func flowsFile(odag string) string     { return filepath.Join(dataDir, filepath.
 //	timingsFile    →  .wl-timings.json    (task-internal phase boundaries
 //	                                        reported by the SDK: compute
 //	                                        start/end, handoff duration)
-func installedFile(rel string) string { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-installed.json") }
-func timingsFile(rel string) string   { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-timings.json") }
+func installedFile(rel string) string {
+	return filepath.Join(dataDir, filepath.Clean(rel), ".wl-installed.json")
+}
+func timingsFile(rel string) string {
+	return filepath.Join(dataDir, filepath.Clean(rel), ".wl-timings.json")
+}
 
 // installRecord is written once per successful install, at the moment the
 // payload becomes readable on this node (i.e. alongside the .wl-ready
@@ -332,8 +352,8 @@ var validTransferStates = map[string]bool{
 // hostPath directory, so the producer's node is the authority for transfer
 // state and the recovery queue (fix H).
 //
-//   <rel>/transfers/<consumer>.state  → transfer state (text, one of validTransferStates)
-//   <rel>/transfers/<consumer>.json   → queue entry: host, node, retries, lastError
+//	<rel>/transfers/<consumer>.state  → transfer state (text, one of validTransferStates)
+//	<rel>/transfers/<consumer>.json   → queue entry: host, node, retries, lastError
 func transfersDir(rel string) string {
 	return filepath.Join(dataDir, filepath.Clean(rel), "transfers")
 }
@@ -1033,10 +1053,10 @@ func main() {
 				"bytes_out": metricBytesOut.Load(),
 			},
 			"config": map[string]int64{
-				"max_concurrent_pushes":          int64(maxConcurrentPushes),
-				"push_retries":                   int64(pushRetries),
-				"push_timeout_base_seconds":      int64(pushTimeoutBase / time.Second),
-				"push_timeout_safety_seconds":    int64(pushTimeoutSafety / time.Second),
+				"max_concurrent_pushes":         int64(maxConcurrentPushes),
+				"push_retries":                  int64(pushRetries),
+				"push_timeout_base_seconds":     int64(pushTimeoutBase / time.Second),
+				"push_timeout_safety_seconds":   int64(pushTimeoutSafety / time.Second),
 				"push_min_throughput_bytes_sec": int64(pushMinThroughputBs),
 			},
 		}

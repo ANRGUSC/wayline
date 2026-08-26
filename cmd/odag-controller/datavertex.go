@@ -81,7 +81,8 @@ func vertexNode(namespace, odagName string, task taskSpec,
 	if len(task.Dependencies) != 1 {
 		return assigned
 	}
-	over := servingOverride(namespace+"/"+odagName, task.Dependencies[0])
+	over := servingOverride(namespace+"/"+odagName,
+		consumedKeys(task, task.Dependencies[0])[0])
 	if over == "" || over == assigned.name {
 		return assigned
 	}
@@ -105,6 +106,7 @@ func vertexNode(namespace, odagName string, task taskSpec,
 func executeDataVertex(namespace, odagName string, task taskSpec,
 	assignMap map[string]nodeInfo, allTasks []taskSpec) error {
 	ni := vertexNode(namespace, odagName, task, assignMap)
+	inputKey := consumedKeys(task, task.Dependencies[0])[0]
 	assigned := assignMap[task.Name]
 	if ni.name != assigned.name && assigned.ip != "" {
 		// The serving point moved: revoke the old node's outbound
@@ -117,7 +119,7 @@ func executeDataVertex(namespace, odagName string, task taskSpec,
 		}
 	}
 	return realizeVertexOn(namespace, odagName, task, ni,
-		odagName+"/"+task.Dependencies[0], assignMap, allTasks)
+		odagName+"/"+inputKey, assignMap, allTasks)
 }
 
 // realizeVertex materializes <odagName>/<task> on the task's assigned node

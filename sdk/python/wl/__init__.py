@@ -6,9 +6,11 @@ Usage in task images:
     from wl import WlTask
 
     task = WlTask()
-    data = task.recv("upstream-task-name")   # blocks until data arrives
-    result = process(data)
-    task.send("downstream-task-name", result)
+    data = task.recv("upstream-task")        # blocks until data arrives
+    alert, features = process(data)
+    task.send(result)                        # single default output
+    task.send("alert", alert)                # named output <run, task, alert>
+    task.send("features", features)          # independently realizable
 
 The controller injects peer configuration as environment variables:
     WL_TASK_NAME=<this-task-name>
