@@ -72,29 +72,21 @@ def contacts(cmd):
 
 
 def fw_pods():
-    # Pod-network probe on anrg-3: verification must test the identity
-    # the agents actually use.
-    kubectl("delete pod e2-probe-anrg-3 --ignore-not-found >/dev/null 2>&1")
-    probe = {"spec": {"nodeName": "anrg-3", "restartPolicy": "Never",
-             "containers": [{"name": "c", "image": "alpine",
-                             "command": ["sh", "-c", "sleep 86400"]}]}}
-    sh(f"kubectl run e2-probe-anrg-3 -n {NS} --restart=Never --image=alpine "
-       f"--overrides='{json.dumps(probe)}' >/dev/null 2>&1")
-    for node in ("anrg-3", "anrg-7", "anrg-8"):
+    for node in ("anrg-3", "anrg-7"):
         spec = {"spec": {"nodeName": node, "hostNetwork": True,
                 "restartPolicy": "Never",
                 "containers": [{"name": "c", "image": "alpine",
                                 "command": ["sh", "-c",
-                                            "apk add -q iptables >/dev/null && sleep 86400"],
+                                            "apk add -q iproute2 wget >/dev/null && sleep 86400"],
                                 "securityContext": {"privileged": True}}]}}
         kubectl(f"delete pod e2-fw-{node} --ignore-not-found >/dev/null 2>&1")
         sh(f"kubectl run e2-fw-{node} -n {NS} --restart=Never --image=alpine "
            f"--overrides='{json.dumps(spec)}' >/dev/null 2>&1")
-    for node in ("anrg-3", "anrg-7", "anrg-8"):
-        for _ in range(30):
-            r = kubectl(f"exec e2-fw-{node} -- iptables -L -n 2>/dev/null "
-                        f"| head -1")
-            if "Chain" in r.stdout:
+    for node in ("anrg-3", "anrg-7"):
+        for _ in range(40):
+            r = kubectl(f"exec e2-fw-{node} -- sh -c "
+                        f"'tc -V 2>/dev/null' ")
+            if "tc utility" in r.stdout or "iproute2" in r.stdout:
                 break
             time.sleep(3)
 
@@ -277,11 +269,9 @@ def main():
                     idx += 1
     finally:
         contacts("clear")
-        for node in ("anrg-3", "anrg-7", "anrg-8"):
+        for node in ("anrg-3", "anrg-7"):
             kubectl(f"delete pod e2-fw-{node} --ignore-not-found "
                     f">/dev/null 2>&1")
-        kubectl("delete pod e2-probe-anrg-3 --ignore-not-found "
-                ">/dev/null 2>&1")
     print("E2 PILOT DONE", flush=True)
 
 

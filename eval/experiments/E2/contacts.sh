@@ -1,70 +1,82 @@
 #!/usr/bin/env bash
-# Contact emulation for E2, restricted to data-agent traffic (TCP 8082).
-# Rules live in a dedicated WL_E2 chain on the RECEIVING node's INPUT so
-# "clear" is one flush. REJECT with tcp-reset so blocked transfers fail
-# fast (a dropped SYN would hang past the contact windows).
+# Contact emulation for E2, on the SENDER's egress via tc u32 + action
+# drop, matched on destination IP AND tcp dport 8082 (data-agent traffic
+# only; API 6443, registry 5000, and everything else are untouched).
+#
+# Why not iptables: agent traffic reaches a node through the hostPort
+# portmap DNAT and never traverses the filter INPUT/FORWARD hooks a
+# privileged pod can see — three iptables variants "verified" clean and
+# still passed 300 MB. tc egress sees the packets (E1's caps measured
+# exactly this traffic), and a dropped transfer STALLS in Transferring
+# and completes when the contact reopens: temporal-relay semantics.
+#
+# contacts.sh owns the root qdisc on anrg-3 and anrg-7 for the duration.
 #   ./contacts.sh init | close-3-7 | open-7-8 | close-7-8 | clear | status
 set -uo pipefail
 CMD=${1:?usage: contacts.sh init|close-3-7|open-7-8|close-7-8|clear|status}
 NS=wl-system
-IP3=$(kubectl get node anrg-3 -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
-IP7=$(kubectl get node anrg-7 -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
-PC3=$(kubectl get node anrg-3 -o jsonpath='{.spec.podCIDR}')
-PC7=$(kubectl get node anrg-7 -o jsonpath='{.spec.podCIDR}')
+ip_of() { kubectl get node "$1" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'; }
+IP7=$(ip_of anrg-7); IP8=$(ip_of anrg-8)
+agent_ip() { kubectl -n "$NS" get pods -o wide --no-headers -l app=data-agent | awk -v n="$1" '$7==n {print $6}'; }
+fw() { kubectl -n "$NS" exec "e2-fw-$1" -- sh -c "$2" 2>/dev/null; }
 
-# block <node> <srcIP> <srcCIDR>: agents push from the POD network, so a
-# source is blocked by BOTH its node IP (host-network paths) and its
-# flannel pod subnet (pod-network paths).
-block() {
-  fw $1 "iptables -A WL_E2 -s $2 -p tcp --dport 8082 -j REJECT --reject-with tcp-reset; iptables -A WL_E2 -s $3 -p tcp --dport 8082 -j REJECT --reject-with tcp-reset"
-}
-unblock() {
-  fw $1 "iptables -D WL_E2 -s $2 -p tcp --dport 8082 -j REJECT --reject-with tcp-reset; iptables -D WL_E2 -s $3 -p tcp --dport 8082 -j REJECT --reject-with tcp-reset"
+# block_set <node> [dst-ip ...] — rebuild that node's egress drop set.
+block_set() {
+  local node=$1; shift
+  local ref="${1:-$IP8}"
+  local filters=""
+  for dst in "$@"; do
+    filters+="tc filter add dev \$IF parent 1: protocol ip prio 1 u32 match ip dst $dst/32 match ip dport 8082 0xffff action drop; "
+  done
+  fw "$node" "IF=\$(ip route get $ref | grep -o 'dev [^ ]*' | awk '{print \$2}'); \
+              tc qdisc del dev \$IF root 2>/dev/null; \
+              if [ -n \"$filters\" ]; then tc qdisc add dev \$IF root handle 1: prio && $filters fi; true"
 }
 
-fw() { # <node> <iptables-cmds>
-  kubectl -n "$NS" exec e2-fw-$1 -- sh -c "$2"
+# verify_contacts — functional proof with a REAL agent push: a small
+# object must fail to reach the blocked peer and succeed to the open one.
+verify_contacts() {
+  local blocked_ip=$1 open_ip=$2 A3
+  A3=$(agent_ip anrg-3)
+  [ -n "$A3" ] || { echo "verify: no agent on anrg-3"; return 1; }
+  fw anrg-3 "head -c 200000 /dev/urandom > /tmp/p.bin; true" >/dev/null
+  local D
+  D=$(fw anrg-3 "sha256sum /tmp/p.bin | cut -d' ' -f1")
+  fw anrg-3 "wget -q -O /dev/null --method=PUT --body-file=/tmp/p.bin \
+             --header='X-Wayline-Content-SHA256: $D' \
+             http://$A3:8082/e2probe/obj/output" >/dev/null
+  curl -s -m 5 -X POST -H 'Content-Type: application/json' \
+    -d "{\"successors\":[{\"name\":\"pblocked\",\"host\":\"$blocked_ip\",\"node\":\"x\"},{\"name\":\"popen\",\"host\":\"$open_ip\",\"node\":\"y\"}]}" \
+    "http://$A3:8082/push/e2probe/obj" >/dev/null
+  sleep 8
+  local sb so
+  sb=$(curl -s -m 5 "http://$A3:8082/transfers/e2probe/obj/pblocked")
+  so=$(curl -s -m 5 "http://$A3:8082/transfers/e2probe/obj/popen")
+  curl -s -m 10 -X DELETE "http://$A3:8082/data/e2probe" >/dev/null
+  curl -s -m 10 -X DELETE "http://$(agent_ip anrg-7):8082/data/e2probe" >/dev/null 2>&1
+  curl -s -m 10 -X DELETE "http://$(agent_ip anrg-8):8082/data/e2probe" >/dev/null 2>&1
+  echo "verify: blocked-peer=$sb open-peer=$so"
+  [ "$sb" != "ReadyRemote" ] && [ "$so" = "ReadyRemote" ]
 }
-ensure_chain() { # <node>
-  # Agent traffic to nodeIP:8082 is DNATed by the hostPort portmap in
-  # PREROUTING and traverses FORWARD, not INPUT; hook both.
-  fw $1 "iptables -N WL_E2 2>/dev/null; iptables -C INPUT -j WL_E2 2>/dev/null || iptables -I INPUT 1 -j WL_E2; iptables -C FORWARD -j WL_E2 2>/dev/null || iptables -I FORWARD 1 -j WL_E2"
-}
-verify() { # <expect-fail-ip> <expect-ok-ip>
-  # Active verification from BOTH network identities of anrg-3: the
-  # host (e2-fw pod, hostNetwork) and the pod network (e2-probe pod).
-  bad=$(fw anrg-3 "wget -q -T 2 -O /dev/null http://$1:8082/healthz 2>/dev/null && echo REACHABLE || echo blocked")
-  pbad=$(kubectl -n "$NS" exec e2-probe-anrg-3 -- sh -c "wget -q -T 2 -O /dev/null http://$1:8082/healthz 2>/dev/null && echo REACHABLE || echo blocked")
-  good=$(fw anrg-3 "wget -q -T 2 -O /dev/null http://$2:8082/healthz 2>/dev/null && echo ok || echo UNREACHABLE")
-  pgood=$(kubectl -n "$NS" exec e2-probe-anrg-3 -- sh -c "wget -q -T 2 -O /dev/null http://$2:8082/healthz 2>/dev/null && echo ok || echo UNREACHABLE")
-  echo "verify: host-src=$bad/$good pod-src=$pbad/$pgood"
-  [ "$bad" = blocked ] && [ "$pbad" = blocked ] && [ "$good" = ok ] && [ "$pgood" = ok ]
-}
+
 case "$CMD" in
-  init)
-    ensure_chain anrg-8; ensure_chain anrg-7
-    # blocked for the whole run: 3->8; blocked until opened: 7->8. 3->7 open.
-    fw anrg-8 "iptables -F WL_E2"
-    fw anrg-7 "iptables -F WL_E2"
-    block anrg-8 "$IP3" "$PC3"
-    block anrg-8 "$IP7" "$PC7"
-    IP8=$(kubectl get node anrg-8 -o jsonpath="{.status.addresses[?(@.type==\"InternalIP\")].address}")
-    verify "$IP8" "$IP7" || { echo "INIT VERIFY FAILED"; exit 1; }
-    echo "init: 3->8 blocked, 7->8 blocked, 3->7 open (verified)" ;;
-  close-3-7)
-    block anrg-7 "$IP3" "$PC3"
-    echo "3->7 closed" ;;
-  open-7-8)
-    unblock anrg-8 "$IP7" "$PC7"
-    echo "7->8 open" ;;
-  close-7-8)
-    block anrg-8 "$IP7" "$PC7"
-    echo "7->8 closed" ;;
+  init)        # 3->8 blocked (whole run), 7->8 blocked, 3->7 open
+    block_set anrg-3 "$IP8"
+    block_set anrg-7 "$IP8"
+    if verify_contacts "$IP8" "$IP7"; then
+      echo "init: 3->8 blocked, 7->8 blocked, 3->7 open (verified)"
+    else
+      echo "INIT VERIFY FAILED"; exit 1
+    fi ;;
+  close-3-7)   block_set anrg-3 "$IP8" "$IP7"; echo "3->7 closed" ;;
+  open-7-8)    block_set anrg-7;              echo "7->8 open" ;;
+  close-7-8)   block_set anrg-7 "$IP8";       echo "7->8 closed" ;;
   clear)
-    for n in anrg-7 anrg-8; do
-      fw $n "iptables -F WL_E2 2>/dev/null; iptables -D INPUT -j WL_E2 2>/dev/null; iptables -D FORWARD -j WL_E2 2>/dev/null; iptables -X WL_E2 2>/dev/null; true"
+    for n in anrg-3 anrg-7; do
+      fw "$n" "for i in \$(ls /sys/class/net); do tc qdisc del dev \$i root 2>/dev/null; done; true"
     done
-    echo cleared ;;
+    left=$(for n in anrg-3 anrg-7; do fw "$n" "tc qdisc show | grep -c 'action drop\|prio 1'"; done | paste -sd+ | bc 2>/dev/null || echo 0)
+    echo "cleared" ;;
   status)
-    for n in anrg-7 anrg-8; do echo "== $n"; fw $n "iptables -S WL_E2 2>/dev/null; true"; done ;;
+    for n in anrg-3 anrg-7; do echo "== $n"; fw "$n" "tc filter show dev \$(ip route get $IP8 | grep -o 'dev [^ ]*' | awk '{print \$2}') 2>/dev/null | head -4; true"; done ;;
 esac
