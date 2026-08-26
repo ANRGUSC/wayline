@@ -38,6 +38,12 @@ var dataVertexDone sync.Map
 // but issue duplicate pushes that multiply bytes on the wire.
 var vertexInFlight sync.Map
 
+// vertexCancelGen remembers which realization generation a vertex's
+// stale-transfer cancellation was issued for, so a rebind cancels the
+// old node's flows exactly once per revision instead of on every
+// dispatch tick.
+var vertexCancelGen sync.Map
+
 // isDataVertex reports whether a task is a well-formed data vertex given
 // the number of successors it has in this DAG. Malformed declarations are
 // logged once per reconcile and executed as ordinary pods.
@@ -108,14 +114,28 @@ func executeDataVertex(namespace, odagName string, task taskSpec,
 	ni := vertexNode(namespace, odagName, task, assignMap)
 	inputKey := consumedKeys(task, task.Dependencies[0])[0]
 	assigned := assignMap[task.Name]
-	if ni.name != assigned.name && assigned.ip != "" {
-		// The serving point moved: revoke the old node's outbound
-		// transfers of this object so the revised realization does not
-		// compete with the flows it replaces. Idempotent; best-effort.
-		cancelURL := fmt.Sprintf("http://%s:%d/cancel/%s/%s",
-			assigned.ip, dataAgentPort, odagName, task.Name)
-		if resp, err := httpClient.Post(cancelURL, "application/json", nil); err == nil {
-			resp.Body.Close()
+	if ni.name != assigned.name {
+		runKey := namespace + "/" + odagName
+		ckey := runKey + "/" + task.Name
+		gen, _ := lastSpecGen.Load(runKey)
+		if prev, ok := vertexCancelGen.Load(ckey); (!ok || prev != gen) &&
+			assigned.ip != "" {
+			// The serving point moved: revoke the old node's outbound
+			// transfers of this object so the revised realization does
+			// not compete with the flows it replaces. Once per
+			// realization generation.
+			cancelURL := fmt.Sprintf("http://%s:%d/cancel/%s/%s",
+				assigned.ip, dataAgentPort, odagName, task.Name)
+			if resp, err := httpClient.Post(cancelURL, "application/json", nil); err == nil {
+				resp.Body.Close()
+			}
+			vertexCancelGen.Store(ckey, gen)
+		}
+		if ni.ip == "" || !isDataReady(ni.ip, odagName, inputKey) {
+			// The desired serving copy is still Transferring (or not
+			// yet begun): wait quietly instead of churning alias
+			// attempts against an absent or partial source.
+			return nil
 		}
 	}
 	return realizeVertexOn(namespace, odagName, task, ni,

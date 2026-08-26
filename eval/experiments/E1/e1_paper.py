@@ -66,7 +66,10 @@ class Writer:
         try:
             ctrl = open(f"{self.res}/ctrl-{run}.log").read()
             for line in ctrl.splitlines():
-                if "executed on" in line and not rebind:
+                # LAST occurrence: a rebind re-executes the vertex, and
+                # the revised serving node's execution is the one that
+                # matters (the first is the initial anrg-3 execution).
+                if "executed on" in line:
                     rebind = round(logts(line), 1)
                 if "realization converged" in line and not converged:
                     converged = round(logts(line), 1)

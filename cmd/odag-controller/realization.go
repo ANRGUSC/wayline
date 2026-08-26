@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -135,6 +136,26 @@ func pushCopy(srcIP, odagName, object, dstNode, dstIP string) error {
 		return fmt.Errorf("push: HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// transferStateOf reads the per-consumer transfer state on the source
+// agent ("" when unknown/absent).
+func transferStateOf(srcIP, odagName, object, consumer string) string {
+	url := fmt.Sprintf("http://%s:%d/transfers/%s/%s/%s",
+		srcIP, dataAgentPort, odagName, object, consumer)
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 func evictCopy(nodeIP, odagName, object string) error {
@@ -294,8 +315,20 @@ func reconcileOnce(key, odagName string, entries []realizationEntry,
 				continue
 			}
 			converged = false
-			if posted[e.Object+"/"+n] {
-				continue // already enqueued; the agent is transferring
+			if posted[e.Object+"/"+n] && source != "" {
+				// Re-enqueue only when the prior attempt is dead: a
+				// Pending or Transferring entry must never be reset (a
+				// re-POST restarts the copy from byte zero), but a
+				// Failed one must be retried — under intermittent
+				// connectivity (temporal relaying) the transfer that
+				// failed during a blackout succeeds when the next
+				// contact window opens, and the 5s reconcile cadence is
+				// what catches the window.
+				st := transferStateOf(nodeMap[source].ip, odagName,
+					e.Object, "rev-"+n)
+				if st == "Pending" || st == "Transferring" {
+					continue
+				}
 			}
 			ni, ok := nodeMap[n]
 			if !ok || ni.ip == "" {
