@@ -18,7 +18,29 @@ NS=wl-system
 ip_of() { kubectl get node "$1" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'; }
 IP7=$(ip_of anrg-7); IP8=$(ip_of anrg-8)
 agent_ip() { kubectl -n "$NS" get pods -o wide --no-headers -l app=data-agent | awk -v n="$1" '$7==n {print $6}'; }
-fw() { kubectl -n "$NS" exec "e2-fw-$1" -- sh -c "$2" 2>/dev/null; }
+# fw runs a command in the node's privileged pod. Exit status and stderr
+# are PRESERVED: a silently-failed exec once let a "closed" contact stay
+# open for a whole run while the log said otherwise.
+fw() {
+  local node=$1 cmd=$2 out rc
+  out=$(kubectl -n "$NS" exec "e2-fw-$node" -- sh -c "$cmd" 2>&1); rc=$?
+  printf '%s' "$out"
+  return $rc
+}
+
+# assert_drops <node> <expected-count> — structural verification that the
+# node's egress carries exactly the expected number of drop filters.
+assert_drops() {
+  local node=$1 want=$2 got
+  got=$(fw "$node" "IF=\$(ip route get $IP8 | grep -o 'dev [^ ]*' | awk '{print \$2}'); tc filter show dev \$IF 2>/dev/null | grep -c 'action order'")
+  got=$(printf '%s' "$got" | tr -dc '0-9')
+  [ -z "$got" ] && got=-1
+  if [ "$got" != "$want" ]; then
+    echo "CONTACT STATE ERROR on $node: drop filters=$got expected=$want"
+    return 1
+  fi
+  return 0
+}
 
 # block_set <node> [dst-ip ...] — rebuild that node's egress drop set.
 block_set() {
@@ -63,14 +85,25 @@ case "$CMD" in
   init)        # 3->8 blocked (whole run), 7->8 blocked, 3->7 open
     block_set anrg-3 "$IP8"
     block_set anrg-7 "$IP8"
+    assert_drops anrg-3 1 || exit 1
+    assert_drops anrg-7 1 || exit 1
     if verify_contacts "$IP8" "$IP7"; then
       echo "init: 3->8 blocked, 7->8 blocked, 3->7 open (verified)"
     else
       echo "INIT VERIFY FAILED"; exit 1
     fi ;;
-  close-3-7)   block_set anrg-3 "$IP8" "$IP7"; echo "3->7 closed" ;;
-  open-7-8)    block_set anrg-7;              echo "7->8 open" ;;
-  close-7-8)   block_set anrg-7 "$IP8";       echo "7->8 closed" ;;
+  close-3-7)
+    block_set anrg-3 "$IP8" "$IP7"
+    assert_drops anrg-3 2 || exit 1
+    echo "3->7 closed (verified)" ;;
+  open-7-8)
+    block_set anrg-7
+    assert_drops anrg-7 0 || exit 1
+    echo "7->8 open (verified)" ;;
+  close-7-8)
+    block_set anrg-7 "$IP8"
+    assert_drops anrg-7 1 || exit 1
+    echo "7->8 closed (verified)" ;;
   clear)
     for n in anrg-3 anrg-7; do
       fw "$n" "for i in \$(ls /sys/class/net); do tc qdisc del dev \$i root 2>/dev/null; done; true"

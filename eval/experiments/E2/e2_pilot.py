@@ -192,10 +192,14 @@ def run_one(idx, arm, rep, wcsv, f):
             rel = now - t0
             done = {n for _, n in events}
             if rel >= 8 and "contact:close-3-7" not in done:
-                contacts("close-3-7")
+                if "verified" not in contacts("close-3-7"):
+                    ev("INFRA:close-3-7-failed")
+                    break
                 ev("contact:close-3-7")
             if rel >= 28 and "contact:open-7-8" not in done:
-                contacts("open-7-8")
+                if "verified" not in contacts("open-7-8"):
+                    ev("INFRA:open-7-8-failed")
+                    break
                 ev("contact:open-7-8")
                 if arm == "adaptive-relay":
                     patch_realization(run, [{"object": "produce",
@@ -203,7 +207,9 @@ def run_one(idx, arm, rep, wcsv, f):
                                              "servingCopy": "anrg-7"}])
                     ev("patch:copy-to-consumer(contact-2)")
             if rel >= 36 and "contact:close-7-8" not in done:
-                contacts("close-7-8")
+                if "verified" not in contacts("close-7-8"):
+                    ev("INFRA:close-7-8-failed")
+                    break
                 ev("contact:close-7-8")
         snap = snapshot_objects(run)
         if snap != last_snap and snap:
@@ -213,6 +219,9 @@ def run_one(idx, arm, rep, wcsv, f):
 
     ph = kubectl(f"get odag {run} -o jsonpath='{{.status.phase}}'"
                  ).stdout.strip()
+    if any(n.startswith("INFRA:") for _, n in events):
+        ph = "InfraFail-" + next(n for _, n in events
+                                 if n.startswith("INFRA:"))[6:]
     mk = kubectl(f"get odag {run} -o jsonpath='{{.status.makespan}}'"
                  ).stdout.strip()
     # Proof the relay ran no pod + placements.
