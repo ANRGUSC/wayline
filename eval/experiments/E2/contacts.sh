@@ -30,29 +30,35 @@ fw() {
 
 # assert_drops <node> <expected-count> — structural verification that the
 # node's egress carries exactly the expected number of drop filters.
+# Parses a sentinel rather than scraping digits out of mixed output.
 assert_drops() {
-  local node=$1 want=$2 got
-  got=$(fw "$node" "IF=\$(ip route get $IP8 | grep -o 'dev [^ ]*' | awk '{print \$2}'); tc filter show dev \$IF 2>/dev/null | grep -c 'action order'")
-  got=$(printf '%s' "$got" | tr -dc '0-9')
-  [ -z "$got" ] && got=-1
+  local node=$1 want=$2 out got
+  out=$(fw "$node" "IF=\$(ip route get $IP8 | grep -o 'dev [^ ]*' | awk '{print \$2}'); echo DROPS=\$(tc filter show dev \$IF 2>/dev/null | grep -c 'action order')")
+  got=$(printf '%s' "$out" | sed -n 's/.*DROPS=\([0-9][0-9]*\).*/\1/p' | tail -1)
   if [ "$got" != "$want" ]; then
-    echo "CONTACT STATE ERROR on $node: drop filters=$got expected=$want"
+    echo "CONTACT STATE ERROR on $node: drop filters='${got:-none}' expected=$want (raw: $(printf '%s' "$out" | tr '\n' ' '))"
     return 1
   fi
   return 0
 }
 
 # block_set <node> [dst-ip ...] — rebuild that node's egress drop set.
+# Builds the command with no empty conditional: an `if ... then fi` with
+# an empty body is a shell syntax error, which aborts the WHOLE script
+# (including the qdisc delete) and silently leaves the old state.
 block_set() {
   local node=$1; shift
-  local ref="${1:-$IP8}"
-  local filters=""
-  for dst in "$@"; do
-    filters+="tc filter add dev \$IF parent 1: protocol ip prio 1 u32 match ip dst $dst/32 match ip dport 8082 0xffff action drop; "
-  done
-  fw "$node" "IF=\$(ip route get $ref | grep -o 'dev [^ ]*' | awk '{print \$2}'); \
-              tc qdisc del dev \$IF root 2>/dev/null; \
-              if [ -n \"$filters\" ]; then tc qdisc add dev \$IF root handle 1: prio && $filters fi; true"
+  local cmds
+  cmds="IF=\$(ip route get $IP8 | grep -o 'dev [^ ]*' | awk '{print \$2}'); "
+  cmds="${cmds}tc qdisc del dev \$IF root 2>/dev/null; "
+  if [ "$#" -gt 0 ]; then
+    cmds="${cmds}tc qdisc add dev \$IF root handle 1: prio; "
+    for dst in "$@"; do
+      cmds="${cmds}tc filter add dev \$IF parent 1: protocol ip prio 1 u32 match ip dst ${dst}/32 match ip dport 8082 0xffff action drop; "
+    done
+  fi
+  cmds="${cmds}true"
+  fw "$node" "$cmds"
 }
 
 # verify_contacts — functional proof with a REAL agent push: a small
