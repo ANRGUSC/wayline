@@ -66,7 +66,9 @@ def agent_ready(aip, run, task):
 
 def contacts(cmd):
     r = sh(f"{E2DIR}/contacts.sh {cmd}", timeout=60)
-    return r.stdout.strip()
+    out = (r.stdout + r.stderr).strip()
+    print(f"[e2] contacts {cmd}: {out}", flush=True)
+    return out
 
 
 def fw_pods():
@@ -136,7 +138,16 @@ def run_one(idx, arm, rep, wcsv, f):
     blocked = arm != "clean-direct"
     censor = CENSOR_FIXED if arm == "fixed-direct" else RUN_TIMEOUT
     if blocked:
-        contacts("init")
+        out = contacts("init")
+        if "(verified)" not in out:
+            # Never run a blocked arm against an unverified firewall: a
+            # silent no-block produces a plausible-looking bogus row.
+            print(f"[e2] #{idx} {arm}/{rep}: INIT NOT VERIFIED, run skipped",
+                  flush=True)
+            wcsv.writerow([idx, arm, rep, "", "InfraFail-init", "", "",
+                           "", "", "", "", "", "", 0])
+            f.flush()
+            return
     else:
         contacts("clear")
     r = sh(f"/home/anrg/wayline/bin/wayline run e2relay -n {NS}")
