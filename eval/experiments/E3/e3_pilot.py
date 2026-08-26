@@ -50,7 +50,7 @@ FIELDS = ["order", "block", "arm", "run", "phase", "makespan_s", "digest",
           "loss_to_rebind_s", "rebind_to_consumer_install_s",
           "delivered_3_7", "delivered_3_8", "delivered_7_8",
           "attempted_3_7", "attempted_3_8", "attempted_7_8",
-          "backup_install_rel_injection_s", "backup_evict_rel_injection_s",
+          "backup_install_rel_event_s", "backup_evict_rel_event_s",
           "replica_residence_s", "replica_storage_MB_s",
           "patches", "cancels", "failed_flows", "ok_flows",
           "cap_bytes_3", "cap_bytes_7", "cap_verified", "qdisc_clean_after",
@@ -214,6 +214,7 @@ def run_one(idx, block, arm, wcsv, f):
         ev("submit:replica-requested")
 
     t0 = t_risk = t_inject = t_backup_install = t_backup_evict = None
+    t_clear = None
     t_consumer_install = None
     obj_hist, last = [], ""
     start = time.time()
@@ -235,6 +236,7 @@ def run_one(idx, block, arm, wcsv, f):
                 t_risk = time.time()
                 ev("risk:high")
             if rel >= 30 and "t30" not in names:
+                t_event_marker = time.time()
                 if arm in LOSS_ARMS:
                     gone, t_inject = inject_loss(run)
                     ev("loss:source-copy-deleted" if gone
@@ -243,6 +245,7 @@ def run_one(idx, block, arm, wcsv, f):
                         open(sig, "w").write("loss")
                 elif arm == "adaptive-clear":
                     open(sig, "w").write("clear")
+                    t_clear = t_event_marker
                     ev("risk:cleared")
                 ev("t30")
         # object copy history
@@ -357,7 +360,8 @@ def run_one(idx, block, arm, wcsv, f):
                    tot(fl7, "anrg-8", True),
                    tot(fl3, "anrg-7", False), tot(fl3, "anrg-8", False),
                    tot(fl7, "anrg-8", False),
-                   d(t_inject, t_backup_install), d(t_inject, t_backup_evict),
+                   d(t_inject or t_clear, t_backup_install),
+                   d(t_inject or t_clear, t_backup_evict),
                    residence, storage, patches, cancels,
                    len(allfl) - ok_flows, ok_flows, cap_b3, cap_b7,
                    cap_ver, clean, SEED])
