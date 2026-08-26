@@ -228,7 +228,7 @@ func reconcileRealization(dynClient dynamic.Interface, client *kubernetes.Client
 	}
 
 	posted := make(map[string]bool)
-	for attempt := 0; attempt < 120; attempt++ {
+	for attempt := 0; attempt < 200; attempt++ {
 		if g, _ := reconcileGen.Load(key); g != gen {
 			return // superseded by a newer revision
 		}
@@ -239,7 +239,15 @@ func reconcileRealization(dynClient dynamic.Interface, client *kubernetes.Client
 			log.Printf("[realize] %s: realization converged", key)
 			return
 		}
-		time.Sleep(5 * time.Second)
+		// Converge fast at first: under intermittent connectivity the
+		// window in which a copy can be made may be only seconds long,
+		// and a 5s poll can miss most of it. Back off once theinitial burst
+		// has passed.
+		if attempt < 30 {
+			time.Sleep(time.Second)
+		} else {
+			time.Sleep(5 * time.Second)
+		}
 	}
 	log.Printf("[realize] %s: gave up before convergence (transfers may still complete)", key)
 }

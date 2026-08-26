@@ -145,7 +145,7 @@ def run_one(idx, arm, rep, wcsv, f):
             print(f"[e2] #{idx} {arm}/{rep}: INIT NOT VERIFIED, run skipped",
                   flush=True)
             wcsv.writerow([idx, arm, rep, "", "InfraFail-init", "", "",
-                           "", "", "", "", "", "", 0])
+                           "", "", "", "", "", "", "", "", "", 0])
             f.flush()
             return
     else:
@@ -222,9 +222,15 @@ def run_one(idx, arm, rep, wcsv, f):
                           for ln in pods.splitlines() if len(ln.split()) >= 7)
     fl3 = [x for x in flows("anrg-3", run) if x.get("dataSize", 0) > 1e6]
     fl7 = [x for x in flows("anrg-7", run) if x.get("dataSize", 0) > 1e6]
-    b37 = sum(x["dataSize"] for x in fl3 if x.get("dstNode") == "anrg-7")
-    b38 = sum(x["dataSize"] for x in fl3 if x.get("dstNode") == "anrg-8")
-    b78 = sum(x["dataSize"] for x in fl7 if x.get("dstNode") == "anrg-8")
+
+    def total(fl, src_dst, ok_only):
+        return sum(x["dataSize"] for x in fl
+                   if x.get("dstNode") == src_dst
+                   and (x.get("ok", x.get("Ok", False)) if ok_only else True))
+    b37, b38 = total(fl3, "anrg-7", True), total(fl3, "anrg-8", True)
+    b78 = total(fl7, "anrg-8", True)
+    a37, a38 = total(fl3, "anrg-7", False), total(fl3, "anrg-8", False)
+    a78 = total(fl7, "anrg-8", False)
     dg = digest_map(run)
     dg_ok = "ok" if len(set(dg.values())) == 1 and dg else f"vals={len(set(dg.values()))}"
     open(f"{RES}/odag-{run}.json", "w").write(
@@ -238,11 +244,12 @@ def run_one(idx, arm, rep, wcsv, f):
     kubectl(f"delete odag {run} --ignore-not-found >/dev/null 2>&1")
     wcsv.writerow([idx, arm, rep, run, ph, mk,
                    round(t0 - t_start, 1) if t0 else "",
-                   b37, b38, b78, dg_ok, relay_pods, placements,
-                   len(events)])
+                   b37, b38, b78, a37, a38, a78,
+                   dg_ok, relay_pods, placements, len(events)])
     f.flush()
     print(f"[e2] #{idx} {arm} rep={rep}: {ph} makespan={mk}s "
-          f"bytes 3->7={b37} 3->8={b38} 7->8={b78} digest={dg_ok} "
+          f"delivered 3->7={b37} 3->8={b38} 7->8={b78} | "
+          f"attempted 3->8={a38} | digest={dg_ok} "
           f"relay-pods={relay_pods}", flush=True)
     time.sleep(5)
 
@@ -253,14 +260,24 @@ def main():
         IPS[n] = node_ip(n)
     fw_pods()
     contacts("clear")
+    # Contact-scale transport deadline: a push blocked by a blackout must
+    # fail within seconds so its retries (5, 500ms apart) land inside the
+    # next contact window, instead of stalling on TCP backoff past it.
+    # 300MB: 5 + 5 + 300/20 = 25s per attempt.
+    kubectl("set env ds/data-agent WL_PUSH_TIMEOUT_BASE_S=5 "
+            "WL_PUSH_TIMEOUT_SAFETY_S=5 WL_PUSH_MIN_THROUGHPUT_KBS=20000 "
+            ">/dev/null")
+    kubectl("rollout status ds/data-agent --timeout=300s >/dev/null")
     sh(f"kubectl apply -f {E2DIR}/e2.yml >/dev/null")
     time.sleep(3)
     try:
         with open(f"{RES}/runs.csv", "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["order", "arm", "rep", "run", "phase", "makespan_s",
-                        "t0_rel_s", "bytes_3_7", "bytes_3_8", "bytes_7_8",
-                        "digest", "relay_pods", "placements", "n_events"])
+                        "t0_rel_s", "delivered_3_7", "delivered_3_8",
+                        "delivered_7_8", "attempted_3_7", "attempted_3_8",
+                        "attempted_7_8", "digest", "relay_pods",
+                        "placements", "n_events"])
             idx = 1
             for rep in range(1, REPS + 1):
                 for arm in ("clean-direct", "fixed-direct", "static-relay",
@@ -269,6 +286,10 @@ def main():
                     idx += 1
     finally:
         contacts("clear")
+        kubectl("set env ds/data-agent WL_PUSH_TIMEOUT_BASE_S- "
+                "WL_PUSH_TIMEOUT_SAFETY_S- WL_PUSH_MIN_THROUGHPUT_KBS- "
+                ">/dev/null")
+        kubectl("rollout status ds/data-agent --timeout=300s >/dev/null")
         for node in ("anrg-3", "anrg-7"):
             kubectl(f"delete pod e2-fw-{node} --ignore-not-found "
                     f">/dev/null 2>&1")
