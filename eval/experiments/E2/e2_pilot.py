@@ -72,6 +72,14 @@ def contacts(cmd):
 
 
 def fw_pods():
+    # Pod-network probe on anrg-3: verification must test the identity
+    # the agents actually use.
+    kubectl("delete pod e2-probe-anrg-3 --ignore-not-found >/dev/null 2>&1")
+    probe = {"spec": {"nodeName": "anrg-3", "restartPolicy": "Never",
+             "containers": [{"name": "c", "image": "alpine",
+                             "command": ["sh", "-c", "sleep 86400"]}]}}
+    sh(f"kubectl run e2-probe-anrg-3 -n {NS} --restart=Never --image=alpine "
+       f"--overrides='{json.dumps(probe)}' >/dev/null 2>&1")
     for node in ("anrg-3", "anrg-7", "anrg-8"):
         spec = {"spec": {"nodeName": node, "hostNetwork": True,
                 "restartPolicy": "Never",
@@ -272,6 +280,8 @@ def main():
         for node in ("anrg-3", "anrg-7", "anrg-8"):
             kubectl(f"delete pod e2-fw-{node} --ignore-not-found "
                     f">/dev/null 2>&1")
+        kubectl("delete pod e2-probe-anrg-3 --ignore-not-found "
+                ">/dev/null 2>&1")
     print("E2 PILOT DONE", flush=True)
 
 
