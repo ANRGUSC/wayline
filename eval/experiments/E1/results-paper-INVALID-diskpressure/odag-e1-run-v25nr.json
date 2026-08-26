@@ -1,0 +1,412 @@
+{
+    "apiVersion": "wl.io/v1",
+    "kind": "ODAG",
+    "metadata": {
+        "creationTimestamp": "2026-08-25T19:31:17Z",
+        "generateName": "e1-run-",
+        "generation": 1,
+        "labels": {
+            "wl.io/run": "70",
+            "wl.io/template": "e1"
+        },
+        "name": "e1-run-v25nr",
+        "namespace": "wl-system",
+        "resourceVersion": "53749433",
+        "uid": "05c52fd5-cd85-45ea-aec2-2d5f90f4c469"
+    },
+    "spec": {
+        "scheduler": "heft",
+        "tasks": [
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-3"
+                    ]
+                },
+                "dataSize": "300MB",
+                "dependencies": [],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "produce",
+                "runtime": 30
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-3"
+                    ]
+                },
+                "dataSize": "300MB",
+                "dependencies": [
+                    "produce"
+                ],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "serve",
+                "runtime": 0,
+                "type": "data"
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-6"
+                    ]
+                },
+                "dataSize": "1MB",
+                "dependencies": [
+                    "serve"
+                ],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "consume-1",
+                "runtime": 4
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-7"
+                    ]
+                },
+                "dataSize": "1MB",
+                "dependencies": [
+                    "serve"
+                ],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "consume-2",
+                "runtime": 4
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-8"
+                    ]
+                },
+                "dataSize": "1MB",
+                "dependencies": [
+                    "serve"
+                ],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "consume-3",
+                "runtime": 4
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-9"
+                    ]
+                },
+                "dataSize": "1MB",
+                "dependencies": [
+                    "consume-1",
+                    "consume-2",
+                    "consume-3"
+                ],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "report",
+                "runtime": 2
+            }
+        ]
+    },
+    "status": {
+        "actualNetworkFlows": [
+            {
+                "dataSize": 1000000,
+                "dstNode": "anrg-9",
+                "end": 51.63020873069763,
+                "fromTask": "consume-3",
+                "ok": true,
+                "srcNode": "anrg-8",
+                "start": 51.602187633514404,
+                "toTask": "report"
+            },
+            {
+                "dataSize": 1000000,
+                "dstNode": "anrg-9",
+                "end": 53.96180033683777,
+                "fromTask": "consume-2",
+                "ok": true,
+                "srcNode": "anrg-7",
+                "start": 53.940038442611694,
+                "toTask": "report"
+            },
+            {
+                "dataSize": 1000000,
+                "dstNode": "anrg-9",
+                "end": 53.943634271621704,
+                "fromTask": "consume-1",
+                "ok": true,
+                "srcNode": "anrg-6",
+                "start": 53.90720820426941,
+                "toTask": "report"
+            },
+            {
+                "dataSize": 300000000,
+                "dstNode": "anrg-8",
+                "end": 46.151994466781616,
+                "fromTask": "serve",
+                "ok": true,
+                "srcNode": "anrg-9",
+                "start": 39.76957058906555,
+                "toTask": "consume-3"
+            },
+            {
+                "dataSize": 300000000,
+                "dstNode": "anrg-6",
+                "end": 48.69479584693909,
+                "fromTask": "serve",
+                "ok": true,
+                "srcNode": "anrg-9",
+                "start": 39.76957702636719,
+                "toTask": "consume-1"
+            },
+            {
+                "dataSize": 300000000,
+                "dstNode": "anrg-7",
+                "end": 48.712169885635376,
+                "fromTask": "serve",
+                "ok": true,
+                "srcNode": "anrg-9",
+                "start": 39.76957893371582,
+                "toTask": "consume-2"
+            },
+            {
+                "dataSize": 300000000,
+                "dstNode": "anrg-9",
+                "end": 39.30009460449219,
+                "fromTask": "produce",
+                "ok": true,
+                "srcNode": "anrg-5",
+                "start": 35.484471559524536,
+                "toTask": "serve"
+            }
+        ],
+        "completionTime": "2026-08-25T19:32:16.138944424Z",
+        "makespan": 56,
+        "message": "",
+        "phase": "Succeeded",
+        "predictedNetworkFlows": [
+            {
+                "dataSize": 220912838,
+                "dstNode": "anrg-9",
+                "end": 44.44283103452693,
+                "fromTask": "produce",
+                "srcNode": "anrg-5",
+                "start": 26.769803994526935,
+                "toTask": "serve"
+            },
+            {
+                "dataSize": 6651212,
+                "dstNode": "anrg-8",
+                "end": 47.62622331517276,
+                "fromTask": "serve",
+                "srcNode": "anrg-9",
+                "start": 47.09412635517276,
+                "toTask": "consume-3"
+            },
+            {
+                "dataSize": 6651212,
+                "dstNode": "anrg-7",
+                "end": 48.158320275172755,
+                "fromTask": "serve",
+                "srcNode": "anrg-9",
+                "start": 47.62622331517276,
+                "toTask": "consume-2"
+            },
+            {
+                "dataSize": 6651212,
+                "dstNode": "anrg-6",
+                "end": 48.69041723517275,
+                "fromTask": "serve",
+                "srcNode": "anrg-9",
+                "start": 48.158320275172755,
+                "toTask": "consume-1"
+            },
+            {
+                "dataSize": 1000000,
+                "dstNode": "anrg-9",
+                "end": 52.85418413399013,
+                "fromTask": "consume-1",
+                "srcNode": "anrg-6",
+                "start": 52.77418413399013,
+                "toTask": "report"
+            },
+            {
+                "dataSize": 1000000,
+                "dstNode": "anrg-9",
+                "end": 52.32379390879808,
+                "fromTask": "consume-2",
+                "srcNode": "anrg-7",
+                "start": 52.24379390879808,
+                "toTask": "report"
+            },
+            {
+                "dataSize": 1000000,
+                "dstNode": "anrg-9",
+                "end": 52.711897448602755,
+                "fromTask": "consume-3",
+                "srcNode": "anrg-8",
+                "start": 52.63189744860276,
+                "toTask": "report"
+            }
+        ],
+        "predictedTasks": [
+            {
+                "estEnd": 26.769803994526935,
+                "estStart": 0,
+                "name": "produce",
+                "node": "anrg-5"
+            },
+            {
+                "estEnd": 47.09412635517276,
+                "estStart": 44.44283103452693,
+                "name": "serve",
+                "node": "anrg-9"
+            },
+            {
+                "estEnd": 52.77418413399013,
+                "estStart": 48.690417235172745,
+                "name": "consume-1",
+                "node": "anrg-6"
+            },
+            {
+                "estEnd": 52.24379390879808,
+                "estStart": 48.158320275172755,
+                "name": "consume-2",
+                "node": "anrg-7"
+            },
+            {
+                "estEnd": 52.63189744860276,
+                "estStart": 47.62622331517276,
+                "name": "consume-3",
+                "node": "anrg-8"
+            },
+            {
+                "estEnd": 54.88067383390791,
+                "estStart": 52.85418413399013,
+                "name": "report",
+                "node": "anrg-9"
+            }
+        ],
+        "startTime": "2026-08-25T19:31:17.855420857Z",
+        "tasks": [
+            {
+                "completionTime": "2026-08-25T19:32:10Z",
+                "computeSeconds": 4.0121846199035645,
+                "createdTime": "2026-08-25T19:32:06Z",
+                "dataSize": "1000000",
+                "handoffSeconds": 0.02222919464111328,
+                "inputReadSeconds": 0.12005281448364258,
+                "inputsReadyTime": "2026-08-25T19:32:05.712027549Z",
+                "name": "consume-2",
+                "node": "anrg-7",
+                "phase": "Succeeded",
+                "podName": "e1-run-v25nr-consume-2",
+                "startTime": "2026-08-25T19:32:06Z",
+                "startupSeconds": 0,
+                "state": "ComputeDone",
+                "taskCloseTime": "2026-08-25T19:32:10.93624854Z",
+                "taskStartTime": "2026-08-25T19:32:06.773756742Z"
+            },
+            {
+                "completionTime": "2026-08-25T19:32:13Z",
+                "computeSeconds": 2.0005390644073486,
+                "createdTime": "2026-08-25T19:32:11Z",
+                "dataSize": "1000000",
+                "handoffSeconds": 0,
+                "inputReadSeconds": 0.0015017986297607422,
+                "inputsReadyTime": "2026-08-25T19:32:10.958017349Z",
+                "name": "report",
+                "node": "anrg-9",
+                "phase": "Succeeded",
+                "podName": "e1-run-v25nr-report",
+                "startTime": "2026-08-25T19:32:11Z",
+                "startupSeconds": 0,
+                "state": "ComputeDone",
+                "taskCloseTime": "2026-08-25T19:32:13.768624067Z",
+                "taskStartTime": "2026-08-25T19:32:11.764255523Z"
+            },
+            {
+                "completionTime": "2026-08-25T19:31:52Z",
+                "computeSeconds": 30.328912258148193,
+                "createdTime": "2026-08-25T19:31:17Z",
+                "dataSize": "300000000",
+                "handoffSeconds": 2.824676752090454,
+                "inputReadSeconds": 0,
+                "name": "produce",
+                "node": "anrg-5",
+                "phase": "Succeeded",
+                "podName": "e1-run-v25nr-produce",
+                "startTime": "2026-08-25T19:31:17Z",
+                "startupSeconds": 0,
+                "state": "ComputeDone",
+                "taskCloseTime": "2026-08-25T19:31:51.997809886Z",
+                "taskStartTime": "2026-08-25T19:31:18.804284572Z"
+            },
+            {
+                "completionTime": "2026-08-25T19:32:08Z",
+                "computeSeconds": 4.021685600280762,
+                "createdTime": "2026-08-25T19:32:03Z",
+                "dataSize": "1000000",
+                "handoffSeconds": 0.020003318786621094,
+                "inputReadSeconds": 0.22263717651367188,
+                "inputsReadyTime": "2026-08-25T19:32:03.151751279Z",
+                "name": "consume-3",
+                "node": "anrg-8",
+                "phase": "Succeeded",
+                "podName": "e1-run-v25nr-consume-3",
+                "startTime": "2026-08-25T19:32:03Z",
+                "startupSeconds": 0,
+                "state": "ComputeDone",
+                "taskCloseTime": "2026-08-25T19:32:08.598950862Z",
+                "taskStartTime": "2026-08-25T19:32:04.314135074Z"
+            },
+            {
+                "completionTime": "2026-08-25T19:32:10Z",
+                "computeSeconds": 4.015711545944214,
+                "createdTime": "2026-08-25T19:32:06Z",
+                "dataSize": "1000000",
+                "handoffSeconds": 0.022727489471435547,
+                "inputReadSeconds": 0.12009167671203613,
+                "inputsReadyTime": "2026-08-25T19:32:05.691155433Z",
+                "name": "consume-1",
+                "node": "anrg-6",
+                "phase": "Succeeded",
+                "podName": "e1-run-v25nr-consume-1",
+                "startTime": "2026-08-25T19:32:06Z",
+                "startupSeconds": 0,
+                "state": "ComputeDone",
+                "taskCloseTime": "2026-08-25T19:32:10.900829792Z",
+                "taskStartTime": "2026-08-25T19:32:06.732552528Z"
+            },
+            {
+                "completionTime": "2026-08-25T19:31:56.584561586Z",
+                "dataSize": "300000000",
+                "name": "serve",
+                "node": "anrg-9",
+                "phase": "Succeeded",
+                "state": "DataVertex"
+            }
+        ]
+    }
+}

@@ -1,0 +1,281 @@
+{
+    "apiVersion": "wl.io/v1",
+    "kind": "ODAG",
+    "metadata": {
+        "creationTimestamp": "2026-08-25T19:35:30Z",
+        "generateName": "e1-run-",
+        "generation": 1,
+        "labels": {
+            "wl.io/run": "74",
+            "wl.io/template": "e1"
+        },
+        "name": "e1-run-x2dns",
+        "namespace": "wl-system",
+        "resourceVersion": "53750996",
+        "uid": "6a13e943-6a09-48bf-9afc-a78fa9daf243"
+    },
+    "spec": {
+        "scheduler": "heft",
+        "tasks": [
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-3"
+                    ]
+                },
+                "dataSize": "300MB",
+                "dependencies": [],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "produce",
+                "runtime": 30
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-3"
+                    ]
+                },
+                "dataSize": "300MB",
+                "dependencies": [
+                    "produce"
+                ],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "serve",
+                "runtime": 0,
+                "type": "data"
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-6"
+                    ]
+                },
+                "dataSize": "1MB",
+                "dependencies": [
+                    "serve"
+                ],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "consume-1",
+                "runtime": 4
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-7"
+                    ]
+                },
+                "dataSize": "1MB",
+                "dependencies": [
+                    "serve"
+                ],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "consume-2",
+                "runtime": 4
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-8"
+                    ]
+                },
+                "dataSize": "1MB",
+                "dependencies": [
+                    "serve"
+                ],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "consume-3",
+                "runtime": 4
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-9"
+                    ]
+                },
+                "dataSize": "1MB",
+                "dependencies": [
+                    "consume-1",
+                    "consume-2",
+                    "consume-3"
+                ],
+                "image": "192.168.1.163:5000/wl-multi-odag-task:latest",
+                "name": "report",
+                "runtime": 2
+            }
+        ]
+    },
+    "status": {
+        "actualNetworkFlows": [
+            {
+                "dataSize": 300000000,
+                "dstNode": "anrg-7",
+                "end": 36.91802477836609,
+                "fromTask": "produce",
+                "ok": true,
+                "srcNode": "anrg-6",
+                "start": 33.072041273117065,
+                "toTask": "serve"
+            }
+        ],
+        "message": "task \"consume-2\" failed (pod failed)",
+        "phase": "Failed",
+        "predictedNetworkFlows": [
+            {
+                "dataSize": 300000000,
+                "dstNode": "anrg-7",
+                "end": 34.4,
+                "fromTask": "produce",
+                "srcNode": "anrg-6",
+                "start": 32,
+                "toTask": "serve"
+            },
+            {
+                "dataSize": 1000033,
+                "dstNode": "anrg-8",
+                "end": 38.8285250006511,
+                "fromTask": "serve",
+                "srcNode": "anrg-7",
+                "start": 38.820524736651095,
+                "toTask": "consume-3"
+            },
+            {
+                "dataSize": 1000033,
+                "dstNode": "anrg-6",
+                "end": 38.8365252646511,
+                "fromTask": "serve",
+                "srcNode": "anrg-7",
+                "start": 38.8285250006511,
+                "toTask": "consume-1"
+            },
+            {
+                "dataSize": 1000000,
+                "dstNode": "anrg-9",
+                "end": 42.91720377653152,
+                "fromTask": "consume-1",
+                "srcNode": "anrg-6",
+                "start": 42.837203776531524,
+                "toTask": "report"
+            },
+            {
+                "dataSize": 1000000,
+                "dstNode": "anrg-9",
+                "end": 43.3207324375808,
+                "fromTask": "consume-2",
+                "srcNode": "anrg-7",
+                "start": 43.2407324375808,
+                "toTask": "report"
+            },
+            {
+                "dataSize": 1000000,
+                "dstNode": "anrg-9",
+                "end": 43.90853878879533,
+                "fromTask": "consume-3",
+                "srcNode": "anrg-8",
+                "start": 43.828538788795335,
+                "toTask": "report"
+            }
+        ],
+        "predictedTasks": [
+            {
+                "estEnd": 32,
+                "estStart": 0,
+                "name": "produce",
+                "node": "anrg-6"
+            },
+            {
+                "estEnd": 38.820524736651095,
+                "estStart": 34.4,
+                "name": "serve",
+                "node": "anrg-7"
+            },
+            {
+                "estEnd": 42.837203776531524,
+                "estStart": 38.8365252646511,
+                "name": "consume-1",
+                "node": "anrg-6"
+            },
+            {
+                "estEnd": 43.2407324375808,
+                "estStart": 38.820524736651095,
+                "name": "consume-2",
+                "node": "anrg-7"
+            },
+            {
+                "estEnd": 43.828538788795335,
+                "estStart": 38.8285250006511,
+                "name": "consume-3",
+                "node": "anrg-8"
+            },
+            {
+                "estEnd": 46.118603158766135,
+                "estStart": 43.90853878879533,
+                "name": "report",
+                "node": "anrg-9"
+            }
+        ],
+        "startTime": "2026-08-25T19:35:30.384852208Z",
+        "tasks": [
+            {
+                "completionTime": "2026-08-25T19:36:02Z",
+                "computeSeconds": 30.111161947250366,
+                "createdTime": "2026-08-25T19:35:30Z",
+                "dataSize": "300000000",
+                "handoffSeconds": 1.7230660915374756,
+                "inputReadSeconds": 0,
+                "name": "produce",
+                "node": "anrg-6",
+                "phase": "Succeeded",
+                "podName": "e1-run-x2dns-produce",
+                "startTime": "2026-08-25T19:35:30Z",
+                "startupSeconds": 0,
+                "state": "ComputeDone",
+                "taskCloseTime": "2026-08-25T19:36:02.915495395Z",
+                "taskStartTime": "2026-08-25T19:35:31.059104442Z"
+            },
+            {
+                "createdTime": "2026-08-25T19:36:07Z",
+                "dataSize": "1000000",
+                "inputsReadyTime": "2026-08-25T19:36:07.087622165Z",
+                "name": "consume-2",
+                "node": "anrg-7",
+                "phase": "Failed",
+                "podName": "e1-run-x2dns-consume-2",
+                "startTime": "2026-08-25T19:36:07Z",
+                "startupSeconds": 0,
+                "state": "Failed"
+            },
+            {
+                "completionTime": "2026-08-25T19:36:07.087622165Z",
+                "dataSize": "300000000",
+                "name": "serve",
+                "node": "anrg-7",
+                "phase": "Succeeded",
+                "state": "DataVertex"
+            }
+        ]
+    }
+}
