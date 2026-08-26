@@ -70,7 +70,7 @@ def contacts(cmd):
 
 
 def fw_pods():
-    for node in ("anrg-7", "anrg-8"):
+    for node in ("anrg-3", "anrg-7", "anrg-8"):
         spec = {"spec": {"nodeName": node, "hostNetwork": True,
                 "restartPolicy": "Never",
                 "containers": [{"name": "c", "image": "alpine",
@@ -80,13 +80,13 @@ def fw_pods():
         kubectl(f"delete pod e2-fw-{node} --ignore-not-found >/dev/null 2>&1")
         sh(f"kubectl run e2-fw-{node} -n {NS} --restart=Never --image=alpine "
            f"--overrides='{json.dumps(spec)}' >/dev/null 2>&1")
-    for node in ("anrg-7", "anrg-8"):
+    for node in ("anrg-3", "anrg-7", "anrg-8"):
         for _ in range(30):
-            if kubectl(f"get pod e2-fw-{node} -o jsonpath='{{.status.phase}}'"
-                       ).stdout.strip() == "Running":
+            r = kubectl(f"exec e2-fw-{node} -- iptables -L -n 2>/dev/null "
+                        f"| head -1")
+            if "Chain" in r.stdout:
                 break
             time.sleep(3)
-        time.sleep(2)
 
 
 def patch_realization(run, entries):
@@ -258,7 +258,7 @@ def main():
                     idx += 1
     finally:
         contacts("clear")
-        for node in ("anrg-7", "anrg-8"):
+        for node in ("anrg-3", "anrg-7", "anrg-8"):
             kubectl(f"delete pod e2-fw-{node} --ignore-not-found "
                     f">/dev/null 2>&1")
     print("E2 PILOT DONE", flush=True)

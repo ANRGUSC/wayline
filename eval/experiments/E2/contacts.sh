@@ -14,7 +14,16 @@ fw() { # <node> <iptables-cmds>
   kubectl -n "$NS" exec e2-fw-$1 -- sh -c "$2"
 }
 ensure_chain() { # <node>
-  fw $1 "iptables -N WL_E2 2>/dev/null; iptables -C INPUT -j WL_E2 2>/dev/null || iptables -I INPUT 1 -j WL_E2"
+  # Agent traffic to nodeIP:8082 is DNATed by the hostPort portmap in
+  # PREROUTING and traverses FORWARD, not INPUT; hook both.
+  fw $1 "iptables -N WL_E2 2>/dev/null; iptables -C INPUT -j WL_E2 2>/dev/null || iptables -I INPUT 1 -j WL_E2; iptables -C FORWARD -j WL_E2 2>/dev/null || iptables -I FORWARD 1 -j WL_E2"
+}
+verify() { # <expect-fail-ip> <expect-ok-ip>
+  # Active verification from anrg-3: blocked path must FAIL, open must OK.
+  bad=$(fw anrg-3 "wget -q -T 2 -O /dev/null http://$1:8082/healthz 2>/dev/null && echo REACHABLE || echo blocked")
+  good=$(fw anrg-3 "wget -q -T 2 -O /dev/null http://$2:8082/healthz 2>/dev/null && echo ok || echo UNREACHABLE")
+  echo "verify: to-blocked=$bad to-open=$good"
+  [ "$bad" = blocked ] && [ "$good" = ok ]
 }
 case "$CMD" in
   init)
@@ -22,7 +31,9 @@ case "$CMD" in
     # blocked for the whole run: 3->8; blocked until opened: 7->8. 3->7 open.
     fw anrg-8 "iptables -F WL_E2; iptables -A WL_E2 -s $IP3 -p tcp --dport 8082 -j REJECT --reject-with tcp-reset; iptables -A WL_E2 -s $IP7 -p tcp --dport 8082 -j REJECT --reject-with tcp-reset"
     fw anrg-7 "iptables -F WL_E2"
-    echo "init: 3->8 blocked, 7->8 blocked, 3->7 open" ;;
+    IP8=$(kubectl get node anrg-8 -o jsonpath="{.status.addresses[?(@.type==\"InternalIP\")].address}")
+    verify "$IP8" "$IP7" || { echo "INIT VERIFY FAILED"; exit 1; }
+    echo "init: 3->8 blocked, 7->8 blocked, 3->7 open (verified)" ;;
   close-3-7)
     fw anrg-7 "iptables -A WL_E2 -s $IP3 -p tcp --dport 8082 -j REJECT --reject-with tcp-reset"
     echo "3->7 closed" ;;
@@ -34,7 +45,7 @@ case "$CMD" in
     echo "7->8 closed" ;;
   clear)
     for n in anrg-7 anrg-8; do
-      fw $n "iptables -F WL_E2 2>/dev/null; iptables -D INPUT -j WL_E2 2>/dev/null; iptables -X WL_E2 2>/dev/null; true"
+      fw $n "iptables -F WL_E2 2>/dev/null; iptables -D INPUT -j WL_E2 2>/dev/null; iptables -D FORWARD -j WL_E2 2>/dev/null; iptables -X WL_E2 2>/dev/null; true"
     done
     echo cleared ;;
   status)
