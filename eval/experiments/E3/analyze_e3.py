@@ -183,7 +183,11 @@ print(f"{'arm':<16}{'patches':>9}{'evictions':>11}{'cancels':>9}"
       f"{'restarts':>10}{'backup pods':>13}{'failed flows':>14}")
 for a in ARMS:
     rs = by[a]
-    ev = sum(1 for r in rs if r["backup_evict_rel_event_s"] not in ("", None))
+    # Evictions come from the event traces, which are authoritative and
+    # schema-independent (the CSV column was injection-relative in the
+    # frozen harness, so it is blank for the no-injection arm).
+    ev = sum(1 for r in rs if r["run"] and
+             "backup:evicted" in events_of(r["run"])[0])
     print(f"{a:<16}{st.median([num(r['patches'],0) for r in rs]):>9.0f}"
           f"{ev:>11}{st.median([num(r['cancels'],0) for r in rs]):>9.0f}"
           f"{max(num(r['restarts'],0) for r in rs):>10.0f}"
