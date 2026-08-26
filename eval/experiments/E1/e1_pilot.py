@@ -162,6 +162,19 @@ def clear_signal():
         pass
 
 
+def purge_run_data(run):
+    """Delete the run's data on every agent. Per-run ODAG deletion does
+    not purge agent bytes, and at ~1 GB/run a campaign fills 57 GB eMMC
+    nodes into DiskPressure (which is how the first paper campaign
+    died). Called after digests are read, before the ODAG is deleted."""
+    r = kubectl("get pods -o wide --no-headers -l app=data-agent")
+    for line in r.stdout.splitlines():
+        fl = line.split()
+        if len(fl) >= 7 and fl[6].startswith("anrg-"):
+            sh(f"curl -s -m 30 -X DELETE http://{fl[5]}:8082/data/{run} "
+               f">/dev/null", timeout=40)
+
+
 def digests(run):
     vals = {}
     for node in [PRODUCER, TARGET] + CONSUMERS:
@@ -250,6 +263,7 @@ def run_one(idx, arm, cap, rep, iface, wcsv, f):
                 sh(f"kubectl -n {NS} logs {fl[0]} --tail=300 2>/dev/null "
                    f"| grep {run} > {RES}/agent3-{run}.log; true")
     rec["digest"] = digests(run)
+    purge_run_data(run)
     if pol:
         pol.terminate()
     ok = cap_off(iface)
