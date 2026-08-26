@@ -1,0 +1,41 @@
+apiVersion: wl.io/v1
+kind: ODAGTemplate
+metadata:
+  name: e2relay
+  namespace: wl-system
+spec:
+  description: 'E2 temporal relay: no relay task in the DAG; anrg-7 relays via realization only.'
+  scheduler: heft
+  retention:
+    maxRuns: 10
+    data:
+      policy: keepLatest
+      keepRuns: 2
+  defaults:
+    runtime: 3
+    dataSize: 1MB
+  tasks:
+  - name: produce
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: [python, task.py]
+    dependencies: []
+    dataSize: 300MB
+    runtime: 30
+    constraints:
+      nodeNames: [anrg-3]
+  - name: consume
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: [python, task.py]
+    dependencies: [produce]
+    dataSize: 1MB
+    runtime: 4
+    constraints:
+      nodeNames: [anrg-8]
+  - name: report
+    image: 192.168.1.163:5000/wl-multi-odag-task:latest
+    command: [python, task.py]
+    dependencies: [consume]
+    dataSize: 1MB
+    runtime: 2
+    constraints:
+      nodeNames: [anrg-9]
