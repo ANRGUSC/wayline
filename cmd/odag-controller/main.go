@@ -598,7 +598,13 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 			}
 			continue
 		}
-		childNi := assignMap[task.Name]
+		// Gate on the node where this task will ACTUALLY execute. For a
+		// data vertex whose serving point a revision has rebound, that
+		// is the new serving node, not the template's assigned one:
+		// after a source-copy loss the input exists only on the
+		// surviving replica, and gating on the dead node would wedge
+		// the run forever.
+		childNi := vertexNi
 		allDepsDone := true
 		for _, dep := range task.Dependencies {
 			// Any-valid-copy gate: a dependency names OBJECT(s), and any
