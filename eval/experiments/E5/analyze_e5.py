@@ -11,6 +11,18 @@ It closes with the decision the pilot exists to answer: do at least two
 of the three policies produce DIFFERENT schedules, and do their
 outcomes differ by more than the run-to-run spread?
 
+NOTE ON "FIDELITY".  What this script measures is ENACTMENT fidelity:
+did Wayline place and order tasks exactly as the policy decided (hash
+against the frozen reference, observed per-node order against the order
+SAGA returned).  It deliberately does NOT compare SAGA's estimated
+finish time against the measured makespan.  Those are not comparable
+without correction: the estimate is built from declared runtimes, while
+the measured makespan also spans pod admission, container start, input
+read, and handoff.  That gap runs tens of percent (36.9% on iot, 36.0%
+on wide-pipeline-flex), so reading it as scheduler error is wrong.  The
+predictive-accuracy claim belongs to the calibrated simulator, which
+adds per-task overhead and lands within 0.3-5.3%.
+
 Usage: analyze_e5.py <results-dir>
 """
 import csv
