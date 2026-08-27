@@ -174,6 +174,10 @@ def main():
         with open(f"{RES}/runs.csv", "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(FIELDS)
+            # Rows are buffered per block so the cross-arm OLB check can
+            # mark them before they are committed; flush the header now
+            # so an early crash still leaves a readable file.
+            f.flush()
             for block, pseed in enumerate(blocks, 1):
                 # Disk telemetry per block. This campaign is ~7x the
                 # pilot; printing the trend lets us see exhaustion coming
