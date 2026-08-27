@@ -37,7 +37,7 @@ def f(v, d=0.0):
 print(f"runs={len(rows)}  blocks={len(blocks)}  seed={rows[0]['seed']}")
 print("\n== per arm ==")
 print(f"{'arm':<15}{'n':>3}{'done':>6}{'makespan':>10}{'IQR':>11}"
-      f"{'capMB':>8}{'expect':>8}{'wire%':>7}{'objects on anrg-7':>22}")
+      f"{'cap-class MB':>14}{'payload':>9}{'proto%':>8}{'objects on anrg-7':>22}")
 for a in ARMS:
     rs = by[a]
     done = [r for r in rs if r["phase"] == "Succeeded"]
@@ -51,7 +51,7 @@ for a in ARMS:
     print(f"{a:<15}{len(rs):>3}{len(done):>6}"
           f"{(f'{st.median(mk):.0f}s' if mk else 'censored'):>10}"
           f"{(f'[{mk[0]},{mk[-1]}]' if mk else '-'):>11}"
-          f"{med_cap:>8.0f}{exp:>8}{(med_cap/exp-1)*100:>6.1f}%"
+          f"{med_cap:>14.0f}{exp:>9}{(med_cap/exp-1)*100:>7.1f}%"
           f"{(','.join(sorted(objs)) or 'none'):>22}")
 
 print("\n== paired within blocks (makespan) ==")
@@ -80,31 +80,47 @@ chk(f"{len(rows)}/{len(rows)} complete with correct digests",
 chk("no restarts, no pods on anrg-7",
     all(int(f(r["restarts"])) == 0 for r in rows) and
     all(int(f(r["target_pods"])) == 0 for r in rows))
-vex_ok = all(int(f(r["vertex_exec_total"])) == 3 for r in rows)
-chk("each data vertex executes exactly once (3 per run)", vex_ok)
-if not vex_ok:
-    bad = [(r["order"], r["arm"], r["vertex_exec_total"]) for r in rows
-           if int(f(r["vertex_exec_total"])) != 3]
-    print(f"        counts != 3: {bad}  (log-window artifact if the run "
-          f"Succeeded with verified digests)")
+# Acceptance uses delivery RECORDS (data-plane truth), not controller
+# log lines: exactly one successful delivery per expected vertex edge
+# and none beyond them. Revision transfers to the target are counted
+# separately -- they prove materialization, not execution count.
+have_deliv = "delivery_total" in rows[0]
+if have_deliv:
+    four = all(int(f(r["delivery_total"])) == 4 and
+               int(f(r["extra_deliveries"])) == 0 for r in rows)
+    chk("exactly four successful data-vertex deliveries per run, no extras",
+        four)
+    if not four:
+        bad = [(r["order"], r["arm"], r["deliveries"], r["extra_deliveries"])
+               for r in rows
+               if int(f(r["delivery_total"])) != 4 or
+               int(f(r["extra_deliveries"])) != 0]
+        for b in bad:
+            print(f"        run {b[0]} {b[1]}: {b[2]} extra={b[3]}")
+    rt = [int(f(r["revision_transfers"])) for r in rows]
+    print(f"        (revision transfers to target, separate: "
+          f"median {st.median(rt):.0f}, range [{min(rt)},{max(rt)}])")
+else:
+    print("  [n/a ] delivery records not present in this dataset "
+          "(pre-instrumentation pilot)")
 chk("selective arms install ONLY the requested object(s)",
     all({o for o in r["copies_on_target"].split(",") if o} == EXPECTED_OBJS[r["arm"]]
         for r in rows))
-chk("delivered payloads match expectation (within 8% wire overhead)",
+chk("capped-class bytes match predicted payload (+protocol bytes, <8%)",
     all(abs(f(r["cap_MB"]) / EXPECTED_MB[r["arm"]] - 1) < 0.08
         for r in rows if r["cap_MB"]))
 fo = [f(r["cap_MB"]) for r in by["features-only"]]
 fx = [f(r["cap_MB"]) for r in by["fixed"]]
-chk("features-only carries ~half the capped payload of fixed",
+chk("features-only carries ~half the capped-class bytes of fixed",
     fo and fx and abs(st.median(fo) / st.median(fx) - 0.5) < 0.06)
 chk("features-only faster than fixed in EVERY block",
     all(x < 0 for x in paired("features-only", "fixed")))
 sn = [f(r["cap_MB"]) for r in by["snapshot-only"]]
-chk("snapshot-only ~600MB and slower than fixed",
+chk("snapshot-only ~600MB payload and slower than fixed",
     sn and abs(st.median(sn) / 600 - 1) < 0.08 and
     all(x > 0 for x in paired("snapshot-only", "fixed")))
 ao = [f(r["cap_MB"]) for r in by["all-outputs"]]
-chk("all-outputs ~= fixed payload and materially slower than features-only",
+chk("all-outputs ~= fixed capped-class bytes, materially slower than features-only",
     ao and fx and abs(st.median(ao) / st.median(fx) - 1) < 0.06 and
     all(x > 0 for x in paired("all-outputs", "features-only")))
 al = [f(r["cap_MB"]) for r in by["alert-only"]]

@@ -41,11 +41,18 @@ OBJECTS = {"alert-only": ["alert"], "features-only": ["features"],
            "all-outputs": ["alert", "features", "snapshot"], "fixed": []}
 VERTICES = ["serve-alert", "serve-features", "serve-snapshot"]
 CONSUMERS = ["actuator", "analyze-a", "analyze-b", "archive"]
+# The four data-vertex deliveries that must occur exactly once each.
+# Revision transfers (object -> rev-<node>) are counted separately: they
+# prove materialization, not the number of vertex executions.
+DELIVERY_EDGES = ["serve-alert->actuator", "serve-features->analyze-a",
+                  "serve-features->analyze-b", "serve-snapshot->archive"]
 
 FIELDS = ["order", "block", "arm", "run", "phase", "makespan_s",
           "cap_bytes", "cap_MB", "patches", "patch_objects",
           "copies_on_target", "serving_state",
           "vertex_exec_counts", "vertex_exec_total",
+          "deliveries", "delivery_total", "extra_deliveries",
+          "revision_transfers",
           "delivered_by_path", "consumer_verify", "digests_ok",
           "branch_times", "placements", "restarts", "target_pods",
           "cap_verified", "qdisc_clean_after", "seed"]
@@ -199,14 +206,28 @@ def run_one(idx, block, arm, wcsv, f):
            for v in VERTICES}
 
     paths = {}
+    deliveries = {e: 0 for e in DELIVERY_EDGES}
+    extra_deliveries = 0
+    revision_transfers = 0
     for node in ("anrg-3", TARGET):
         for fl in flows(node, run):
-            if fl.get("dataSize", 0) < 1e5:
+            ok = fl.get("ok", False)
+            ft, tt = fl.get("fromTask", ""), fl.get("toTask", "")
+            if ok:
+                edge = f"{ft}->{tt}"
+                if edge in deliveries:
+                    deliveries[edge] += 1
+                elif ft.startswith("produce.") and tt.startswith("rev-"):
+                    revision_transfers += 1
+                elif ft in VERTICES:
+                    # a delivery from a serving vertex on an edge that is
+                    # not one of the four expected ones
+                    extra_deliveries += 1
+            if fl.get("dataSize", 0) < 1e5 or not ok:
                 continue
-            if not fl.get("ok", fl.get("Ok", False)):
-                continue
-            key = f"{fl.get('fromTask', '?')}:{fl.get('srcNode')}->{fl.get('dstNode')}"
+            key = f"{ft}:{fl.get('srcNode')}->{fl.get('dstNode')}"
             paths[key] = paths.get(key, 0) + fl["dataSize"]
+    extra_deliveries += sum(max(0, c - 1) for c in deliveries.values())
 
     pods = kubectl(f"get pods -o wide --no-headers | grep {run}").stdout
     target_pods = sum(1 for ln in pods.splitlines() if f" {TARGET} " in ln)
@@ -244,7 +265,9 @@ def run_one(idx, block, arm, wcsv, f):
     f.flush()
     print(f"[e4] #{idx} {arm}: {ph} makespan={mk or 'censored'} "
           f"cap={round(int(cap_bytes)/1e6) if cap_bytes.isdigit() else '?'}MB "
-          f"target-copies={copies_target or 'none'} vertices={sum(vex.values())} "
+          f"target-copies={copies_target or 'none'} "
+          f"deliveries={sum(deliveries.values())}/4"
+          f"{'+' + str(extra_deliveries) if extra_deliveries else ''} "
           f"digests={'ok' if digests_ok else verify} pods@7={target_pods}",
           flush=True)
     time.sleep(5)
