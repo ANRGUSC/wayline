@@ -35,6 +35,7 @@ E5DIR = "/home/anrg/wayline-build-vertex/eval/experiments/E5"
 RES = os.environ.get("RES", os.path.expanduser("~/E5-results"))
 FROZEN = os.environ.get("FROZEN", os.path.expanduser("~/E5-frozen"))
 BLOCKS = int(os.environ.get("BLOCKS", "3"))
+ONLY = [a for a in os.environ.get("ONLY", "").split(",") if a]
 SEED = int(os.environ.get("SEED", "20260827"))
 ISO_CENSOR = 900
 BATCH_CENSOR = 3600
@@ -356,15 +357,24 @@ def main():
         if os.path.exists(p):
             frozen[a] = json.load(open(p))
     sh(f"kubectl apply -f {E5DIR}/e5-bandwidth.yml >/dev/null")
-    for f in ("e5-heft.yml", "e5-maxtp.yml", "e5-olb.yml",
-              "e5-store-heft.yml", "e5-store-maxtp.yml"):
+    for f in ("e5-heft.yml", "e5-maxtp.yml", "e5-olb.yml"):
         sh(f"kubectl apply -f {E5DIR}/{f} >/dev/null")
+    # Store templates replay the frozen schedule, so they must be
+    # regenerated from the frozen refs in use RIGHT NOW. Applying a
+    # checked-in yaml here silently replays whatever schedule was frozen
+    # when that file was written, which is how the store arms ended up
+    # on a different placement than the direct arms.
+    for algo in ("heft", "maxtp"):
+        y = f"{E5DIR}/e5-store-{algo}.yml"
+        sh(f"python3 {E5DIR}/gen_e5.py store {FROZEN}/frozen-{algo}.json "
+           f"> {y}")
+        sh(f"kubectl apply -f {y} >/dev/null")
     print(net("apply"), flush=True)
 
     rng = random.Random(SEED)
     schedule = []
     for b in range(1, BLOCKS + 1):
-        blk = ARMS[:]
+        blk = [a for a in ARMS if not ONLY or a[0] in ONLY]
         rng.shuffle(blk)
         schedule += [(b, a) for a in blk]
     img = sh("kubectl -n wl-system get deploy odag-controller "
