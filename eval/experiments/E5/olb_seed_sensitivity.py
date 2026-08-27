@@ -66,22 +66,25 @@ def placement_for():
         d = json.loads(out)
     except json.JSONDecodeError:
         return None, run
+    st = d.get("status", {})
     return ({t["name"]: t.get("node")
-             for t in d.get("status", {}).get("tasks", [])
-             if t.get("node")}, run)
+             for t in st.get("tasks", []) if t.get("node")},
+            st.get("makespan"))
 
 
 def main():
     seen = collections.Counter()
+    makespans = []
     node_use = collections.Counter()
     gw_runs = 0
     print(f"template={TEMPLATE} seeds=0..{NSEEDS - 1}\n")
     for seed in range(NSEEDS):
         set_seed(seed)
-        place, run = placement_for()
+        place, mk = placement_for()
         if not place:
-            print(f"  seed {seed}: FAILED to schedule ({run})")
+            print(f"  seed {seed}: FAILED to schedule")
             continue
+        makespans.append((seed, mk))
         key = json.dumps(place, sort_keys=True)
         seen[key] += 1
         for n in place.values():
@@ -89,7 +92,8 @@ def main():
         on_gw = [t for t, n in place.items() if n == GATEWAY]
         gw_runs += bool(on_gw)
         print(f"  seed {seed}: {len(set(place.values()))} nodes, "
-              f"{len(on_gw)} task(s) on {GATEWAY} {sorted(on_gw)}")
+              f"{len(on_gw)} task(s) on {GATEWAY} {sorted(on_gw)}, "
+              f"makespan={mk}")
 
     print(f"\ndistinct placements across {sum(seen.values())} seed(s): "
           f"{len(seen)}")
@@ -104,6 +108,11 @@ def main():
     else:
         print("\nVERDICT: schedule is TIE-BREAK SENSITIVE. Report this "
               "policy with its across-seed spread, not a point estimate.")
+    mk = [m for _, m in makespans if isinstance(m, (int, float))]
+    if mk:
+        print(f"\nmakespan across seeds: min={min(mk)} max={max(mk)} "
+              f"median={sorted(mk)[len(mk)//2]}  (n={len(mk)})")
+        print("  per seed:", makespans)
     print("\nRemember to restore PYTHONHASHSEED=0 before any campaign:")
     print(f"  kubectl -n {NS} set env deploy/odag-controller "
           f"-c saga-sidecar PYTHONHASHSEED=0")
