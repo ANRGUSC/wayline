@@ -53,18 +53,24 @@ def runtime_profile(task):
     return {n: round(WORK[task] / SPEED[n], 4) for n in NODES}
 
 
-def emit_task(t, pin=None, input_peers=None):
+def emit_task(t, pin=None, input_peers=None, deps=None, inputs=None):
+    """Emit one task. `deps`/`inputs` override the logical wiring, which
+    the store lowering uses to route each consumer through the data
+    vertex holding its object instead of straight to the producer."""
     lines = [f"  - name: {t}",
              f"    image: {REG}",
              "    command: [python, task.py]"]
-    deps = sorted({p for p, _ in INPUTS.get(t, [])})
-    lines.append(f"    dependencies: [{', '.join(deps)}]" if deps
+    d = deps if deps is not None else sorted({p for p, _ in INPUTS.get(t, [])})
+    lines.append(f"    dependencies: [{', '.join(d)}]" if d
                  else "    dependencies: []")
-    if INPUTS.get(t):
+    ins = inputs if inputs is not None else [
+        {"producer": p, "object": o} for p, o in INPUTS.get(t, [])]
+    if ins:
         lines.append("    inputs:")
-        for prod, obj in INPUTS[t]:
-            lines.append(f"    - producer: {prod}")
-            lines.append(f"      object: {obj}")
+        for spec in ins:
+            lines.append(f"    - producer: {spec['producer']}")
+            if spec.get("object"):
+                lines.append(f"      object: {spec['object']}")
     if OUTPUTS[t]:
         lines.append("    outputs:")
         for obj, size in OUTPUTS[t]:
@@ -137,20 +143,25 @@ data:
 
 
 def store(frozen_path):
+    """Store-mediated lowering: one pod-less data vertex per named object,
+    pinned to the gateway, with every consumer rewired to read from the
+    vertex. Application placement and per-node order are replayed from
+    the frozen schedule; the scheduler is not re-run."""
     fr = json.load(open(frozen_path))
     place = fr["placement"]
     order = fr["order"]
     algo = fr["algorithm_short"]
-    # every named object gets a pod-less vertex on the gateway
     out = [header(f"e5-store-{algo}", "random",
                   extra_cfg="\n    nodeOrder:" + "".join(
                       f"\n      {n}: [{', '.join(ts)}]"
                       for n, ts in order.items() if ts))]
     for t in ORDER:
-        peers = [f"v-{p}-{o}" for p, o in INPUTS.get(t, [])]
-        out.append(emit_task(t, pin=place[t],
-                             input_peers=peers if peers else None))
-    # vertices: one per (producer, object)
+        vs = [f"v-{p}-{o}" for p, o in INPUTS.get(t, [])]
+        out.append(emit_task(
+            t, pin=place[t],
+            deps=vs,
+            inputs=[{"producer": v} for v in vs],
+            input_peers=vs or None))
     for prod, objs in OUTPUTS.items():
         for obj, size in objs:
             v = f"v-{prod}-{obj}"
