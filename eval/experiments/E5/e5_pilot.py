@@ -288,6 +288,41 @@ def ctrl_slice(run):
     return "\n".join(l for l in out.splitlines() if run in l)
 
 
+# Set by the paper harness so the policy seed lands in the row; the
+# pilot leaves it blank.
+POLICY_SEED = ""
+
+
+def row_values(idx, block, arm, regime, algo, realization, row, extra,
+               reasons, valid, seed):
+    """The single definition of runs.csv column order.
+
+    Both harnesses serialise through this. Duplicating the writerow list
+    is how E4 shifted four columns without anyone noticing.
+    """
+    vals = [idx, block, arm, regime, algo, realization,
+            row["runs"], row["completed"], row["makespan_med"],
+            row["makespan_p95"], row["batch_seconds"],
+            row["dags_per_min"], row["latency_med"],
+            row["latency_p95"], row["busy_cov"],
+            row["busy_by_node"], extra.get("hash", ""),
+            extra.get("hash_ok", ""), row["placement"],
+            row["node_order"], extra.get("order_ok", ""),
+            extra.get("rmse", ""), extra.get("overrides", ""),
+            int("fallback" in " ".join(reasons)),
+            extra.get("enact", ""), extra.get("digests_ok", ""),
+            extra.get("gw_pods", ""), extra.get("restarts", ""),
+            row["pairs"], row["gw_in"], row["gw_out"],
+            extra.get("direct_ok", ""), extra.get("store_ok", ""),
+            True, valid, ";".join(reasons), seed]
+    if "policy_seed" in FIELDS:
+        vals.append(POLICY_SEED)
+    if len(vals) != len(FIELDS):
+        raise AssertionError(
+            f"row has {len(vals)} values for {len(FIELDS)} columns")
+    return vals
+
+
 def run_iso(arm, template, realization, algo, frozen, idx, block):
     run = submit(template)
     if not run:
@@ -478,22 +513,9 @@ def main():
                     if done < BATCH_TARGET:
                         reasons.append(f"only {done}/{BATCH_TARGET} completed")
                 valid = not reasons
-                w.writerow([idx, block, arm, regime, algo, realization,
-                            row["runs"], row["completed"], row["makespan_med"],
-                            row["makespan_p95"], row["batch_seconds"],
-                            row["dags_per_min"], row["latency_med"],
-                            row["latency_p95"], row["busy_cov"],
-                            row["busy_by_node"], extra.get("hash", ""),
-                            extra.get("hash_ok", ""), row["placement"],
-                            row["node_order"], extra.get("order_ok", ""),
-                            extra.get("rmse", ""), extra.get("overrides", ""),
-                            int("fallback" in " ".join(reasons)),
-                            extra.get("enact", ""), extra.get("digests_ok", ""),
-                            extra.get("gw_pods", ""), extra.get("restarts", ""),
-                            row["pairs"], row["gw_in"], row["gw_out"],
-                            extra.get("direct_ok", ""),
-                            extra.get("store_ok", ""), True, valid,
-                            ";".join(reasons), SEED])
+                w.writerow(row_values(idx, block, arm, regime, algo,
+                                      realization, row, extra, reasons,
+                                      valid, SEED))
                 f.flush()
                 print(f"[e5] #{idx} {arm}: valid={valid} "
                       f"{'reasons=' + ';'.join(reasons) if reasons else ''} "
