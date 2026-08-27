@@ -1,0 +1,123 @@
+apiVersion: wl.io/v1
+kind: ODAGTemplate
+metadata:
+  name: e4objects
+  namespace: wl-system
+spec:
+  description: 'E4 per-object control: one producer, three named objects, three independently realizable serving points.'
+  scheduler: heft
+  retention:
+    maxRuns: 10
+    data:
+      policy: keepLatest
+      keepRuns: 2
+  defaults:
+    runtime: 4
+    dataSize: 1MB
+  tasks:
+  - name: produce
+    image: 192.168.1.163:5000/wl-e4:latest
+    command: [python, task.py]
+    dependencies: []
+    runtime: 30
+    outputs:
+    - name: alert
+      dataSize: 1MB
+    - name: features
+      dataSize: 200MB
+    - name: snapshot
+      dataSize: 200MB
+    resources:
+      cpu: "2"
+      memory: 2Gi
+    constraints:
+      nodeNames: [anrg-3]
+
+  - name: serve-alert
+    image: 192.168.1.163:5000/wl-e4:latest
+    command: [python, task.py]
+    dependencies: [produce]
+    inputs:
+    - producer: produce
+      object: alert
+    dataSize: 1MB
+    runtime: 0
+    type: data
+    constraints:
+      nodeNames: [anrg-3]
+  - name: serve-features
+    image: 192.168.1.163:5000/wl-e4:latest
+    command: [python, task.py]
+    dependencies: [produce]
+    inputs:
+    - producer: produce
+      object: features
+    dataSize: 200MB
+    runtime: 0
+    type: data
+    constraints:
+      nodeNames: [anrg-3]
+  - name: serve-snapshot
+    image: 192.168.1.163:5000/wl-e4:latest
+    command: [python, task.py]
+    dependencies: [produce]
+    inputs:
+    - producer: produce
+      object: snapshot
+    dataSize: 200MB
+    runtime: 0
+    type: data
+    constraints:
+      nodeNames: [anrg-3]
+
+  - name: actuator
+    image: 192.168.1.163:5000/wl-e4:latest
+    command: [python, task.py]
+    dependencies: [serve-alert]
+    runtime: 4
+    resources:
+      cpu: "1"
+      memory: 1Gi
+    constraints:
+      nodeNames: [anrg-6]
+  - name: analyze-a
+    image: 192.168.1.163:5000/wl-e4:latest
+    command: [python, task.py]
+    dependencies: [serve-features]
+    runtime: 4
+    resources:
+      cpu: "2"
+      memory: 2Gi
+    constraints:
+      nodeNames: [anrg-8]
+  - name: analyze-b
+    image: 192.168.1.163:5000/wl-e4:latest
+    command: [python, task.py]
+    dependencies: [serve-features]
+    runtime: 4
+    resources:
+      cpu: "2"
+      memory: 2Gi
+    constraints:
+      nodeNames: [anrg-9]
+  - name: archive
+    image: 192.168.1.163:5000/wl-e4:latest
+    command: [python, task.py]
+    dependencies: [serve-snapshot]
+    runtime: 4
+    resources:
+      cpu: "2"
+      memory: 2Gi
+    constraints:
+      nodeNames: [anrg-4]
+
+  - name: report
+    image: 192.168.1.163:5000/wl-e4:latest
+    command: [python, task.py]
+    dependencies: [actuator, analyze-a, analyze-b, archive]
+    runtime: 2
+    resources:
+      cpu: "1"
+      memory: 512Mi
+    constraints:
+      nodeNames: [anrg-1]
