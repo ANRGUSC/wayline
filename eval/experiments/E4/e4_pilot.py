@@ -192,7 +192,7 @@ def run_one(idx, block, arm, wcsv, f):
         st_tasks = []
 
     # Vertex execution counts + delivered bytes per (object, path).
-    ctrl = kubectl("logs deploy/odag-controller --tail=800").stdout
+    ctrl = kubectl("logs deploy/odag-controller --tail=4000").stdout
     ctrl = "\n".join(l for l in ctrl.splitlines() if run in l)
     open(f"{RES}/ctrl-{run}.log", "w").write(ctrl)
     vex = {v: len(re.findall(rf"data vertex {run}/{v} executed", ctrl))
