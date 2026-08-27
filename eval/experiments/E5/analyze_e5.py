@@ -226,3 +226,45 @@ for label, arms, key, unit in (
                "NOT separated (gap within run-to-run spread)")
     print(f"    across-policy gap {gap:.2f} vs worst within-policy "
           f"spread {worst:.2f}: {verdict}")
+
+# ---- OLB at the seed level ------------------------------------------
+# OLB's two repetitions per policy seed are ONE observation of that
+# seed's schedule, not two independent placements. Aggregate within seed
+# first, then report the distribution across the seed aggregates. Never
+# pool all OLB runs as if they were independent, and never quote seed 0
+# as OLB's representative point.
+if any(r.get("policy_seed") not in (None, "") for r in ok):
+    print("\n== OLB across policy seeds (seed-level aggregates) ==")
+    for arm in ("iso-olb-direct", "batch-olb-direct"):
+        rs = [r for r in okby[arm] if r.get("policy_seed") not in (None, "")]
+        if not rs:
+            continue
+        byseed = defaultdict(list)
+        for r in rs:
+            byseed[str(r["policy_seed"])].append(r)
+        key = "makespan_med" if arm.startswith("iso") else "dags_per_min"
+        unit = "s" if arm.startswith("iso") else " DAGs/min"
+        aggs, hashes = [], {}
+        for sd in sorted(byseed, key=lambda x: int(x)):
+            v = [x for x in (num(r[key]) for r in byseed[sd])
+                 if x is not None]
+            hs = {r["schedule_hash"][:12] for r in byseed[sd]
+                  if r["schedule_hash"]}
+            if v:
+                aggs.append((sd, st.median(v), len(v)))
+                hashes[sd] = hs
+        print(f"  {arm}  ({key})")
+        for sd, m, n in aggs:
+            hh = "/".join(sorted(hashes.get(sd, [])))
+            flag = "  <-- reps disagree on placement" if len(
+                hashes.get(sd, [])) > 1 else ""
+            print(f"    seed {sd:>2}: {m:8.2f}{unit}  (n={n})  {hh}{flag}")
+        vals = [m for _, m, _ in aggs]
+        if len(vals) > 1:
+            print(f"    across {len(vals)} seed aggregates: "
+                  f"min={min(vals):.2f} median={st.median(vals):.2f} "
+                  f"max={max(vals):.2f} spread={max(vals) / min(vals):.2f}x")
+            print(f"    REPORT OLB AS THIS DISTRIBUTION, not as seed 0 "
+                  f"({dict((sd, round(m, 2)) for sd, m, _ in aggs).get('0')})")
+        nd = len({h for hs in hashes.values() for h in hs})
+        print(f"    distinct placements across seeds: {nd}")
