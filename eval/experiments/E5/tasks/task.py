@@ -15,23 +15,23 @@ from wl import WlTask
 
 SPEED = {"anrg-1": 1.0, "anrg-3": 1.0, "anrg-4": 1.0, "anrg-5": 1.0,
          "anrg-6": 2.0, "anrg-7": 2.0, "anrg-8": 2.0, "anrg-9": 0.25}
-WORK = {"source": 4, "A": 8, "B": 16, "C": 12, "J1": 14, "J2": 14, "sink": 4}
+WORK = {"source": 4, "a": 8, "b": 16, "c": 12, "j1": 14, "j2": 14, "sink": 4}
 MB = 1_000_000
 # task -> [(output name, bytes)]
 OUTPUTS = {
     "source": [("to-a", 1 * MB), ("to-b", 20 * MB), ("to-c", 60 * MB)],
-    "A": [("to-j1", 5 * MB)],
-    "B": [("to-j1", 20 * MB), ("to-j2", 2 * MB)],
-    "C": [("to-j2", 40 * MB)],
-    "J1": [("to-sink", 10 * MB)],
-    "J2": [("to-sink", 10 * MB)],
+    "a": [("to-j1", 5 * MB)],
+    "b": [("to-j1", 20 * MB), ("to-j2", 2 * MB)],
+    "c": [("to-j2", 40 * MB)],
+    "j1": [("to-sink", 10 * MB)],
+    "j2": [("to-sink", 10 * MB)],
     "sink": [],
 }
 # task -> [object key it consumes]
 INPUTS = {
-    "A": ["source.to-a"], "B": ["source.to-b"], "C": ["source.to-c"],
-    "J1": ["A.to-j1", "B.to-j1"], "J2": ["B.to-j2", "C.to-j2"],
-    "sink": ["J1.to-sink", "J2.to-sink"],
+    "a": ["source.to-a"], "b": ["source.to-b"], "c": ["source.to-c"],
+    "j1": ["a.to-j1", "b.to-j1"], "j2": ["b.to-j2", "c.to-j2"],
+    "sink": ["j1.to-sink", "j2.to-sink"],
 }
 
 

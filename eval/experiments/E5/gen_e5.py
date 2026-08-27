@@ -17,22 +17,22 @@ COMPUTE = ["anrg-6", "anrg-7", "anrg-8"]
 GATEWAY = "anrg-9"
 NODES = EDGE + COMPUTE + [GATEWAY]
 SPEED = {**{n: 1.0 for n in EDGE}, **{n: 2.0 for n in COMPUTE}, GATEWAY: 0.25}
-WORK = {"source": 4, "A": 8, "B": 16, "C": 12, "J1": 14, "J2": 14, "sink": 4}
+WORK = {"source": 4, "a": 8, "b": 16, "c": 12, "j1": 14, "j2": 14, "sink": 4}
 OUTPUTS = {
     "source": [("to-a", 1 * MB), ("to-b", 20 * MB), ("to-c", 60 * MB)],
-    "A": [("to-j1", 5 * MB)], "B": [("to-j1", 20 * MB), ("to-j2", 2 * MB)],
-    "C": [("to-j2", 40 * MB)], "J1": [("to-sink", 10 * MB)],
-    "J2": [("to-sink", 10 * MB)], "sink": [],
+    "a": [("to-j1", 5 * MB)], "b": [("to-j1", 20 * MB), ("to-j2", 2 * MB)],
+    "c": [("to-j2", 40 * MB)], "j1": [("to-sink", 10 * MB)],
+    "j2": [("to-sink", 10 * MB)], "sink": [],
 }
 # consumer -> [(producer, object)]
 INPUTS = {
-    "A": [("source", "to-a")], "B": [("source", "to-b")],
-    "C": [("source", "to-c")],
-    "J1": [("A", "to-j1"), ("B", "to-j1")],
-    "J2": [("B", "to-j2"), ("C", "to-j2")],
-    "sink": [("J1", "to-sink"), ("J2", "to-sink")],
+    "a": [("source", "to-a")], "b": [("source", "to-b")],
+    "c": [("source", "to-c")],
+    "j1": [("a", "to-j1"), ("b", "to-j1")],
+    "j2": [("b", "to-j2"), ("c", "to-j2")],
+    "sink": [("j1", "to-sink"), ("j2", "to-sink")],
 }
-ORDER = ["source", "A", "B", "C", "J1", "J2", "sink"]
+ORDER = ["source", "a", "b", "c", "j1", "j2", "sink"]
 
 # Symmetric matrix, in bytes/sec. B = 942 Mbit/s from E0.
 B_MBIT = 942.0
@@ -81,7 +81,7 @@ def emit_task(t, pin=None, input_peers=None):
         lines.append("    constraints:")
         lines.append(f"      nodeNames: [{pin}]")
     if input_peers:
-        lines.append("    userEnv:")
+        lines.append("    env:")
         lines.append("    - name: WL_INPUT_PEERS")
         lines.append(f"      value: \"{','.join(input_peers)}\"")
     return "\n".join(lines)
@@ -100,7 +100,7 @@ spec:
     enactOrder: serial{extra_cfg}
   profiling:
     enabled: false
-    runtimeSource: spec
+    runtimeSource: manual
     bandwidthSource: external
   retention:
     maxRuns: 40
