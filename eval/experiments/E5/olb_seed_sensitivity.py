@@ -73,6 +73,19 @@ def placement_for():
 
 
 def main():
+    try:
+        sweep()
+    finally:
+        # Always hand the cluster back at the campaign seed. Printing a
+        # reminder is not enough: this script leaves the sidecar on the
+        # LAST seed it tried, and a campaign started on that seed would
+        # silently fail every frozen-schedule check.
+        print("\nrestoring PYTHONHASHSEED=0 ...")
+        set_seed(0)
+        print("restored.")
+
+
+def sweep():
     seen = collections.Counter()
     makespans = []
     node_use = collections.Counter()
@@ -113,9 +126,7 @@ def main():
         print(f"\nmakespan across seeds: min={min(mk)} max={max(mk)} "
               f"median={sorted(mk)[len(mk)//2]}  (n={len(mk)})")
         print("  per seed:", makespans)
-    print("\nRemember to restore PYTHONHASHSEED=0 before any campaign:")
-    print(f"  kubectl -n {NS} set env deploy/odag-controller "
-          f"-c saga-sidecar PYTHONHASHSEED=0")
+
 
 
 if __name__ == "__main__":
