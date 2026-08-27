@@ -233,6 +233,13 @@ type schedulerConfig struct {
 	// runs one task at a time per node, which is the machine model most
 	// classical DAG schedulers assume.
 	EnactOrder string
+
+	// NodeOrder lets a template state the per-node execution order
+	// explicitly, for runs that must reproduce a previously frozen
+	// schedule without re-invoking the scheduler (e.g. a store-mediated
+	// lowering of a graph whose application placement is pinned).
+	// Enacted with the same machinery as EnactOrder.
+	NodeOrder map[string][]string
 	// SpreadEpsilon (seconds): when > 0, candidate nodes within ε of the
 	// minimum EFT are treated as tied and the least-loaded is chosen.
 	// 0 preserves strict EFT selection (with least-loaded exact-tie break).
@@ -254,6 +261,18 @@ func extractSchedulerConfig(templateObj *unstructured.Unstructured) schedulerCon
 	sc, ok, _ := unstructured.NestedMap(templateObj.Object, "spec", "schedulerConfig")
 	if !ok {
 		return cfg
+	}
+	if raw, ok := sc["nodeOrder"].(map[string]interface{}); ok {
+		cfg.NodeOrder = map[string][]string{}
+		for node, v := range raw {
+			if list, ok := v.([]interface{}); ok {
+				for _, x := range list {
+					if name, ok := x.(string); ok {
+						cfg.NodeOrder[node] = append(cfg.NodeOrder[node], name)
+					}
+				}
+			}
+		}
 	}
 	if v, ok := sc["enactOrder"].(string); ok {
 		switch v {

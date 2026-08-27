@@ -418,6 +418,15 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 		predicted, flows = computePredictedSchedule(tasks, assignMap, rtRes, dsRes, bwRes)
 	}
 	assignmentCache.Store(key, assignMap)
+	// An explicitly declared order (frozen-schedule replay) takes the
+	// same path as an externally returned one.
+	if len(schedCfg.NodeOrder) > 0 {
+		mode := schedCfg.EnactOrder
+		if mode == "" {
+			mode = "serial"
+		}
+		sagaPlan = schedulePlan{Mode: mode, Order: schedCfg.NodeOrder}
+	}
 	if sagaPlan.Mode == "order" || sagaPlan.Mode == "serial" {
 		schedulePlanCache.Store(key, sagaPlan)
 		log.Printf("[odag-ctrl] enacting external schedule order for %s "+
