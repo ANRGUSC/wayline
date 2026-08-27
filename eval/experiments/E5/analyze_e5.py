@@ -168,8 +168,20 @@ for k, v in sorted(distinct.items()):
     print(f"    {k:<8} {sorted(x[:12] for x in v)}")
 npol = len(distinct)
 nhash = len({h for v in distinct.values() for h in v})
-print(f"  {npol} policies produced {nhash} distinct schedule(s): "
-      f"{'DISCRIMINATING' if nhash >= 2 else 'NOT DISCRIMINATING'}")
+# The question is whether the POLICIES differ, not whether any single
+# policy is nondeterministic. OLB is load-driven and may legitimately
+# emit several schedules on its own; counting raw hashes would call
+# that "discriminating" even if HEFT and MaxTP agreed exactly.
+pairs_differ = [(a, b) for i, a in enumerate(sorted(distinct))
+                for b in sorted(distinct)[i + 1:]
+                if distinct[a] != distinct[b]]
+for k in sorted(distinct):
+    if len(distinct[k]) > 1:
+        print(f"    note: {k} is nondeterministic "
+              f"({len(distinct[k])} distinct schedules across runs)")
+print(f"  {npol} policies, {nhash} distinct schedule(s) in total; "
+      f"{len(pairs_differ)} policy pair(s) differ: "
+      f"{'DISCRIMINATING' if pairs_differ else 'NOT DISCRIMINATING'}")
 
 for label, arms, key, unit in (
         ("isolated makespan", ISO[:3], "makespan_med", "s"),
