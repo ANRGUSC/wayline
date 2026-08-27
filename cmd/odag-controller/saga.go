@@ -229,6 +229,22 @@ func sagaAssignTasks(algorithm, baseURL string, options map[string]interface{},
 	if err != nil {
 		return nil, schedulePlan{}, fmt.Errorf("marshal request: %w", err)
 	}
+	var out sagaScheduleResponse
+	// Provenance: with WL_SAGA_DUMP_DIR set, archive the exact request and
+	// response for every scheduling call. An experiment that claims to
+	// reproduce a scheduler's decisions needs the inputs it actually saw,
+	// not a reconstruction of them.
+	if dumpDir := os.Getenv("WL_SAGA_DUMP_DIR"); dumpDir != "" {
+		_ = os.MkdirAll(dumpDir, 0o755)
+		stamp := fmt.Sprintf("%s/%d-%s", dumpDir, time.Now().UnixNano(),
+			strings.ReplaceAll(algorithm, "/", "_"))
+		_ = os.WriteFile(stamp+".request.json", body, 0o644)
+		defer func() {
+			if b, mErr := json.Marshal(out); mErr == nil {
+				_ = os.WriteFile(stamp+".response.json", b, 0o644)
+			}
+		}()
+	}
 	resp, err := sagaHTTPClient.Post(strings.TrimRight(baseURL, "/")+"/schedule",
 		"application/json", bytes.NewReader(body))
 	if err != nil {
@@ -236,7 +252,6 @@ func sagaAssignTasks(algorithm, baseURL string, options map[string]interface{},
 	}
 	defer resp.Body.Close()
 
-	var out sagaScheduleResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, schedulePlan{}, fmt.Errorf("decode response (HTTP %d): %w", resp.StatusCode, err)
 	}
