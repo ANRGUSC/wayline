@@ -54,6 +54,17 @@ spec:
           image: 192.168.1.163:5000/wl-saga-sidecar:latest
           imagePullPolicy: Always
           env:
+            # Reproducible scheduling. Python randomizes str hashing per
+            # process, so any set iteration over task or node names breaks
+            # ties differently in each sidecar process. That makes a
+            # scheduler's output depend on when its container last
+            # restarted: identical requests returned different (and
+            # sometimes better-scoring) schedules across restarts, which
+            # silently invalidates any frozen-schedule replay or
+            # run-to-run comparison. Pinning the seed makes the same
+            # request yield the same schedule.
+            - name: PYTHONHASHSEED
+              value: "0"
             # Bring-your-own-scheduler. Either (or both) makes an external
             # saga.Scheduler subclass importable, so spec.scheduler can name
             # it by dotted path without rebuilding this image:
