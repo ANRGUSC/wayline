@@ -225,6 +225,14 @@ func extractProfilingConfig(templateObj *unstructured.Unstructured) profilingCon
 
 // schedulerConfig holds tunable knobs for the scheduler (HEFT-specific today).
 type schedulerConfig struct {
+	// EnactOrder controls how much of an external schedule is enacted.
+	// "" (default) enacts placement only: dispatch stays purely
+	// data-readiness driven, so independent ready tasks on one node may
+	// run concurrently or out of the scheduler's order. "order" starts
+	// tasks on each node in the scheduler's order; "serial" additionally
+	// runs one task at a time per node, which is the machine model most
+	// classical DAG schedulers assume.
+	EnactOrder string
 	// SpreadEpsilon (seconds): when > 0, candidate nodes within ε of the
 	// minimum EFT are treated as tied and the least-loaded is chosen.
 	// 0 preserves strict EFT selection (with least-loaded exact-tie break).
@@ -246,6 +254,15 @@ func extractSchedulerConfig(templateObj *unstructured.Unstructured) schedulerCon
 	sc, ok, _ := unstructured.NestedMap(templateObj.Object, "spec", "schedulerConfig")
 	if !ok {
 		return cfg
+	}
+	if v, ok := sc["enactOrder"].(string); ok {
+		switch v {
+		case "", "none":
+		case "order", "serial":
+			cfg.EnactOrder = v
+		default:
+			log.Printf("[template] unknown enactOrder %q; ignoring", v)
+		}
 	}
 	if v, ok := sc["spreadEpsilon"].(float64); ok {
 		cfg.SpreadEpsilon = v

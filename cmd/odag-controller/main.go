@@ -52,7 +52,11 @@ type nodeInfo struct {
 
 // assignmentCache stores task→nodeInfo assignments keyed by "namespace/odagName".
 // Populated in deployODAG, read in processReadyTasks.
-var assignmentCache sync.Map // "ns/name" -> map[string]nodeInfo
+var assignmentCache sync.Map
+
+// schedulePlanCache holds the per-node execution order an external
+// scheduler assumed, for runs configured to enact it.
+var schedulePlanCache sync.Map // "ns/name" -> map[string]nodeInfo
 
 // podCache stores the latest pod state for every ODAG pod, keyed by pod name.
 // Updated by watchPods on every event, read by processReadyTasks.
@@ -343,6 +347,7 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 
 	schedulerName, _, _ := unstructured.NestedString(obj.Object, "spec", "scheduler")
 	schedCfg := extractSchedulerConfig(templateObj)
+	var sagaPlan schedulePlan
 	var assignMap map[string]nodeInfo
 	var predicted []predictedTaskEntry
 	var flows []predictedFlowEntry
@@ -389,7 +394,9 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 				url, algo = schedulerName, ""
 			}
 			log.Printf("[odag-ctrl] using external scheduler %q for %s (endpoint %s)", schedulerName, key, url)
-			am, err := sagaAssignTasks(algo, url, schedCfg.Options, tasks, nodeMap, rtRes, dsRes, bwRes)
+			am, plan, err := sagaAssignTasks(algo, url, schedCfg.Options, tasks, nodeMap, rtRes, dsRes, bwRes)
+			plan.Mode = schedCfg.EnactOrder
+			sagaPlan = plan
 			if err != nil {
 				// A dead or buggy scheduler service degrades placement
 				// quality, never availability: fall back to built-in HEFT.
@@ -411,6 +418,14 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 		predicted, flows = computePredictedSchedule(tasks, assignMap, rtRes, dsRes, bwRes)
 	}
 	assignmentCache.Store(key, assignMap)
+	if sagaPlan.Mode == "order" || sagaPlan.Mode == "serial" {
+		schedulePlanCache.Store(key, sagaPlan)
+		log.Printf("[odag-ctrl] enacting external schedule order for %s "+
+			"(mode=%s, %d node orders, %d constraint overrides)",
+			key, sagaPlan.Mode, len(sagaPlan.Order), sagaPlan.Overrides)
+	} else {
+		schedulePlanCache.Delete(key)
+	}
 
 	writePredictedSchedule(dynClient, namespace, odagName, predicted, flows)
 
@@ -598,6 +613,44 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 			}
 			continue
 		}
+		// Enact the external schedule's per-node order, when configured.
+		// Wayline dispatches on data readiness, so without this two
+		// independent ready tasks assigned to one node may start
+		// concurrently or in the opposite order to the schedule that was
+		// evaluated -- the placement would be the algorithm's, the
+		// execution would not.
+		if planRaw, ok := schedulePlanCache.Load(key); ok && !vertex[task.Name] {
+			plan := planRaw.(schedulePlan)
+			node := assignMap[task.Name].name
+			order := plan.Order[node]
+			idx := -1
+			for i, n := range order {
+				if n == task.Name {
+					idx = i
+					break
+				}
+			}
+			blocked := false
+			for i := 0; i < idx; i++ {
+				pred := order[i]
+				if vertex[pred] || cached[pred] != (cacheEntry{}) {
+					continue // no pod: not part of the machine's queue
+				}
+				if plan.Mode == "serial" {
+					if podPhases[pred] != corev1.PodSucceeded {
+						blocked = true
+						break
+					}
+				} else if !existingPods[pred] {
+					blocked = true
+					break
+				}
+			}
+			if blocked {
+				continue
+			}
+		}
+
 		// Gate on the node where this task will ACTUALLY execute. For a
 		// data vertex whose serving point a revision has rebound, that
 		// is the new serving node, not the template's assigned one:

@@ -4,7 +4,7 @@ import "testing"
 
 func TestApplyCacheHit(t *testing.T) {
 	task := taskSpec{Name: "prep", CacheKey: "dataset-v1", Runtime: 30,
-		Constraints: []string{"anrg-3", "anrg-4"},
+		Constraints:    []string{"anrg-3", "anrg-4"},
 		RuntimeProfile: map[string]float64{"anrg-3": 25}}
 	applyCacheHit(&task, cacheEntry{Odag: "run-1", Task: "prep", Node: "anrg-7"})
 	if len(task.Constraints) != 1 || task.Constraints[0] != "anrg-7" {

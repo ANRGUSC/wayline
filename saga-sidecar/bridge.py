@@ -28,6 +28,11 @@ Model-conversion rules (each guards a known SAGA trap):
 
   * Symmetry. SAGA networks are undirected; Wayline bandwidth matrices may
     be asymmetric. We take min(bw(u,v), bw(v,u)) -- conservative.
+    LIMITATION: SAGA's Network is undirected, so a directed matrix cannot
+    be represented faithfully. Experiments that compare SAGA algorithms
+    should therefore use symmetric link treatments, and any asymmetric
+    result must be reported as scheduling under a conservative
+    lower-bound model rather than under the true fabric.
 
   * Super nodes. TaskGraph.create() silently injects __super_source__ /
     __super_sink__ for multi-source/multi-sink DAGs. They are stripped from
@@ -261,15 +266,28 @@ def build_saga_models(
     tg_edges = []
     task_index = {t["name"]: i for i, t in enumerate(tasks)}
     for t in tasks:
+        # Per-edge sizes when the consumer declares which named object it
+        # takes from each producer; a producer of several named outputs
+        # otherwise weighs every outgoing edge with its aggregate size.
+        declared = {}
+        for inp in t.get("inputs", []) or []:
+            p = inp.get("producer")
+            if p is None:
+                continue
+            declared.setdefault(p, 0.0)
+            declared[p] += float(inp.get("bytes", 0) or 0)
         for dep in t.get("dependencies", []) or []:
             if dep not in task_index:
                 raise ValueError(f"task {t['name']!r} depends on unknown task {dep!r}")
-            src = tasks[task_index[dep]]
-            profile = src.get("dataSizeProfile") or {}
-            if profile:
-                size = float(np.mean([float(v) for v in profile.values()]))
+            if dep in declared:
+                size = declared[dep]
             else:
-                size = _parse_data_size(src.get("dataSize"))
+                src = tasks[task_index[dep]]
+                profile = src.get("dataSizeProfile") or {}
+                if profile:
+                    size = float(np.mean([float(v) for v in profile.values()]))
+                else:
+                    size = _parse_data_size(src.get("dataSize"))
             tg_edges.append((dep, t["name"], max(size, 0.0)))
     task_graph = TaskGraph.create(tasks=tg_tasks, dependencies=tg_edges)
 

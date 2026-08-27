@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -72,7 +74,7 @@ func TestSagaHeft_Diamond_QualityParity(t *testing.T) {
 	builtin := heftAssignTasks(tasks, nodes, rtRes, dsRes, bwRes, heftOptions{})
 	builtinMS := predictedMakespan(tasks, builtin.assignMap, rtRes, dsRes, bwRes)
 
-	sagaMap, err := sagaAssignTasks("heft", sagaSchedulerURL(), nil, tasks, nodes, rtRes, dsRes, bwRes)
+	sagaMap, _, err := sagaAssignTasks("heft", sagaSchedulerURL(), nil, tasks, nodes, rtRes, dsRes, bwRes)
 	if err != nil {
 		t.Fatalf("sagaAssignTasks: %v", err)
 	}
@@ -97,7 +99,7 @@ func TestSaga_ConstraintsRespected(t *testing.T) {
 	tasks[0].Constraints = []string{"n3"} // pin A to the slow node
 	nodes := makeNodes("n1", "n2", "n3")
 
-	sagaMap, err := sagaAssignTasks("heft", sagaSchedulerURL(), nil, tasks, nodes, separableRT(), constDS(1_000_000), constBW(100e6))
+	sagaMap, _, err := sagaAssignTasks("heft", sagaSchedulerURL(), nil, tasks, nodes, separableRT(), constDS(1_000_000), constBW(100e6))
 	if err != nil {
 		t.Fatalf("sagaAssignTasks: %v", err)
 	}
@@ -120,7 +122,7 @@ func TestSaga_MultipleAlgorithms(t *testing.T) {
 	for _, algo := range []string{"heft", "cpop", "peft", "minmin", "maxmin", "sufferage"} {
 		algo := algo
 		t.Run(algo, func(t *testing.T) {
-			m, err := sagaAssignTasks(algo, sagaSchedulerURL(), nil, tasks, nodes, rtRes, dsRes, bwRes)
+			m, _, err := sagaAssignTasks(algo, sagaSchedulerURL(), nil, tasks, nodes, rtRes, dsRes, bwRes)
 			if err != nil {
 				t.Fatalf("%s: %v", algo, err)
 			}
@@ -137,7 +139,7 @@ func TestSaga_MultipleAlgorithms(t *testing.T) {
 
 func TestSaga_UnknownAlgorithmFallsThroughAsError(t *testing.T) {
 	requireSidecar(t)
-	_, err := sagaAssignTasks("not-a-real-algorithm", sagaSchedulerURL(), nil, diamondTasks(), makeNodes("n1", "n2"),
+	_, _, err := sagaAssignTasks("not-a-real-algorithm", sagaSchedulerURL(), nil, diamondTasks(), makeNodes("n1", "n2"),
 		nil, nil, constBW(100e6))
 	if err == nil {
 		t.Fatal("expected error for unknown algorithm")
@@ -173,7 +175,7 @@ func TestSaga_ExternalSchedulerByDottedPathOverExplicitURL(t *testing.T) {
 	nodes := makeNodes("n1", "n2", "n3")
 
 	// A class that exists in no registry: it must be imported by name.
-	m, err := sagaAssignTasks("mysched.PinFirstNodeScheduler", url, nil,
+	m, _, err := sagaAssignTasks("mysched.PinFirstNodeScheduler", url, nil,
 		tasks, nodes, separableRT(), constDS(1_000_000), constBW(100e6))
 	if err != nil {
 		t.Skipf("sidecar cannot import the test scheduler (start it with "+
@@ -198,7 +200,7 @@ func TestSaga_ConstructorOptionsReachTheScheduler(t *testing.T) {
 	nodes := makeNodes("n1", "n2", "n3")
 
 	// which=2 selects the third node alphabetically.
-	m, err := sagaAssignTasks("mysched.ParamScheduler", url,
+	m, _, err := sagaAssignTasks("mysched.ParamScheduler", url,
 		map[string]interface{}{"which": 2},
 		tasks, nodes, separableRT(), constDS(1_000_000), constBW(100e6))
 	if err != nil {
@@ -207,6 +209,75 @@ func TestSaga_ConstructorOptionsReachTheScheduler(t *testing.T) {
 	for name, ni := range m {
 		if ni.name != "n3" {
 			t.Errorf("task %s on %s, want n3 (options.which=2)", name, ni.name)
+		}
+	}
+}
+
+// TestPerEdgeObjectSizes: a producer with several named outputs must give
+// each dependent edge the size of the object that edge actually carries,
+// not the producer's aggregate dataSize.
+func TestPerEdgeObjectSizes(t *testing.T) {
+	tasks := []taskSpec{
+		{Name: "produce", Image: "i", DataSize: "200MB",
+			Outputs: []outputSpec{
+				{Name: "alert", DataSize: "1MB"},
+				{Name: "features", DataSize: "200MB"},
+			}},
+		{Name: "small", Image: "i", Dependencies: []string{"produce"},
+			Inputs: []inputSpec{{Producer: "produce", Object: "alert"}}},
+		{Name: "big", Image: "i", Dependencies: []string{"produce"},
+			Inputs: []inputSpec{{Producer: "produce", Object: "features"}}},
+	}
+	byName := map[string]taskSpec{}
+	for _, tk := range tasks {
+		byName[tk.Name] = tk
+	}
+	sizeFor := func(consumer, dep string) int64 {
+		c := byName[consumer]
+		var total int64
+		for _, key := range consumedKeys(c, dep) {
+			obj := ""
+			if i := strings.IndexByte(key, '.'); i > 0 {
+				obj = key[i+1:]
+			}
+			size := parseDataSizeBytes(byName[dep].DataSize)
+			for _, o := range byName[dep].Outputs {
+				if o.Name == obj {
+					size = parseDataSizeBytes(o.DataSize)
+				}
+			}
+			total += size
+		}
+		return total
+	}
+	if got := sizeFor("small", "produce"); got != 1_000_000 {
+		t.Errorf("alert edge = %d, want 1000000", got)
+	}
+	if got := sizeFor("big", "produce"); got != 200_000_000 {
+		t.Errorf("features edge = %d, want 200000000", got)
+	}
+}
+
+// TestSchedulePlanOrdering: assignments are ordered per node by the
+// scheduler's predicted start, which is what dispatch enacts.
+func TestSchedulePlanOrdering(t *testing.T) {
+	out := sagaScheduleResponse{Assignments: []sagaAssignment{
+		{Task: "c", Node: "n1", EstimatedStart: 20},
+		{Task: "a", Node: "n1", EstimatedStart: 0},
+		{Task: "b", Node: "n1", EstimatedStart: 10},
+		{Task: "z", Node: "n2", EstimatedStart: 5},
+	}}
+	byNode := map[string][]sagaAssignment{}
+	for _, a := range out.Assignments {
+		byNode[a.Node] = append(byNode[a.Node], a)
+	}
+	sort.SliceStable(byNode["n1"], func(i, j int) bool {
+		return byNode["n1"][i].EstimatedStart < byNode["n1"][j].EstimatedStart
+	})
+	want := []string{"a", "b", "c"}
+	for i, a := range byNode["n1"] {
+		if a.Task != want[i] {
+			t.Fatalf("n1 order = %v, want %v", byNode["n1"], want)
 		}
 	}
 }
