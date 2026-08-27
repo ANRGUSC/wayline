@@ -134,6 +134,16 @@ def flows(node, run):
         return []
 
 
+def free_pct(node="anrg-2"):
+    """Percent of root filesystem free on a node, via its data agent's
+    host mount. Returns None when unavailable rather than guessing."""
+    r = sh("df --output=pcent / | tail -1", timeout=20)
+    try:
+        return 100 - int(r.stdout.strip().rstrip("%"))
+    except (ValueError, AttributeError):
+        return None
+
+
 def purge(run):
     for node, ip in AGENTS.items():
         sh(f"curl -s -m 30 -X DELETE http://{ip}:8082/data/{run} >/dev/null",
@@ -357,6 +367,17 @@ def main():
         blk = ARMS[:]
         rng.shuffle(blk)
         schedule += [(b, a) for a in blk]
+    img = sh("kubectl -n wl-system get deploy odag-controller "
+             "-o jsonpath='{.spec.template.spec.containers[*].image}'").stdout
+    dig = sh("kubectl -n wl-system get pods -l app=odag-controller "
+             "-o jsonpath='{.items[0].status.containerStatuses[*].imageID}'").stdout
+    with open(f"{RES}/PROVENANCE.txt", "w") as pf:
+        pf.write(f"seed {SEED}\nblocks {BLOCKS}\n"
+                 f"controller_image {img.strip()}\n"
+                 f"controller_imageID {dig.strip()}\n"
+                 f"frozen_dir {FROZEN}\n"
+                 f"note store arms require the static-nodeOrder enactment "
+                 f"path; runs before that fix are not comparable\n")
     with open(f"{RES}/execution-order.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["order", "block", "arm", "seed"])
@@ -369,6 +390,13 @@ def main():
             w.writerow(FIELDS)
             for idx, (block, (arm, regime, tpl, realization, algo)) in \
                     enumerate(schedule, 1):
+                fp = free_pct()
+                if fp is not None and fp < 12:
+                    print(f"[e5] #{idx} {arm}: ABORT free={fp}% "
+                          f"(disk headroom below 12%; a shaper or agent "
+                          f"eviction would silently corrupt later runs)",
+                          flush=True)
+                    raise SystemExit("insufficient disk headroom")
                 nv = net("verify")
                 if "verified" not in nv:
                     print(f"[e5] #{idx} {arm}: NET NOT VERIFIED", flush=True)
