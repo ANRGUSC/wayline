@@ -149,9 +149,22 @@ for algo in ("heft", "maxtp"):
     if md and ms:
         print(f"  {algo:<6} direct {md:6.1f}s   store {ms:6.1f}s   "
               f"ratio {ms/md:.2f}x")
-    hd = {r["placement"] for r in d}
-    hs = {r["placement"] for r in s}
-    print(f"         placement identical across realizations: {hd == hs}")
+    # Compare parsed mappings, not the raw JSON text: key order follows
+    # task completion order, so identical placements serialize
+    # differently and a string compare reports a false mismatch.
+    def places(rs):
+        out = set()
+        for r in rs:
+            try:
+                out.add(tuple(sorted(json.loads(r["placement"]).items())))
+            except (ValueError, TypeError):
+                pass
+        return out
+    same = places(d) == places(s)
+    print(f"         placement identical across realizations: {same}")
+    if not same:
+        print(f"           direct {sorted(places(d))[:1]}")
+        print(f"           store  {sorted(places(s))[:1]}")
 
 # ---- the decision this pilot exists to make -------------------------
 print("\n== DISCRIMINATION CHECK ==")
