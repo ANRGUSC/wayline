@@ -203,8 +203,8 @@ def check_run(rec, arm, realization, algo, frozen, ctrl):
     pods = run_pods(rec["run"])
     on_gw = [ln.split()[0] for ln in pods.splitlines()
              if f" {GW} " in ln and not ln.split()[0].endswith("-fw")]
-    if on_gw:
-        bad.append(f"app pods on {GW}: {len(on_gw)}")
+    # (gateway placement is only disallowed for the frozen comparisons;
+    # checked below once the algorithm is known)
     restarts = sum(int(ln.split()[3]) for ln in pods.splitlines()
                    if len(ln.split()) >= 4 and ln.split()[3].isdigit())
     if restarts:
@@ -244,16 +244,25 @@ def check_run(rec, arm, realization, algo, frozen, ctrl):
                 order_ok = False
         if not order_ok:
             bad.append("observed order != frozen order")
-    # data paths
+    # Data paths. "Direct" means every dependency travels between the
+    # nodes its endpoints were scheduled on -- NOT that the gateway is
+    # unused: a load-balancing policy may legitimately place application
+    # tasks there, and then gateway traffic is correct. Gateway-free
+    # placement is required only of the frozen comparisons.
     direct_ok = store_ok = ""
+    scheduled = set(rec["placement"].values())
     if realization == "direct":
-        direct_ok = (rec["gw_in"] == 0 and rec["gw_out"] == 0)
-        if not direct_ok:
-            bad.append("direct arm moved bytes through the gateway")
+        stray = [k for k in rec["pairs"]
+                 if any(n not in scheduled for n in k.split("->"))]
+        direct_ok = not stray
+        if stray:
+            bad.append(f"direct arm used unscheduled relay nodes: {stray[:3]}")
     else:
         store_ok = (rec["gw_in"] > 0 and rec["gw_out"] > 0)
         if not store_ok:
             bad.append("store arm did not route through the gateway")
+    if algo in ("heft", "maxtp") and on_gw:
+        bad.append(f"frozen comparison placed {len(on_gw)} app pod(s) on {GW}")
     return (not bad), bad, {"restarts": restarts, "overrides": overrides,
                             "enact": enact, "rmse": rmse, "hash": h,
                             "hash_ok": hash_ok, "order_ok": order_ok,
