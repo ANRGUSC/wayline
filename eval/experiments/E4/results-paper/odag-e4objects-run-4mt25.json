@@ -1,0 +1,595 @@
+{
+    "apiVersion": "wl.io/v1",
+    "kind": "ODAG",
+    "metadata": {
+        "creationTimestamp": "2026-08-27T07:43:04Z",
+        "generateName": "e4objects-run-",
+        "generation": 2,
+        "labels": {
+            "wl.io/run": "84",
+            "wl.io/template": "e4objects"
+        },
+        "name": "e4objects-run-4mt25",
+        "namespace": "wl-system",
+        "resourceVersion": "54638727",
+        "uid": "8b3fd75b-4f66-47e9-a877-b5d72a8a7372"
+    },
+    "spec": {
+        "realization": [
+            {
+                "copies": [
+                    "anrg-7"
+                ],
+                "evict": [],
+                "object": "produce.features",
+                "servingCopy": "anrg-7"
+            }
+        ],
+        "scheduler": "heft",
+        "tasks": [
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-3"
+                    ]
+                },
+                "dependencies": [],
+                "image": "192.168.1.163:5000/wl-e4:latest",
+                "name": "produce",
+                "outputs": [
+                    {
+                        "dataSize": "1MB",
+                        "name": "alert"
+                    },
+                    {
+                        "dataSize": "200MB",
+                        "name": "features"
+                    },
+                    {
+                        "dataSize": "200MB",
+                        "name": "snapshot"
+                    }
+                ],
+                "resources": {
+                    "cpu": "2",
+                    "memory": "2Gi"
+                },
+                "runtime": 30
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-3"
+                    ]
+                },
+                "dataSize": "1MB",
+                "dependencies": [
+                    "produce"
+                ],
+                "image": "192.168.1.163:5000/wl-e4:latest",
+                "inputs": [
+                    {
+                        "object": "alert",
+                        "producer": "produce"
+                    }
+                ],
+                "name": "serve-alert",
+                "runtime": 0,
+                "type": "data"
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-3"
+                    ]
+                },
+                "dataSize": "200MB",
+                "dependencies": [
+                    "produce"
+                ],
+                "image": "192.168.1.163:5000/wl-e4:latest",
+                "inputs": [
+                    {
+                        "object": "features",
+                        "producer": "produce"
+                    }
+                ],
+                "name": "serve-features",
+                "runtime": 0,
+                "type": "data"
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-3"
+                    ]
+                },
+                "dataSize": "200MB",
+                "dependencies": [
+                    "produce"
+                ],
+                "image": "192.168.1.163:5000/wl-e4:latest",
+                "inputs": [
+                    {
+                        "object": "snapshot",
+                        "producer": "produce"
+                    }
+                ],
+                "name": "serve-snapshot",
+                "runtime": 0,
+                "type": "data"
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-6"
+                    ]
+                },
+                "dependencies": [
+                    "serve-alert"
+                ],
+                "image": "192.168.1.163:5000/wl-e4:latest",
+                "name": "actuator",
+                "resources": {
+                    "cpu": "1",
+                    "memory": "1Gi"
+                },
+                "runtime": 4
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-8"
+                    ]
+                },
+                "dependencies": [
+                    "serve-features"
+                ],
+                "image": "192.168.1.163:5000/wl-e4:latest",
+                "name": "analyze-a",
+                "resources": {
+                    "cpu": "2",
+                    "memory": "2Gi"
+                },
+                "runtime": 4
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-9"
+                    ]
+                },
+                "dependencies": [
+                    "serve-features"
+                ],
+                "image": "192.168.1.163:5000/wl-e4:latest",
+                "name": "analyze-b",
+                "resources": {
+                    "cpu": "2",
+                    "memory": "2Gi"
+                },
+                "runtime": 4
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-4"
+                    ]
+                },
+                "dependencies": [
+                    "serve-snapshot"
+                ],
+                "image": "192.168.1.163:5000/wl-e4:latest",
+                "name": "archive",
+                "resources": {
+                    "cpu": "2",
+                    "memory": "2Gi"
+                },
+                "runtime": 4
+            },
+            {
+                "command": [
+                    "python",
+                    "task.py"
+                ],
+                "constraints": {
+                    "nodeNames": [
+                        "anrg-1"
+                    ]
+                },
+                "dependencies": [
+                    "actuator",
+                    "analyze-a",
+                    "analyze-b",
+                    "archive"
+                ],
+                "image": "192.168.1.163:5000/wl-e4:latest",
+                "name": "report",
+                "resources": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                },
+                "runtime": 2
+            }
+        ]
+    },
+    "status": {
+        "actualNetworkFlows": [
+            {
+                "dataSize": 1000000,
+                "dstNode": "anrg-6",
+                "end": 31.73752784729004,
+                "fromTask": "serve-alert",
+                "ok": true,
+                "srcNode": "anrg-3",
+                "start": 31.707687616348267,
+                "toTask": "actuator"
+            },
+            {
+                "dataSize": 200000000,
+                "dstNode": "anrg-4",
+                "end": 39.802294969558716,
+                "fromTask": "serve-snapshot",
+                "ok": true,
+                "srcNode": "anrg-3",
+                "start": 37.135204553604126,
+                "toTask": "archive"
+            },
+            {
+                "dataSize": 200000000,
+                "dstNode": "anrg-7",
+                "end": 66.53698253631592,
+                "fromTask": "produce.features",
+                "ok": true,
+                "srcNode": "anrg-3",
+                "start": 37.24734330177307,
+                "toTask": "rev-anrg-7"
+            },
+            {
+                "dataSize": 4,
+                "dstNode": "anrg-1",
+                "end": 77.66997766494751,
+                "fromTask": "analyze-a",
+                "ok": true,
+                "srcNode": "anrg-8",
+                "start": 77.65411281585693,
+                "toTask": "report"
+            },
+            {
+                "dataSize": 4,
+                "dstNode": "anrg-1",
+                "end": 77.25316286087036,
+                "fromTask": "analyze-b",
+                "ok": true,
+                "srcNode": "anrg-9",
+                "start": 77.23669576644897,
+                "toTask": "report"
+            },
+            {
+                "dataSize": 4,
+                "dstNode": "anrg-1",
+                "end": 37.04215383529663,
+                "fromTask": "actuator",
+                "ok": true,
+                "srcNode": "anrg-6",
+                "start": 37.02582383155823,
+                "toTask": "report"
+            },
+            {
+                "dataSize": 4,
+                "dstNode": "anrg-1",
+                "end": 45.796631813049316,
+                "fromTask": "archive",
+                "ok": true,
+                "srcNode": "anrg-4",
+                "start": 45.78030300140381,
+                "toTask": "report"
+            }
+        ],
+        "completionTime": "2026-08-27T07:44:27.07866853Z",
+        "makespan": 80,
+        "message": "",
+        "objects": [
+            {
+                "copies": [
+                    {
+                        "node": "anrg-7",
+                        "state": "Installed"
+                    }
+                ],
+                "object": "produce.features",
+                "servingCopy": "anrg-7"
+            }
+        ],
+        "phase": "Succeeded",
+        "predictedNetworkFlows": [
+            {
+                "dataSize": 200000000,
+                "dstNode": "anrg-8",
+                "end": 84.21965128533752,
+                "fromTask": "serve-features",
+                "srcNode": "anrg-3",
+                "start": 68.21965128533752,
+                "toTask": "analyze-a"
+            },
+            {
+                "dataSize": 1000000,
+                "dstNode": "anrg-6",
+                "end": 68.53965128533751,
+                "fromTask": "serve-alert",
+                "srcNode": "anrg-3",
+                "start": 68.21965128533752,
+                "toTask": "actuator"
+            },
+            {
+                "dataSize": 200000000,
+                "dstNode": "anrg-9",
+                "end": 100.21965128533752,
+                "fromTask": "serve-features",
+                "srcNode": "anrg-3",
+                "start": 84.21965128533752,
+                "toTask": "analyze-b"
+            },
+            {
+                "dataSize": 200000000,
+                "dstNode": "anrg-4",
+                "end": 71.52631795200418,
+                "fromTask": "serve-snapshot",
+                "srcNode": "anrg-3",
+                "start": 68.21965128533752,
+                "toTask": "archive"
+            },
+            {
+                "dataSize": 4,
+                "dstNode": "anrg-1",
+                "end": 73.43605088360673,
+                "fromTask": "actuator",
+                "srcNode": "anrg-6",
+                "start": 73.43605056360673,
+                "toTask": "report"
+            },
+            {
+                "dataSize": 4,
+                "dstNode": "anrg-1",
+                "end": 90.21993624415067,
+                "fromTask": "analyze-a",
+                "srcNode": "anrg-8",
+                "start": 90.21993592415068,
+                "toTask": "report"
+            },
+            {
+                "dataSize": 4,
+                "dstNode": "anrg-1",
+                "end": 105.41838070704799,
+                "fromTask": "analyze-b",
+                "srcNode": "anrg-9",
+                "start": 105.41838038704799,
+                "toTask": "report"
+            },
+            {
+                "dataSize": 4,
+                "dstNode": "anrg-1",
+                "end": 76.85874113087863,
+                "fromTask": "archive",
+                "srcNode": "anrg-4",
+                "start": 76.85874109887862,
+                "toTask": "report"
+            }
+        ],
+        "predictedTasks": [
+            {
+                "estEnd": 34.109825642668795,
+                "estStart": 0,
+                "name": "produce",
+                "node": "anrg-3"
+            },
+            {
+                "estEnd": 68.21965128533752,
+                "estStart": 34.109825642668795,
+                "name": "serve-alert",
+                "node": "anrg-3"
+            },
+            {
+                "estEnd": 68.21965128533752,
+                "estStart": 34.109825642668795,
+                "name": "serve-features",
+                "node": "anrg-3"
+            },
+            {
+                "estEnd": 68.21965128533752,
+                "estStart": 34.109825642668795,
+                "name": "serve-snapshot",
+                "node": "anrg-3"
+            },
+            {
+                "estEnd": 73.43605056360673,
+                "estStart": 68.53965128533751,
+                "name": "actuator",
+                "node": "anrg-6"
+            },
+            {
+                "estEnd": 90.21993592415068,
+                "estStart": 84.21965128533752,
+                "name": "analyze-a",
+                "node": "anrg-8"
+            },
+            {
+                "estEnd": 105.41838038704799,
+                "estStart": 100.21965128533752,
+                "name": "analyze-b",
+                "node": "anrg-9"
+            },
+            {
+                "estEnd": 76.85874109887862,
+                "estStart": 71.52631795200418,
+                "name": "archive",
+                "node": "anrg-4"
+            },
+            {
+                "estEnd": 108.41418633454688,
+                "estStart": 105.41838070704799,
+                "name": "report",
+                "node": "anrg-1"
+            }
+        ],
+        "startTime": "2026-08-27T07:43:04.564661719Z",
+        "tasks": [
+            {
+                "completionTime": "2026-08-27T07:44:21Z",
+                "computeSeconds": 4.370020866394043,
+                "createdTime": "2026-08-27T07:44:15Z",
+                "handoffSeconds": 0.019397258758544922,
+                "inputReadSeconds": 0.08317160606384277,
+                "inputsReadyTime": "2026-08-27T07:44:15.191911935Z",
+                "name": "analyze-b",
+                "node": "anrg-9",
+                "phase": "Succeeded",
+                "podName": "e4objects-run-4mt25-analyze-b",
+                "startTime": "2026-08-27T07:44:15Z",
+                "startupSeconds": 0,
+                "state": "ComputeDone",
+                "taskCloseTime": "2026-08-27T07:44:21.233582258Z",
+                "taskStartTime": "2026-08-27T07:44:16.746726512Z"
+            },
+            {
+                "completionTime": "2026-08-27T07:43:49Z",
+                "computeSeconds": 4.340450048446655,
+                "createdTime": "2026-08-27T07:43:44Z",
+                "handoffSeconds": 0.01917290687561035,
+                "inputReadSeconds": 0.08123373985290527,
+                "inputsReadyTime": "2026-08-27T07:43:43.803657293Z",
+                "name": "archive",
+                "node": "anrg-4",
+                "phase": "Succeeded",
+                "podName": "e4objects-run-4mt25-archive",
+                "startTime": "2026-08-27T07:43:44Z",
+                "startupSeconds": 0,
+                "state": "ComputeDone",
+                "taskCloseTime": "2026-08-27T07:43:49.77779603Z",
+                "taskStartTime": "2026-08-27T07:43:45.323240756Z"
+            },
+            {
+                "completionTime": "2026-08-27T07:43:40Z",
+                "computeSeconds": 30.01181411743164,
+                "createdTime": "2026-08-27T07:43:04Z",
+                "handoffSeconds": 5.243075370788574,
+                "inputReadSeconds": 0,
+                "name": "produce",
+                "node": "anrg-3",
+                "phase": "Succeeded",
+                "podName": "e4objects-run-4mt25-produce",
+                "startTime": "2026-08-27T07:43:04Z",
+                "startupSeconds": 0,
+                "state": "ComputeDone",
+                "taskCloseTime": "2026-08-27T07:43:40.669606447Z",
+                "taskStartTime": "2026-08-27T07:43:05.396290063Z"
+            },
+            {
+                "completionTime": "2026-08-27T07:43:41Z",
+                "computeSeconds": 4.002252578735352,
+                "createdTime": "2026-08-27T07:43:36Z",
+                "handoffSeconds": 0.018483400344848633,
+                "inputReadSeconds": 0.0005092620849609375,
+                "inputsReadyTime": "2026-08-27T07:43:35.735449552Z",
+                "name": "actuator",
+                "node": "anrg-6",
+                "phase": "Succeeded",
+                "podName": "e4objects-run-4mt25-actuator",
+                "startTime": "2026-08-27T07:43:36Z",
+                "startupSeconds": 0,
+                "state": "ComputeDone",
+                "taskCloseTime": "2026-08-27T07:43:41.023085832Z",
+                "taskStartTime": "2026-08-27T07:43:36.988144159Z"
+            },
+            {
+                "completionTime": "2026-08-27T07:44:24Z",
+                "computeSeconds": 2.0003883838653564,
+                "createdTime": "2026-08-27T07:44:22Z",
+                "handoffSeconds": 0.019147634506225586,
+                "inputReadSeconds": 0.00011730194091796875,
+                "inputsReadyTime": "2026-08-27T07:44:21.670404195Z",
+                "name": "report",
+                "node": "anrg-1",
+                "phase": "Succeeded",
+                "podName": "e4objects-run-4mt25-report",
+                "startTime": "2026-08-27T07:44:22Z",
+                "startupSeconds": 0,
+                "state": "ComputeDone",
+                "taskCloseTime": "2026-08-27T07:44:24.877241611Z",
+                "taskStartTime": "2026-08-27T07:44:22.849100828Z"
+            },
+            {
+                "completionTime": "2026-08-27T07:44:21Z",
+                "computeSeconds": 4.701588869094849,
+                "createdTime": "2026-08-27T07:44:15Z",
+                "handoffSeconds": 0.012562274932861328,
+                "inputReadSeconds": 0.15577077865600586,
+                "inputsReadyTime": "2026-08-27T07:44:15.176484346Z",
+                "name": "analyze-a",
+                "node": "anrg-8",
+                "phase": "Succeeded",
+                "podName": "e4objects-run-4mt25-analyze-a",
+                "startTime": "2026-08-27T07:44:15Z",
+                "startupSeconds": 0,
+                "state": "ComputeDone",
+                "taskCloseTime": "2026-08-27T07:44:21.651949644Z",
+                "taskStartTime": "2026-08-27T07:44:16.764721632Z"
+            },
+            {
+                "completionTime": "2026-08-27T07:43:35.698276758Z",
+                "dataSize": "1000000",
+                "name": "serve-alert",
+                "node": "anrg-3",
+                "phase": "Succeeded",
+                "state": "DataVertex"
+            },
+            {
+                "dataSize": "200000000",
+                "name": "serve-features",
+                "node": "anrg-3",
+                "phase": "Pending",
+                "state": "DataVertex"
+            },
+            {
+                "completionTime": "2026-08-27T07:43:41.005284786Z",
+                "dataSize": "200000000",
+                "name": "serve-snapshot",
+                "node": "anrg-3",
+                "phase": "Succeeded",
+                "state": "DataVertex"
+            }
+        ]
+    }
+}

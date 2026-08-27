@@ -259,6 +259,8 @@ def run_one(idx, block, arm, wcsv, f):
                    round(int(cap_bytes) / 1e6, 1) if cap_bytes.isdigit() else "",
                    patches, ",".join(objs), ",".join(copies_target),
                    last[:300], json.dumps(vex), sum(vex.values()),
+                   json.dumps(deliveries), sum(deliveries.values()),
+                   extra_deliveries, revision_transfers,
                    json.dumps(paths), json.dumps(verify), digests_ok,
                    json.dumps(branch), ";".join(placements), restarts,
                    target_pods, cap_ver, clean, SEED])

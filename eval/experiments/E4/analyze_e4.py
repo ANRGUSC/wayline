@@ -34,7 +34,12 @@ def f(v, d=0.0):
         return d
 
 
-print(f"runs={len(rows)}  blocks={len(blocks)}  seed={rows[0]['seed']}")
+seed = rows[0].get("seed") or "?"
+if seed in ("", "?", "None"):
+    eo = os.path.join(RES, "execution-order.csv")
+    if os.path.exists(eo):
+        seed = next(csv.DictReader(open(eo)))["seed"]
+print(f"runs={len(rows)}  blocks={len(blocks)}  seed={seed}")
 print("\n== per arm ==")
 print(f"{'arm':<15}{'n':>3}{'done':>6}{'makespan':>10}{'IQR':>11}"
       f"{'cap-class MB':>14}{'payload':>9}{'proto%':>8}{'objects on anrg-7':>22}")
@@ -98,7 +103,7 @@ if have_deliv:
         for b in bad:
             print(f"        run {b[0]} {b[1]}: {b[2]} extra={b[3]}")
     rt = [int(f(r["revision_transfers"])) for r in rows]
-    print(f"        (revision transfers to target, separate: "
+    print(f"        (revision transfers to target, counted separately: "
           f"median {st.median(rt):.0f}, range [{min(rt)},{max(rt)}])")
 else:
     print("  [n/a ] delivery records not present in this dataset "
