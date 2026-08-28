@@ -89,21 +89,19 @@ def main():
     # Verify each sensor node's staged copy matches the source digest.
     for idx, node in SENSORS.items():
         cam = f"cam-{idx}"
-        out = probe_pod(
-            node, STAGED_ROOT, "/ds",
-            f'f=/ds/{cam}/{CLIP}; [ -f "$f" ] && '
-            f'echo "$(sha256sum $f | cut -d\\" \\" -f1) $(stat -c %s $f)" '
-            f'|| echo MISSING', "alpine")
-        tok = out.split()
+        # Emit the raw sha256sum line and parse here: escaping a `cut`
+        # pipeline through JSON into the pod spec produced an unparseable
+        # result and flagged correct copies as mismatched.
+        script = ("f=/ds/" + cam + "/" + CLIP + "; "
+                  "if [ -f $f ]; then sha256sum $f; else echo MISSING; fi")
+        out = probe_pod(node, STAGED_ROOT, "/ds", script, "alpine")
         rec = clips.setdefault(cam, {})
-        if len(tok) == 2:
-            rec["staged_node"] = node
-            rec["staged_sha256"] = tok[0]
-            rec["staged_matches_source"] = (tok[0] == rec.get("sha256"))
-        else:
-            rec["staged_node"] = node
-            rec["staged_sha256"] = None
-            rec["staged_matches_source"] = False
+        rec["staged_node"] = node
+        tok = out.split()
+        rec["staged_sha256"] = tok[0] if tok and tok[0] != "MISSING" else None
+        rec["staged_matches_source"] = (
+            rec["staged_sha256"] is not None
+            and rec["staged_sha256"] == rec.get("sha256"))
 
     durs = [c["duration_s"] for c in clips.values() if "duration_s" in c]
     manifest = {
