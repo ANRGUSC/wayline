@@ -58,6 +58,14 @@ def _vertex_name(producer: str, stage: str) -> str:
     return f"v-{producer}-{OBJ[stage]}"
 
 
+# Stages that touch the Intel iGPU: decode via VAAPI, detect_embed via
+# OpenVINO. Without a GPU device plugin the container device cgroup denies
+# opening /dev/dri/renderD128 regardless of the render group, so these
+# containers need privileged. Both silently fall back to CPU otherwise,
+# which changes the workload's compute-to-communication ratio.
+GPU_STAGES = {"decode", "detect_embed"}
+
+
 def _emit(name, image_tag, command, deps, stage, constraints_nodes, env,
           camera=None, outputs=None, inputs=None):
     """R._emit_task plus the outputs/inputs stanzas it predates."""
@@ -67,6 +75,9 @@ def _emit(name, image_tag, command, deps, stage, constraints_nodes, env,
         camera=camera,
     )
     extra = ""
+    if stage in GPU_STAGES:
+        extra += ("      containerSecurityContext:\n"
+                  "        privileged: true\n")
     if outputs:
         extra += "      outputs:\n"
         for oname, osize in outputs:

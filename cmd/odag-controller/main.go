@@ -799,6 +799,12 @@ type taskSpec struct {
 	Volumes         []corev1.Volume
 	VolumeMounts    []corev1.VolumeMount
 	SecurityContext *corev1.PodSecurityContext
+	// ContainerSecurityContext is applied to the task CONTAINER, not the
+	// pod. Needed for device access: the pod-level PodSecurityContext has
+	// no privileged field, and without a device plugin the container
+	// device cgroup denies opening /dev/dri/renderD128 even when the
+	// process holds the render group.
+	ContainerSecurityContext *corev1.SecurityContext
 }
 
 // reservedVolumeNames are the volumes the controller owns; user task specs
@@ -884,6 +890,25 @@ func parsePodSecurityContext(raw interface{}, taskName string) *corev1.PodSecuri
 	var sc corev1.PodSecurityContext
 	if err := json.Unmarshal(b, &sc); err != nil {
 		log.Printf("[odag-ctrl] WARN task=%s: unmarshal securityContext: %v", taskName, err)
+		return nil
+	}
+	return &sc
+}
+
+// parseContainerSecurityContext round-trips the unstructured value into a
+// typed corev1.SecurityContext, applied to the container.
+func parseContainerSecurityContext(raw interface{}, taskName string) *corev1.SecurityContext {
+	if raw == nil {
+		return nil
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		log.Printf("[odag-ctrl] WARN task=%s: marshal containerSecurityContext: %v", taskName, err)
+		return nil
+	}
+	var sc corev1.SecurityContext
+	if err := json.Unmarshal(b, &sc); err != nil {
+		log.Printf("[odag-ctrl] WARN task=%s: unmarshal containerSecurityContext: %v", taskName, err)
 		return nil
 	}
 	return &sc
@@ -975,27 +1000,30 @@ func extractTasks(obj *unstructured.Unstructured) []taskSpec {
 		vols := parseVolumes(t["volumes"], name)
 		vmounts := parseVolumeMounts(t["volumeMounts"], name)
 		secCtx := parsePodSecurityContext(t["securityContext"], name)
+		ctrSecCtx := parseContainerSecurityContext(
+			t["containerSecurityContext"], name)
 
 		tasks = append(tasks, taskSpec{
-			Name:            name,
-			Type:            typ,
-			CacheKey:        cacheKey,
-			Outputs:         outputs,
-			Inputs:          inputs,
-			Image:           image,
-			Command:         cmd,
-			Args:            args,
-			Dependencies:    deps,
-			DataSize:        dataSize,
-			Runtime:         runtimeF,
-			RuntimeProfile:  rtProfile,
-			Constraints:     constraints,
-			CPU:             cpu,
-			Memory:          mem,
-			UserEnv:         userEnv,
-			Volumes:         vols,
-			VolumeMounts:    vmounts,
-			SecurityContext: secCtx,
+			Name:                     name,
+			Type:                     typ,
+			CacheKey:                 cacheKey,
+			Outputs:                  outputs,
+			Inputs:                   inputs,
+			Image:                    image,
+			Command:                  cmd,
+			Args:                     args,
+			Dependencies:             deps,
+			DataSize:                 dataSize,
+			Runtime:                  runtimeF,
+			RuntimeProfile:           rtProfile,
+			Constraints:              constraints,
+			CPU:                      cpu,
+			Memory:                   mem,
+			UserEnv:                  userEnv,
+			Volumes:                  vols,
+			VolumeMounts:             vmounts,
+			SecurityContext:          secCtx,
+			ContainerSecurityContext: ctrSecCtx,
 		})
 	}
 	return tasks
@@ -1268,6 +1296,7 @@ func ensurePod(client *kubernetes.Clientset, namespace, odagName string, task ta
 				Args:            task.Args,
 				Env:             envVars,
 				Resources:       resources,
+				SecurityContext: task.ContainerSecurityContext,
 				VolumeMounts:    append(baseMounts, task.VolumeMounts...),
 			}},
 		},
