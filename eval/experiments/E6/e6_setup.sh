@@ -21,7 +21,11 @@ NS=wl-system
 step() { echo; echo "=== $* ==="; }
 
 step "1. stage clips onto sensor nodes"
-bash "$MCMT/dataset/stage-aicity-on-nodes.sh" || {
+# Not dataset/stage-aicity-on-nodes.sh: that shells between nodes with
+# sshpass and a hardcoded password, and inter-node SSH is refused on this
+# cluster. e6_stage.py moves the bytes through the Kubernetes API and
+# verifies each destination digest against the source.
+python3 "$E6/e6_stage.py" "clip_${D}s.mp4" || {
   echo "STOP: staging failed"; exit 1; }
 
 step "1b. record what the clips actually are (frozen manifest)"
