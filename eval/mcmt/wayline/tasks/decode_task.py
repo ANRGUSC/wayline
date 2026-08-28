@@ -21,6 +21,7 @@ sys.path.insert(0, "/app")
 
 from wl import WlTask                     # noqa: E402
 from lib.decode import decode_clip              # noqa: E402
+from lib.wlobj import send_named  # noqa: E402
 from lib.payload import pack_dir                # noqa: E402
 
 
@@ -40,7 +41,7 @@ def main() -> None:
         blob = pack_dir(work)
 
     print(f"[{task.name}] sending {len(blob)} bytes of frame tarball", flush=True)
-    task.send_raw(blob)
+    send_named(task, blob)
     task.close()
 
 

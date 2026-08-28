@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Wayline wrapper for the cross-camera fan-in stage.
 
-Receives one tar.gz blob per camera (recv_all returns a dict keyed by
-upstream task name). Unpacks each into a subdir named after the camera,
+Receives one tar.gz blob per camera, one declared named input per
+upstream track task. Unpacks each into a subdir named after the camera,
 then calls lib.match.cross_camera_match which scans the parent for
 camera subdirs and produces global_tracks.json.
 """
@@ -15,6 +15,7 @@ sys.path.insert(0, "/app")
 
 from wl import WlTask                          # noqa: E402
 from lib.match import cross_camera_match             # noqa: E402
+from lib.wlobj import recv_named, send_named, producer_of  # noqa: E402
 from lib.payload import pack_dir, unpack_to_dir      # noqa: E402
 
 
@@ -30,14 +31,17 @@ def main() -> None:
     task = WlTask()
     sim_thresh = float(os.environ.get("VEMCMT_SIM_THRESH", "0.55"))
 
-    inputs = task.recv_all_raw()  # dict[dep_name] -> bytes (no JSON decoding)
+    inputs = recv_named(task)  # [(canonical_key, bytes)] in declared order
     if not inputs:
-        raise RuntimeError("cross_camera_match: recv_all_raw returned no inputs")
+        raise RuntimeError("cross_camera_match: no declared inputs")
 
     with tempfile.TemporaryDirectory(prefix="vemcmt-match-in-") as in_dir, \
          tempfile.TemporaryDirectory(prefix="vemcmt-match-out-") as out_dir:
-        for dep_name, blob in inputs.items():
-            cam_dir = Path(in_dir) / _camera_name_for(dep_name)
+        for key, blob in inputs:
+            # Map from the canonical object key, not the peer: under store
+            # lowering the bytes arrive from a vertex whose name carries
+            # no camera index.
+            cam_dir = Path(in_dir) / _camera_name_for(producer_of(key))
             unpack_to_dir(blob, cam_dir)
 
         meta = cross_camera_match(in_dir, out_dir, sim_thresh=sim_thresh)
@@ -50,7 +54,7 @@ def main() -> None:
         out_blob = pack_dir(out_dir)
 
     print(f"[{task.name}] sending {len(out_blob)} bytes", flush=True)
-    task.send_raw(out_blob)
+    send_named(task, out_blob)
     task.close()
 
 

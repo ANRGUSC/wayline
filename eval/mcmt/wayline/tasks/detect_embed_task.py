@@ -13,6 +13,7 @@ sys.path.insert(0, "/app")
 
 from wl import WlTask                              # noqa: E402
 from lib.detect_embed import detect_and_embed            # noqa: E402
+from lib.wlobj import recv_one, send_named  # noqa: E402
 from lib.payload import pack_dir, unpack_to_dir          # noqa: E402
 
 
@@ -22,7 +23,7 @@ def main() -> None:
     det_model = os.environ.get("VEMCMT_DET_MODEL", "/models/yolov8n.xml")
     reid_model = os.environ.get("VEMCMT_REID_MODEL", "/models/osnet_x0_25.xml")
 
-    blob = task.recv_raw()
+    blob = recv_one(task)
     with tempfile.TemporaryDirectory(prefix="vemcmt-det-in-") as in_dir, \
          tempfile.TemporaryDirectory(prefix="vemcmt-det-out-") as out_dir:
         unpack_to_dir(blob, in_dir)
@@ -37,9 +38,7 @@ def main() -> None:
             flush=True,
         )
         out_blob = pack_dir(out_dir)
-
-    print(f"[{task.name}] sending {len(out_blob)} bytes", flush=True)
-    task.send_raw(out_blob)
+    send_named(task, out_blob)
     task.close()
 
 

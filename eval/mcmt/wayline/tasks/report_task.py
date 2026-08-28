@@ -12,13 +12,14 @@ from pathlib import Path
 sys.path.insert(0, "/app")
 
 from wl import WlTask                          # noqa: E402
+from lib.wlobj import recv_one  # noqa: E402
 from lib.payload import unpack_to_dir                # noqa: E402
 from lib.report import generate_report               # noqa: E402
 
 
 def main() -> None:
     task = WlTask()
-    blob = task.recv_raw()
+    blob = recv_one(task)
 
     # Final report lives at /reports/<odag>/report.json on the report-tier
     # node so the harvest script can collect it after the run.
