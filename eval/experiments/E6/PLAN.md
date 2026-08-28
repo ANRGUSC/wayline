@@ -9,21 +9,37 @@ synthetic mechanism DAGs. Every claim rests on measurements this plan
 collects, and the application adaptation is stated honestly rather than
 presented as an unchanged program.
 
-## Open item that gates Part A
+## Part A workloads (from the WOW paper)
 
-The workflow structures must be taken from the WOW paper
-(Lehmann et al., CCGrid 2025), not invented. **I have not read the paper
-in this session and will not guess which workflows it uses.** Before
-building anything, extract and record here:
+Source: Lehmann et al., CCGrid 2025, open-access PDF at
+`lauritzthamsen.org/assets/texts/LehmannBaderTschirpkeDeMecquenem
+LoesserBeckerLewinskaThamsenLeser_2025_WOWWorkflowAwareDataMovementAnd
+TaskSchedulingForDynamicScientificWorkflows.pdf`
 
-- which workflows WOW evaluates, and their source (nf-core? which
-  versions?)
-- task counts, dependency structure, and intermediate file sizes
-- the cluster shape WOW assumes, so ours is comparable or its
-  differences are stated
+WOW evaluates three families:
 
-Until that is filled in, Part A is defined structurally below but its
-workload row is a placeholder. Everything in Part B is ready to run now.
+- **Real workflows:** RNA-Seq, Sarek, Chip-Seq, Rangeland
+- **WfCommons-derived:** BLAST, BWA, Cycles, 1000Genome, Montage,
+  Seismology, SoyKB
+- **Synthetic patterns:** All-in-One, Chain, Fork, Group, Group-Multiple
+
+**Scale is the constraint.** Their real workflows generate 274-919 GB and
+their WfCommons cases roughly 150-169 GB, against 57 GB total disk per
+node on our testbed. Reproducing them at original scale is not possible
+here and we will not pretend otherwise.
+
+**Selection: scaled-down Montage and SoyKB.** Two WfCommons-derived
+recipes from different scientific domains (astronomy image mosaicking
+and plant genomics) with different structures, so the claim is about
+workflow shape rather than one pipeline. AI City remains the genuine
+full-scale end-to-end application.
+
+**Mandatory honesty condition.** Every mention must state that task and
+data scale were reduced while the recipe topology and inter-stage data
+ratios were preserved. Record the reduction factor and both the original
+and scaled per-stage sizes in the results provenance, so a reader can see
+exactly what was shrunk. We are not reproducing WOW's results and must
+not imply a head-to-head comparison.
 
 ## Framing (do not overstate)
 
@@ -49,20 +65,70 @@ Arms 2 and 3 differ only in the data path, as in E5. Arm 1 vs 2 exposes
 any cost of scheduling itself. Arm 4 is the outside comparison and is not
 placement-matched, which must be said explicitly.
 
-## Part B arms (AI City MCMT, targeted rerun)
+## Part B: AI City MCMT pilot (specified, runnable)
 
 Cell `n4-d120-png` only, the decisive cell (20/20 wins, +18.9%,
-866 MB/rep).
+866 MB/rep). Pilot is **3 blocks x 3 arms = 9 runs**; scale to 20 blocks
+(60 runs) only if the pilot passes unchanged.
 
 | arm | notes |
 |---|---|
 | `wl-direct-frozen` | named outputs, frozen placement + per-node order |
-| `wl-store-frozen` | same schedule, all named objects via `anrg-9` |
-| `argo-minio` | rerun for provenance under the same cluster state |
+| `wl-store-frozen` | same frozen schedule, every named object via `anrg-9` |
+| `argo-minio` | external referent, NOT placement-matched |
 
-Reuses: correctness rule and report equivalence (already 80/80), the
-existing dataset for the byte-volume trend across cells. Does not rerun
-d30/d60/d120-jpg.
+### Network matrix (derived from E0's measured B=942 Mbit/s)
+
+| link class | rate |
+|---|---|
+| within edge tier (anrg-1,3,4,5) or within compute tier (anrg-6,7,8) | 942 Mbit/s |
+| edge <-> compute | 118 Mbit/s (B/8) |
+| any link incident to anrg-9 | 59 Mbit/s (B/16) |
+
+anrg-9 hosts `cross-camera-match` and `report`, so the fan-in always
+crosses the slowest class; the store arm additionally routes every
+intermediate through it.
+
+### Frozen schedule
+
+Generate ONE deterministic HEFT schedule and per-node order under the
+matrix above, freeze it, and replay it unchanged for both Wayline arms.
+Freeze from the deployed controller's own scheduling call, not an
+offline reconstruction, and with `PYTHONHASHSEED` pinned: HEFT
+tie-breaks through a hash-randomized set and moves under 9 of 10 seeds
+(see `saga-scheduling-determinism`). Argo is not placement-matched and
+this must be stated wherever its numbers appear.
+
+### Pilot pass criteria (all must hold)
+
+1. 9/9 workflows complete within a 900 s deadline
+2. all three arms produce equivalent reports
+3. both Wayline arms match the frozen placement and order exactly
+4. every intermediate is a named object with valid digest records
+5. directed-pair and gateway bytes present for every run
+6. store lowering sends every intermediate through `anrg-9`
+7. direct execution follows the frozen producer-consumer paths
+8. zero restarts, fallbacks, or constraint overrides
+9. shaping verified live before each run and cleared after
+
+### Relationship to the old dataset
+
+The 60-run campaign **replaces** the disputed `d120-png` timing rather
+than being combined with it (see `eval/mcmt/AUDIT.md`, section 5). The
+old correctness result (80/80) and the cross-cell byte-volume trend
+remain reusable and are not rerun.
+
+### Required port before any run
+
+The MCMT renderers and task scripts predate named objects:
+`wayline/tasks/*.py` all call one-argument `send_raw(blob)`, and
+`render.py` emits no `outputs:`/`inputs:`. Porting means naming one
+object per producer (decode->`frames`, preprocess->`prepped`,
+detect_embed->`dets`, track->`tracks`, cross_camera_match->`matches`),
+switching five send sites to the two-argument form, resolving inputs by
+`producer.object` key with a `WL_INPUT_PEERS` override for the store
+arm, and rebuilding the six images. This is the application adaptation
+and is reported as such, not hidden.
 
 ## Recorded for every run (both parts)
 
