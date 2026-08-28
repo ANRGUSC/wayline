@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 # Build + push the 6 wl-native MCMT workload images from the Wayline repo root.
 set -uo pipefail
-cd /home/anrg/wayline
+# Build from the tree that actually holds the current SDK and the ported
+# wrappers. /home/anrg/wayline is a stale checkout: its SDK has no
+# two-argument send() and its task scripts still emit unnamed outputs, so
+# building there produced images that installed objects under the bare
+# task name and wedged every consumer waiting on "producer.object".
+BUILD_ROOT=${BUILD_ROOT:-/home/anrg/wayline-build-vertex}
+cd "$BUILD_ROOT" || { echo "no build root at $BUILD_ROOT"; exit 1; }
+grep -q "_payload" sdk/python/wl/api.py || {
+  echo "STOP: $BUILD_ROOT has an SDK without two-argument send()"; exit 1; }
+test -f eval/mcmt/lib/wlobj.py || {
+  echo "STOP: $BUILD_ROOT is missing eval/mcmt/lib/wlobj.py"; exit 1; }
 R=192.168.1.163:5000
 declare -A M=( [decode]=wl-vemcmt-decode [preprocess]=wl-vemcmt-preprocess [detect_embed]=wl-vemcmt-detect-embed [track]=wl-vemcmt-track [cross_camera_match]=wl-vemcmt-cross-camera-match [report]=wl-vemcmt-report )
 for d in decode preprocess detect_embed track cross_camera_match report; do
