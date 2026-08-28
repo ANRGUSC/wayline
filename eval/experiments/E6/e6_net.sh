@@ -26,8 +26,33 @@ cls() {
   [ "$(group "$1")" = "$(group "$2")" ] && echo 10 || echo 20
 }
 
+# The tc commands run inside a privileged host-network pod per node.
+# E5 created these from its harness; doing it here instead makes the
+# script self-sufficient, so `apply` cannot fail merely because nothing
+# made the pods first.
+ensure_pods() {
+  local need=0
+  for n in $ALL; do
+    kubectl -n "$NS" get pod "e6-fw-$n" >/dev/null 2>&1 || need=1
+  done
+  [ "$need" = 0 ] && return 0
+  for n in $ALL; do
+    kubectl -n "$NS" get pod "e6-fw-$n" >/dev/null 2>&1 && continue
+    kubectl run "e6-fw-$n" -n "$NS" --restart=Never --image=alpine \
+      --overrides="{\"spec\":{\"nodeName\":\"$n\",\"hostNetwork\":true,\"restartPolicy\":\"Never\",\"containers\":[{\"name\":\"c\",\"image\":\"alpine\",\"command\":[\"sh\",\"-c\",\"apk add -q iproute2 >/dev/null && sleep 86400\"],\"securityContext\":{\"privileged\":true}}]}}" \
+      >/dev/null 2>&1
+  done
+  for n in $ALL; do
+    for i in $(seq 1 60); do
+      kubectl -n "$NS" exec "e6-fw-$n" -- sh -c 'tc -V' >/dev/null 2>&1 && break
+      sleep 3
+    done
+  done
+}
+
 case "$CMD" in
   apply)
+    ensure_pods
     for u in $ALL; do
       F=""
       for v in $ALL; do
@@ -45,6 +70,7 @@ case "$CMD" in
     done
     exec "$0" verify ;;
   verify)
+    ensure_pods
     bad=0
     for u in $ALL; do
       out=$(fw "$u" "IF=\$(ip route get ${IP[$GW]} | grep -o 'dev [^ ]*' | awk '{print \$2}'); \
@@ -65,6 +91,7 @@ case "$CMD" in
     [ "$bad" = 0 ] || exit 1
     echo "symmetric matrix live (verified on 8 nodes: 942/118/59 Mbit, 7 filters each)" ;;
   clear)
+    CLEANUP_PODS=${CLEANUP_PODS:-0}
     left=0
     for u in $ALL; do
       fw "$u" "for i in \$(ls /sys/class/net); do tc qdisc del dev \$i root 2>/dev/null; done; true" >/dev/null
