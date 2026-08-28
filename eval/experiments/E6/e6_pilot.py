@@ -422,7 +422,7 @@ def verdict(rows):
     ok = lambda c: all(c(r) for r in wl) if wl else False
     fps = {r["report_fingerprint"] for r in rows if r["report_fingerprint"]}
     checks = [
-        ("9/9 complete within deadline",
+        (f"{3 * BLOCKS}/{3 * BLOCKS} complete within deadline",
          len(rows) == 3 * BLOCKS and all(r["phase"] == "Succeeded"
                                          for r in rows)),
         ("all arms report-equivalent", len(fps) == 1 and bool(fps)),
@@ -452,8 +452,8 @@ def verdict(rows):
     for label, passed in checks:
         print(f"  [{'PASS' if passed else 'FAIL'}] {label}")
     allp = all(p for _, p in checks)
-    print(f"\n  {'PILOT PASSES' if allp else 'PILOT DOES NOT PASS'} "
-          f"-- {'scale to 20 blocks' if allp else 'do not scale'}")
+    print(f"\n  {'ALL CRITERIA PASS' if allp else 'CRITERIA NOT MET'} "
+          f"({BLOCKS} blocks, {3 * BLOCKS} runs)")
     print("\n  NOTE: Argo exposes no per-flow byte counters, so criterion 5 "
           "is evaluated on the Wayline arms only; Argo bytes are recorded "
           "as unavailable rather than estimated.")
