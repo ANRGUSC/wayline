@@ -79,8 +79,10 @@ def kubectl(a, timeout=180):
 
 
 def net(cmd):
-    return (sh(f"{E6DIR}/e6_net.sh {cmd}", timeout=420).stdout
-            + sh(f"{E6DIR}/e6_net.sh {cmd}", timeout=1).stderr).strip()
+    """One invocation, both streams. Calling the script twice ran the tc
+    changes twice and the second call's 1s timeout threw."""
+    r = sh(f"{E6DIR}/e6_net.sh {cmd}", timeout=600)
+    return (r.stdout + r.stderr).strip()
 
 
 AGENTS = {}
