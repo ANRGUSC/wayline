@@ -155,6 +155,11 @@ def render(n_cameras: int, clip_duration: int, name: str, artifact_repo: str,
       container:
         image: {REGISTRY}/wl-vemcmt-decode:latest
         imagePullPolicy: Always
+        # Without a GPU device plugin the container device cgroup denies
+        # /dev/dri/renderD128 regardless of the render group, and decode
+        # silently falls back to CPU. The Wayline arms carry the same
+        # setting, so both systems decode on the iGPU.
+        securityContext: {{ privileged: true }}
         command: ["python3", "argo_decode_task.py"]
         env:
           - {{ name: VEMCMT_CAMERA, value: "{{{{inputs.parameters.camera}}}}" }}
@@ -203,6 +208,7 @@ def render(n_cameras: int, clip_duration: int, name: str, artifact_repo: str,
       container:
         image: {REGISTRY}/wl-vemcmt-detect-embed:latest
         imagePullPolicy: Always
+        securityContext: {{ privileged: true }}
         command: ["python3", "argo_detect_embed_task.py"]
         env:
           - {{ name: VEMCMT_IN, value: /in/preprocess/output }}

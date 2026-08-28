@@ -65,7 +65,8 @@ FIELDS = ["order", "block", "arm", "system", "run", "phase", "makespan_s",
           "named_objects_seen", "digests_ok", "bytes_by_pair", "gw_bytes_in",
           "gw_bytes_out", "store_paths_ok", "direct_paths_ok",
           "restarts", "fallbacks", "constraint_overrides",
-          "n_global_tracks", "counts_by_class", "report_fingerprint",
+          "decoders", "n_global_tracks", "counts_by_class",
+          "report_fingerprint",
           "net_verified", "valid", "invalid_reasons", "seed"]
 
 
@@ -310,6 +311,19 @@ def check_wl(rec, arm, frozen, ctrl, report):
     if not dig:
         bad.append("digest/size mismatch")
 
+    # VAAPI is part of the specified workload. Silent CPU fallback changes
+    # the compute-to-communication ratio the realization comparison rests
+    # on, so a run that decodes on the CPU is not a valid measurement.
+    dec_ok, decoders = 0, []
+    for i in range(1, NCAM + 1):
+        lg = kubectl(f"logs {rec['run']}-decode-{i} 2>/dev/null").stdout
+        d = re.search(r"decoder=(\w+)", lg)
+        decoders.append(d.group(1) if d else "?")
+        if d and d.group(1) == "vaapi" and "VAAPI failed" not in lg:
+            dec_ok += 1
+    if dec_ok < NCAM:
+        bad.append(f"decode not on VAAPI: {decoders}")
+
     if rec["phase"] != "Succeeded":
         bad.append(f"phase={rec['phase']}")
     if report is None:
@@ -318,6 +332,7 @@ def check_wl(rec, arm, frozen, ctrl, report):
         "hash": h, "hash_ok": hash_ok, "order_ok": order_ok, "enact": enact,
         "named": f"{named}/{len(want)}", "digests_ok": dig,
         "store_ok": store_ok, "direct_ok": direct_ok, "restarts": restarts,
+        "decoders": ",".join(decoders),
         "overrides": overrides,
         "fallbacks": int("falling back" in ctrl)}
 
@@ -428,6 +443,8 @@ def verdict(rows):
          ok(lambda r: str(r["restarts"]) in ("0", "")
             and str(r["fallbacks"]) in ("0", "")
             and str(r["constraint_overrides"]) in ("0", ""))),
+        ("all four decode tasks on VAAPI (wl arms)",
+         ok(lambda r: r["decoders"] == ",".join(["vaapi"] * NCAM))),
         ("shaping verified live every run",
          all(r["net_verified"] in (True, "True") for r in rows)),
     ]
@@ -534,6 +551,7 @@ def main():
                     restarts=extra.get("restarts", ""),
                     fallbacks=extra.get("fallbacks", ""),
                     constraint_overrides=extra.get("overrides", ""),
+                    decoders=extra.get("decoders", ""),
                     n_global_tracks=n, counts_by_class=json.dumps(counts),
                     report_fingerprint=fpr, net_verified=nv, valid=valid,
                     invalid_reasons=";".join(bad), seed=SEED)
