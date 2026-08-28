@@ -196,3 +196,37 @@ Carried over from E5, plus application-specific:
    closes the named-object gap the audit identified.
 3. Part A once the workload row is filled.
 4. Then the compact correctness/overhead/scale study.
+
+## What "the frozen HEFT schedule" actually is (recorded 2026-08-28)
+
+The freeze reported **14 constraint overrides out of 18 tasks**. This is
+structural, not a defect, and must be described accurately.
+
+SAGA's machine model is separable: a task has a cost, a node has a speed,
+and runtime is cost/speed. It has no way to express "this task may run
+only on these nodes". The bridge therefore applies `constraints.nodeNames`
+as a POST-HOC correction (`_allowed_nodes` in `saga-sidecar/bridge.py`):
+SAGA schedules freely, then any task placed on a disallowed node is moved
+to the least-loaded allowed one.
+
+MCMT is heavily constrained by its own topology:
+
+- 10 of 18 tasks are pinned to exactly one node (4 decode + 4 preprocess
+  on their camera's sensor node, cross-camera-match and report on the
+  aggregation node)
+- 8 tasks (detect-embed-*, track-*) are constrained to the 3-node compute
+  tier
+
+So HEFT's genuine contribution is distributing those 8 compute tasks
+across anrg-6/7/8; the other 10 placements follow from where the cameras
+and the aggregator physically are.
+
+**How to state it:** the schedule is HEFT's compute-tier assignment under
+the workload's placement constraints, not an unconstrained HEFT schedule.
+Do not write "HEFT scheduled the workflow" without that qualification.
+
+**Effect on the pass criteria:** none for the arms. Both replay the frozen
+schedule with `scheduler: random` and 18/18 tasks single-node pinned, so
+SAGA is not invoked during a run and no override can occur. Criterion 8
+(zero overrides) applies to the runs and is achievable. The 14 overrides
+belong to the one-time freeze and are recorded in the frozen manifest.
