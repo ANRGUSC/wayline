@@ -101,3 +101,34 @@ and per-node order, digests, and provenance. Add a frozen
 direct-vs-store arm at identical placement and order so the applications
 section carries the same controlled realization comparison as E5. That is
 roughly 3 arms x 20 blocks rather than the original 4 cells x 3 configs.
+
+## 7. Cell labels overstate clip duration (found 2026-08-28)
+
+After re-fetching the dataset, ffprobe on the sliced clips shows the
+`d120` cell does not contain 120-second clips. AI City S04 cameras
+c016-c019 are shorter than the requested duration, so `ffmpeg -t 120`
+produced the whole source:
+
+| camera | clip_30s | clip_120s | source length |
+|---|---|---|---|
+| cam-1 | 30.0 s | 31.0 s | 31.0 s |
+| cam-2 | 28.1 s | 28.1 s | 28.1 s |
+| cam-3 | 30.0 s | 41.8 s | 41.8 s |
+| cam-4 | 30.0 s | 46.0 s | 46.0 s |
+
+Consequences:
+
+- **Do not describe the workload as "120-second clips."** The honest
+  description is that each clip is the full source camera video, 28.1 to
+  46.0 s, and that the requested duration was capped by source length.
+- The `d30` and `d120` cells are only partly distinct: cam-2 is
+  byte-identical between them and cam-1 differs by one second. The
+  measured difference between those cells comes from cameras 3 and 4.
+- The historical byte volumes are consistent with these lengths
+  (866 MB/rep for d120-png at ~36 s mean across 4 cameras, 5 fps, PNG at
+  640x640), so the old measurements are internally fine. Only the label
+  is wrong, and it was wrong in the original campaign too, since the
+  fetch is deterministic from the same source.
+- Renaming is preferable to re-scoping: the cell is the decisive one and
+  the data is real. Call it by what it is (full-length source clips)
+  rather than by a duration the source cannot supply.
