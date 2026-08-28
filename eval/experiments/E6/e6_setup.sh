@@ -24,6 +24,13 @@ step "1. stage clips onto sensor nodes"
 bash "$MCMT/dataset/stage-aicity-on-nodes.sh" || {
   echo "STOP: staging failed"; exit 1; }
 
+step "1b. record what the clips actually are (frozen manifest)"
+# Condition is FULL-SOURCE PNG: each clip is the whole source video.
+# Verifies every staged copy is byte-identical to the gateway source.
+mkdir -p "$FROZEN"
+python3 "$E6/e6_clip_manifest.py" "$FROZEN" "clip_${D}s.mp4" || {
+  echo "STOP: clip manifest failed"; exit 1; }
+
 step "2. rebuild MCMT images (named-object wrappers)"
 bash "$MCMT/build-wl-images.sh" || { echo "STOP: image build failed"; exit 1; }
 

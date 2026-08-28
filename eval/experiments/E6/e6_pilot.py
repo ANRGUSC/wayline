@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """E6 Part B pilot: AI City MCMT under the current object contract.
 
-3 blocks x 3 arms = 9 runs on cell n4-d120-png.
+3 blocks x 3 arms = 9 runs on the FULL-SOURCE PNG condition: each clip
+is the entire source camera video (28.1-46.0 s), identical across all
+arms. 'n4-d120-png' is a legacy internal identifier only, not a
+duration, and must not be presented as one.
 
   wl-direct-frozen  frozen placement + per-node order, direct realization
   wl-store-frozen   same frozen schedule, every named object via anrg-9
@@ -431,7 +434,9 @@ def main():
              "jsonpath='{.items[0].status.containerStatuses[*].imageID}'"
              ).stdout
     open(f"{RES}/PROVENANCE.txt", "w").write(
-        f"seed {SEED}\nblocks {BLOCKS}\ncell n4-d120-png\n"
+        f"seed {SEED}\nblocks {BLOCKS}\n"
+        f"condition full-source-png (legacy id n4-d120-png; NOT a duration)\n"
+        f"clip_manifest {os.path.join(FROZEN, 'clip-manifest.json')}\n"
         f"controller_image {img.strip()}\ncontroller_imageID {dig.strip()}\n"
         f"frozen_dir {FROZEN}\nfrozen_placement "
         f"{json.dumps(frozen.get('placement'), sort_keys=True)}\n"

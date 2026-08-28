@@ -67,9 +67,34 @@ placement-matched, which must be said explicitly.
 
 ## Part B: AI City MCMT pilot (specified, runnable)
 
-Cell `n4-d120-png` only, the decisive cell (20/20 wins, +18.9%,
-866 MB/rep). Pilot is **3 blocks x 3 arms = 9 runs**; scale to 20 blocks
-(60 runs) only if the pilot passes unchanged.
+### Condition naming (settled)
+
+The condition is **full-source PNG**: every clip is the entire source
+camera video. `d120-png` is a **legacy internal identifier only** and
+survives in historical filenames and run names; it is not a duration.
+
+Binding rules:
+
+- Scripts, metadata, plots, and paper-facing output say **full-source
+  PNG**, never "120-second clips".
+- The frozen manifest records each clip's measured duration, frame
+  count, byte size, and SHA-256, and verifies each staged copy against
+  the gateway source (`e6_clip_manifest.py`).
+- Footage is **never** looped or duplicated to manufacture 120 s.
+- The historical cells are **not** a duration sweep and must not be
+  presented as one. Relate performance to **measured intermediate-data
+  volume** (336-866 MB/rep) instead, which is the variable that actually
+  differs.
+- The old measurements remain usable as system comparisons, described by
+  their actual clip and data characteristics.
+
+The pilot uses the recovered full-source clips identically across all
+three arms, which keeps the comparison a real-application one while
+removing the false duration claim.
+
+Pilot is **3 blocks x 3 arms = 9 runs** on this condition (historically
+the decisive cell: 20/20 wins, +18.9%, 866 MB/rep); scale to 20 blocks
+(60 runs) only if it passes unchanged.
 
 | arm | notes |
 |---|---|
