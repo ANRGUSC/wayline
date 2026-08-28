@@ -275,6 +275,15 @@ def main():
         for mode in modes:
             (out / f"e6a-{k8s_name(wf)}-{mode}.yml").write_text(emit(mode))
         manifests[wf] = man
+        # compact meta for the run harness (no YAML parsing on the host)
+        by, objects, _, _ = load(instances, wf)
+        names = {t: k8s_name(t) for t in by}
+        meta = dict(
+            tasks=sorted(names.values()),
+            objects=sorted(f"{names[p_]}.{OBJ}" for p_ in objects),
+            producers={f"{names[p_]}.{OBJ}": names[p_] for p_ in objects},
+        )
+        (out / f"meta-{k8s_name(wf)}.json").write_text(json.dumps(meta))
         print(f"{wf:12} tasks={man['tasks']:3} objects={man['objects']:3} "
               f"s={man['scale_factor']:.5f} "
               f"scaled_obj={man['scaled_object_bytes']/1e6:8.2f}MB "
