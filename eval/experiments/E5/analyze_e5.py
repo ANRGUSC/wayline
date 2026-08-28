@@ -196,6 +196,19 @@ print(f"  {npol} policies, {nhash} distinct schedule(s) in total; "
       f"{len(pairs_differ)} policy pair(s) differ: "
       f"{'DISCRIMINATING' if pairs_differ else 'NOT DISCRIMINATING'}")
 
+# A policy whose tie-breaking is sampled across seeds has no single
+# point estimate, so pooling its runs and calling the result
+# "within-policy spread" mixes tie-break variation into what should
+# measure run-to-run noise. Separation is therefore tested between the
+# DETERMINISTIC policies; the sampled policy is reported as a
+# distribution (see the seed-level section) and its overlap stated.
+SAMPLED = {r_sched(a) for a in ARMS
+           for r in okby[a] if r.get("policy_seed") not in (None, "", "0")}
+if SAMPLED:
+    print(f"  note: {sorted(SAMPLED)} tie-breaking sampled across seeds; "
+          f"excluded from the pairwise separation test and reported as a "
+          f"distribution instead")
+
 for label, arms, key, unit in (
         ("isolated makespan", ISO[:3], "makespan_med", "s"),
         ("batch throughput", BATCH, "dags_per_min", "DAGs/min"),
@@ -204,6 +217,8 @@ for label, arms, key, unit in (
     for a in arms:
         rs = okby[a]
         if not rs:
+            continue
+        if r_sched(a) in SAMPLED:
             continue
         v = [x for x in (num(x2[key]) for x2 in rs) if x is not None]
         if v:
@@ -226,6 +241,25 @@ for label, arms, key, unit in (
                "NOT separated (gap within run-to-run spread)")
     print(f"    across-policy gap {gap:.2f} vs worst within-policy "
           f"spread {worst:.2f}: {verdict}")
+    for pol in sorted(SAMPLED):
+        sarms = [a for a in arms if r_sched(a) == pol]
+        aggs = []
+        for a in sarms:
+            byseed = defaultdict(list)
+            for r in okby[a]:
+                if r.get("policy_seed") not in (None, ""):
+                    byseed[str(r["policy_seed"])].append(r)
+            for sd, rr in byseed.items():
+                vv = [x for x in (num(r[key]) for r in rr) if x is not None]
+                if vv:
+                    aggs.append(st.median(vv))
+        if aggs:
+            lo2, hi2 = min(aggs), max(aggs)
+            inside = [k for k, v in vals.items() if lo2 <= st.median(v) <= hi2]
+            print(f"    {pol} spans [{lo2:.2f}, {hi2:.2f}] across "
+                  f"{len(aggs)} seed aggregates"
+                  + (f"; OVERLAPS {sorted(inside)}" if inside
+                     else "; disjoint from both"))
 
 # ---- OLB at the seed level ------------------------------------------
 # OLB's two repetitions per policy seed are ONE observation of that
