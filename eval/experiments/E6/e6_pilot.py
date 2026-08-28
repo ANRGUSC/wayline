@@ -117,6 +117,19 @@ def flows(node, run):
         return []
 
 
+def installed(node, run, key):
+    """True if the named object <key> has an install record on `node`.
+    Flow records only show objects that CROSSED the network, so a
+    co-located handoff (decode->preprocess on one sensor node) produces
+    no flow and would look like a missing named object."""
+    ip = AGENTS.get(node)
+    if not ip:
+        return False
+    r = sh(f"curl -s -o /dev/null -w '%{{http_code}}' -m 6 "
+           f"http://{ip}:8082/installed/{run}/{key}", timeout=12)
+    return r.stdout.strip() == "200"
+
+
 def purge(run):
     for ip in AGENTS.values():
         sh(f"curl -s -m 45 -X DELETE http://{ip}:8082/data/{run} >/dev/null",
@@ -249,15 +262,26 @@ def check_wl(rec, arm, frozen, ctrl, report):
     # Every intermediate must be a NAMED object: the data-plane key is
     # "producer.object", so an unnamed send would appear as a bare task
     # name. Under store lowering the vertices carry the objects instead.
-    want = {f"{p}.{o}" for p, o in OBJECTS}
+    # Ask each producer's node whether its named object was installed.
+    # Counting flow records instead would undercount by exactly the
+    # co-located handoffs, which never cross the network.
+    want = [(p, o) for p, o in OBJECTS]
+    named = 0
+    missing = []
+    for prod, obj in want:
+        node = rec["placement"].get(prod)
+        if node and installed(node, rec["run"], f"{prod}.{obj}"):
+            named += 1
+        else:
+            missing.append(f"{prod}.{obj}")
+    if named < len(want):
+        bad.append(f"named objects installed {named}/{len(want)}"
+                   f" missing={missing[:3]}")
     seen = {k for k in rec["keys"] if k}
-    named = seen & want
     if store:
         vtx = {k for k in seen if k.startswith("v-")}
         if not vtx:
             bad.append("store arm shows no data-vertex transfers")
-    elif len(named) < len(want):
-        bad.append(f"named objects seen {len(named)}/{len(want)}")
     bare = {k for k in seen if k in APP_TASKS}
     if bare:
         bad.append(f"unnamed (bare-task) transfers: {sorted(bare)[:3]}")
@@ -292,7 +316,7 @@ def check_wl(rec, arm, frozen, ctrl, report):
         bad.append("no report.json")
     return (not bad), bad, {
         "hash": h, "hash_ok": hash_ok, "order_ok": order_ok, "enact": enact,
-        "named": f"{len(named)}/{len(want)}", "digests_ok": dig,
+        "named": f"{named}/{len(want)}", "digests_ok": dig,
         "store_ok": store_ok, "direct_ok": direct_ok, "restarts": restarts,
         "overrides": overrides,
         "fallbacks": int("falling back" in ctrl)}
