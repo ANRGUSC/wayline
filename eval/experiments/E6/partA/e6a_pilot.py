@@ -40,7 +40,13 @@ FROZEN = os.environ.get("FROZEN", os.path.expanduser("~/E6A-frozen"))
 TPL = os.environ.get("TPL", os.path.expanduser("~/E6A-templates"))
 BLOCKS = int(os.environ.get("BLOCKS", "3"))
 SEED = int(os.environ.get("SEED", "20260829"))
-DEADLINE = 900
+# 900s was Part B's deadline, sized for a 154s workload. Part A's
+# ~100-object store arms legitimately run 400-900+s (per-hop dispatch
+# cadence compounds over serial task->vertex->task chains), so 900s
+# censored the slow tail of that variance. Raised BEFORE any paper
+# campaign, with the censored pilot retained; the pilot is rerun in
+# full rather than mixing deadlines within one dataset.
+DEADLINE = int(os.environ.get("DEADLINE", "1800"))
 GW = "anrg-9"
 NODES = ["anrg-1", "anrg-3", "anrg-4", "anrg-5",
          "anrg-6", "anrg-7", "anrg-8", GW]
@@ -118,7 +124,7 @@ def purge(run):
 
 
 def ctrl_slice(run):
-    out = kubectl("logs deploy/odag-controller --tail=8000").stdout
+    out = kubectl("logs deploy/odag-controller --tail=60000").stdout
     return "\n".join(l for l in out.splitlines() if run in l)
 
 
