@@ -18,3 +18,18 @@ ctrl-*.log); and the session monitor pattern missed per-run result
 lines entirely (harness output was fine).
 
 Direct arms: 21/21 valid, all placement/order/path checks clean.
+
+## Superseding diagnosis (2026-08-29)
+
+The 1800 s rerun failed seismology-store at the SAME 29/103 objects,
+which ruled out the slow-tail explanation above. Actual root cause: the
+controller was OOMKilled (256Mi limit; 12 restarts across the pilots).
+A kill mid-run orphans the surviving ODAG -- the schedule-plan and
+assignment caches are in-memory, so its remaining tasks never dispatch.
+Censoring tracked crash timing, not workload behavior; store arms of
+the biggest DAGs were hit most because they hold the most state and run
+longest. The 1800 s deadline raise remains correct for bwa/soykb store
+arms (753 s+ legitimate walls), but the wedges were the OOM.
+
+Both this dataset and the aborted 1800 s rerun are invalid as
+measurements; controller limit raised to 1Gi and the pilot rerun clean.
