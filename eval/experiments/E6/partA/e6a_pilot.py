@@ -53,6 +53,12 @@ NODES = ["anrg-1", "anrg-3", "anrg-4", "anrg-5",
 WORKFLOWS = ["blast", "bwa", "cycles", "1000genome", "montage",
              "seismology", "soykb"]
 ARMS = ["frozen", "store"]  # template suffixes; 'frozen' is the direct arm
+# ONLY="soykb-frozen,montage-store" restricts the block to specific
+# (workflow, arm) pairs -- used for make-up blocks replacing runs lost
+# to infrastructure (probe-pod expiry), so a cell returns to full n.
+ONLY = {tuple(x.rsplit("-", 1)) for x in
+        os.environ.get("ONLY", "").split(",") if x}
+BLOCK0 = int(os.environ.get("BLOCK0", "1"))  # first block number label
 
 FIELDS = ["order", "block", "workflow", "arm", "run", "phase", "makespan_s",
           "wall_s", "placement_matches_frozen", "order_matches_frozen",
@@ -290,8 +296,9 @@ def main():
 
     rng = random.Random(SEED)
     schedule = []
-    for b in range(1, BLOCKS + 1):
-        blk = [(wf, arm) for wf in WORKFLOWS for arm in ARMS]
+    for b in range(BLOCK0, BLOCK0 + BLOCKS):
+        blk = [(wf, arm) for wf in WORKFLOWS for arm in ARMS
+               if not ONLY or (wf, arm) in ONLY]
         rng.shuffle(blk)
         schedule += [(b, wf, arm) for wf, arm in blk]
 
