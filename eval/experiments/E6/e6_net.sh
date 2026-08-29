@@ -31,15 +31,22 @@ cls() {
 # script self-sufficient, so `apply` cannot fail merely because nothing
 # made the pods first.
 ensure_pods() {
+  # A pod that exists but is not Running (its sleep expired after 24h,
+  # or it was evicted) cannot be exec'd, which fails every verify while
+  # the host qdiscs are actually still live. Recreate on any non-Running
+  # phase, and sleep infinity so expiry cannot recur.
   local need=0
   for n in $ALL; do
-    kubectl -n "$NS" get pod "e6-fw-$n" >/dev/null 2>&1 || need=1
+    ph=$(kubectl -n "$NS" get pod "e6-fw-$n" -o jsonpath='{.status.phase}' 2>/dev/null)
+    [ "$ph" = "Running" ] || need=1
   done
   [ "$need" = 0 ] && return 0
   for n in $ALL; do
-    kubectl -n "$NS" get pod "e6-fw-$n" >/dev/null 2>&1 && continue
+    ph=$(kubectl -n "$NS" get pod "e6-fw-$n" -o jsonpath='{.status.phase}' 2>/dev/null)
+    [ "$ph" = "Running" ] && continue
+    kubectl -n "$NS" delete pod "e6-fw-$n" --ignore-not-found --wait=false >/dev/null 2>&1
     kubectl run "e6-fw-$n" -n "$NS" --restart=Never --image=alpine \
-      --overrides="{\"spec\":{\"nodeName\":\"$n\",\"hostNetwork\":true,\"restartPolicy\":\"Never\",\"containers\":[{\"name\":\"c\",\"image\":\"alpine\",\"command\":[\"sh\",\"-c\",\"apk add -q iproute2 >/dev/null && sleep 86400\"],\"securityContext\":{\"privileged\":true}}]}}" \
+      --overrides="{\"spec\":{\"nodeName\":\"$n\",\"hostNetwork\":true,\"restartPolicy\":\"Never\",\"containers\":[{\"name\":\"c\",\"image\":\"alpine\",\"command\":[\"sh\",\"-c\",\"apk add -q iproute2 >/dev/null && sleep infinity\"],\"securityContext\":{\"privileged\":true}}]}}" \
       >/dev/null 2>&1
   done
   for n in $ALL; do
