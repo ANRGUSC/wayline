@@ -136,6 +136,12 @@ def run_one(wf, arm, meta, frozen):
     if not m:
         return None, ["submit failed"], {}
     run, t0 = m.group(1), time.time()
+    # The 'enacting external schedule order' line is logged at dispatch
+    # start; on a 900s run it rolls out of the log tail by collection
+    # time (pilot artifact: a correct bwa-store run was failed for it).
+    # Capture it now.
+    time.sleep(6)
+    enact_early = "mode=serial" in ctrl_slice(run)
     while time.time() - t0 < DEADLINE:
         ph = kubectl(f"get odag {run} -o jsonpath='{{.status.phase}}'"
                      ).stdout.strip()
@@ -170,6 +176,18 @@ def run_one(wf, arm, meta, frozen):
         bad.append(f"exceeded {DEADLINE}s deadline")
 
     place_ok = (placement == frozen["placement"])
+    ctrl_pre = ctrl_slice(run)
+    if not place_ok:
+        pods_created = dict(re.findall(
+            rf"created pod {NS}/{run}-([a-z0-9-]+) \(node: (anrg-\d+)\)",
+            ctrl_pre))
+        merged = dict(placement)
+        for tsk, node in pods_created.items():
+            if tsk in frozen["placement"]:
+                merged.setdefault(tsk, node)
+        place_ok = (merged == frozen["placement"])
+        if place_ok:
+            placement = merged
     if not place_ok:
         diff = {k: (frozen["placement"].get(k), placement.get(k))
                 for k in set(placement) | set(frozen["placement"])
@@ -183,9 +201,9 @@ def run_one(wf, arm, meta, frozen):
     if not order_ok:
         bad.append("per-node order != frozen")
 
-    ctrl = ctrl_slice(run)
+    ctrl = ctrl_pre
     open(f"{RES}/ctrl-{run}.log", "w").write(ctrl)
-    enact = "mode=serial" in ctrl
+    enact = enact_early or ("mode=serial" in ctrl)
     if not enact:
         bad.append("enactOrder=serial not confirmed")
     fallb = int("falling back" in ctrl)
