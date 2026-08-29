@@ -33,10 +33,16 @@ spec:
           resources:
             requests:
               cpu: "100m"
-              memory: "64Mi"
-            limits:
-              cpu: "500m"
               memory: "256Mi"
+            limits:
+              cpu: "1"
+              # 256Mi was sized for the 7-18 task DAGs of the mechanism
+              # experiments. A 100-task workflow with 100 pod-less data
+              # vertices (E6 Part A) OOMKilled the controller mid-run,
+              # which silently orphaned the run: the in-memory schedule
+              # plan and assignment caches die with the process and the
+              # surviving ODAG never dispatches its remaining tasks.
+              memory: "1Gi"
           env:
             - name: NAMESPACE
               valueFrom:
