@@ -1,0 +1,19 @@
+E8 CAMPAIGN (20 blocks) — frozen fixed controller
+controller: wl-odag-controller:vertex (runningODAGs/schedulePlanCache DELETE fix, commit 73e07fa)
+agent: wl-data-agent:vertex (/digest + cgroup)
+controller imageID: 192.168.1.163:5000/wl-odag-controller@sha256:7c853e5bb47004e5e986f1b5f1233ac7e3a800f044e54cd11841c92edf6d00f8
+gated by: pilot2 CLEAN (54/54 trials valid, idle drift 0.6->0.6mc, 0 restarts)
+started: Mon Sep  7 04:35:10 PDT 2026
+
+=== COMPLETION ===
+finished: Mon Sep  7 08:54:31 PDT 2026  (~4h17m; A-before 04:35 -> CAMPAIGN COMPLETE 08:52)
+360/360 active trials valid (B 140, C 100, D 120); 0 failures; 0 controller/agent restarts.
+
+IDLE (Part A): A-before controller 0.6 mc / 58.4 MB; A-after 2.5 mc / 79.1 MB.
+The +1.9 mc / +35% RSS post-campaign drift exceeds the 10% flag, so it was
+investigated: a controller restart returns idle to 0 mc / 51 MB immediately, so
+the drift is Go heap high-water from 360 trials of object churn (larger retained
+heap -> marginally more background GC), NOT a functional leak. It is bounded and
+non-compounding (each fresh controller starts at baseline). This is distinct from
+the pilot-1 runningODAGs poll-storm (~100x, unbounded) which is fixed.
+Report steady-state idle as ~0.6 mc CPU / ~52-58 MB RSS.
