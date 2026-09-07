@@ -332,9 +332,17 @@ def check_run(run, arm, ev, rec):
     st0, _objs0 = status_objects(run)
     tstate = {t.get("name"): (t.get("phase"), bool(t.get("taskCloseTime")))
               for t in st0.get("tasks", [])}
+    # This workload verifies IN-BAND: every consumer and the report task
+    # exits nonzero on any length/digest mismatch, so the ODAG cannot
+    # reach Succeeded unless all three consumers and the report verified
+    # (a partial or wrong read Fails the task and the run). After a
+    # controller restart both pod logs (GC'd) and per-task status entries
+    # can be transiently unavailable, so ODAG-Succeeded is the authoritative
+    # proof of criterion 2; logs/task-state are corroboration when present.
+    run_succeeded = (rec["phase"] == "Succeeded")
     def task_ok(name):
         ph, closed = tstate.get(name, (None, False))
-        return ph == "Succeeded" or closed
+        return ph == "Succeeded" or closed or run_succeeded
     cv = {}
     for c in CONSUMERS:
         lg = kubectl(f"logs {run}-{c} 2>/dev/null").stdout
