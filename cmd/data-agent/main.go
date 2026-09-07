@@ -1606,6 +1606,29 @@ func main() {
 		_, _ = w.Write(b)
 	})
 
+	// GET /digest/<odag>/<obj> — hex SHA-256 of this node's installed copy of
+	// <obj> (the .wl-sha256 sidecar), or 404 if no installed copy. Lets a
+	// harness verify a realization copy's digest without refetching the
+	// payload; the bytes were already checksummed at install time.
+	http.HandleFunc("/digest/", func(w http.ResponseWriter, r *http.Request) {
+		parts, status, msg := parsePathComponents(r.URL.Path, "/digest/", 2)
+		if status != http.StatusOK {
+			http.Error(w, msg, status)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		d := readInstalledDigest(parts[0] + "/" + parts[1])
+		if d == "" {
+			http.Error(w, "no installed digest", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, d)
+	})
+
 	// /timings/<odag>/<task> — task-internal phase boundaries reported by the
 	// SDK (PUT) and read back by the controller (GET). The body is stored
 	// verbatim; the agent does not interpret it beyond a size and JSON-shape

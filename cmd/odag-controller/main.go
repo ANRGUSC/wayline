@@ -330,6 +330,16 @@ func watchODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
 				processedODAGs.Delete(key)
 				assignmentCache.Delete(key)
 				reconcileGen.Delete(key)
+				// A run deleted while still non-terminal (e.g. deleted mid-
+				// flight before it reaches Succeeded) never passes through
+				// updateODAGCompletion, so without this it leaks a
+				// runningODAGs entry. The 500ms poll loop then issues an
+				// apiserver GET for that dead key forever -- silent
+				// background CPU that grows with the number of such runs and
+				// only clears on a controller restart (found in E8 Part A:
+				// post-campaign idle CPU ~100x the pre-campaign baseline).
+				runningODAGs.Delete(key)
+				schedulePlanCache.Delete(key)
 			}
 		}
 		log.Println("[odag-ctrl] ODAG watcher closed; reconnecting in 2s")
