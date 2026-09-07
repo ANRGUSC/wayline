@@ -512,6 +512,34 @@ func readFlows(odag string) []flowRecord {
 }
 
 // dirSize walks a directory tree and returns total bytes.
+// readCgroupStats reads this container's own cgroup-v2 CPU and memory
+// counters (the container sees its cgroup at /sys/fs/cgroup). Returns
+// cpu usage microseconds, memory.current, memory.peak; -1 on read error
+// so the sampler can tell "unavailable" from a real zero.
+func readCgroupStats() (cpuUsec, memCurrent, memPeak int64) {
+	cpuUsec, memCurrent, memPeak = -1, -1, -1
+	if b, err := os.ReadFile("/sys/fs/cgroup/cpu.stat"); err == nil {
+		for _, ln := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(ln, "usage_usec ") {
+				if v, e := strconv.ParseInt(strings.TrimSpace(ln[len("usage_usec "):]), 10, 64); e == nil {
+					cpuUsec = v
+				}
+			}
+		}
+	}
+	if b, err := os.ReadFile("/sys/fs/cgroup/memory.current"); err == nil {
+		if v, e := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); e == nil {
+			memCurrent = v
+		}
+	}
+	if b, err := os.ReadFile("/sys/fs/cgroup/memory.peak"); err == nil {
+		if v, e := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); e == nil {
+			memPeak = v
+		}
+	}
+	return
+}
+
 func dirSize(path string) int64 {
 	var total int64
 	filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
@@ -1036,6 +1064,12 @@ func main() {
 				"bytes_used": dirSize(dataDir),
 				"run_count":  int64(runCount),
 			},
+			"cgroup": func() map[string]int64 {
+				c, m, pk := readCgroupStats()
+				return map[string]int64{
+					"cpu_usage_usec": c, "memory_current": m, "memory_peak": pk,
+				}
+			}(),
 			"transfers": map[string]int64{
 				"put_total":             metricPutTotal.Load(),
 				"put_ok":                metricPutOK.Load(),
