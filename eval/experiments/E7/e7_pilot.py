@@ -76,15 +76,16 @@ def refresh_agents():
     # jsonpath, NOT -o wide: a nonzero RESTARTS column renders as
     # "1 (2d15h ago)" with embedded spaces, which shifts whitespace-split
     # columns and made refresh mis-parse anrg-9's IP -- so every purge
-    # missed anrg-9 and its disk filled (the DiskPressure cascade).
+    # missed anrg-9 and its disk filled (the DiskPressure cascade). Emit
+    # node=ip tokens (no newlines) to sidestep shell/escape issues too.
     AGENTS.clear()
-    out = kubectl("get pods -l app=data-agent -o "
-                  "jsonpath='{range .items[*]}{.spec.nodeName} "
-                  "{.status.podIP}{"\n"}{end}'").stdout
-    for ln in out.splitlines():
-        f = ln.split()
-        if len(f) == 2 and f[1]:
-            AGENTS[f[0]] = f[1]
+    jp = "{range .items[*]}{.spec.nodeName}={.status.podIP} {end}"
+    out = kubectl("get pods -l app=data-agent -o jsonpath='" + jp + "'").stdout
+    for tok in out.split():
+        if "=" in tok:
+            node, ip = tok.split("=", 1)
+            if node and ip:
+                AGENTS[node] = ip
 
 
 DATA_NODES = [PRODUCER, TARGET, ALT] + list(CONSUMERS.values())
