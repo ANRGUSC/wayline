@@ -73,12 +73,18 @@ def agent_ip(node):
 
 
 def refresh_agents():
+    # jsonpath, NOT -o wide: a nonzero RESTARTS column renders as
+    # "1 (2d15h ago)" with embedded spaces, which shifts whitespace-split
+    # columns and made refresh mis-parse anrg-9's IP -- so every purge
+    # missed anrg-9 and its disk filled (the DiskPressure cascade).
     AGENTS.clear()
-    out = kubectl("get pods -l app=data-agent -o wide --no-headers").stdout
+    out = kubectl("get pods -l app=data-agent -o "
+                  "jsonpath='{range .items[*]}{.spec.nodeName} "
+                  "{.status.podIP}{"\n"}{end}'").stdout
     for ln in out.splitlines():
         f = ln.split()
-        if len(f) >= 7:
-            AGENTS[f[6]] = f[5]
+        if len(f) == 2 and f[1]:
+            AGENTS[f[0]] = f[1]
 
 
 DATA_NODES = [PRODUCER, TARGET, ALT] + list(CONSUMERS.values())
@@ -122,7 +128,7 @@ def purge_all_e7(runs_hint=None):
             pass
 
 
-def gate_nodes(timeout=420):
+def gate_nodes(timeout=600):
     """Block until all data nodes are healthy, reclaiming disk if a node is
     under pressure. Returns True if healthy, False if it could not recover."""
     bad = unhealthy_nodes()
