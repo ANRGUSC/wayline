@@ -1,0 +1,99 @@
+apiVersion: wl.io/v1
+kind: ODAGTemplate
+metadata:
+  name: e7recon
+  namespace: wl-system
+spec:
+  description: >
+    E7 reconciliation safety. produce (anrg-3) emits a 300 MiB named
+    object payload; a pod-less serve vertex initially bound to anrg-3
+    feeds three consumers (anrg-6/8/9); report on anrg-1 verifies all
+    three. anrg-7 (first revision target) and anrg-5 (alternate) run no
+    application container. Placement and order are fixed across all arms.
+  scheduler: random
+  profiling:
+    enabled: false
+    runtimeSource: manual
+    bandwidthSource: external
+  defaults:
+    runtime: 3
+    dataSize: 1MB
+  retention:
+    maxRuns: 40
+    data:
+      policy: keepLatest
+      keepRuns: 1
+  tasks:
+    - name: produce
+      image: 192.168.1.163:5000/wl-e7:latest
+      command: [python, task.py]
+      dependencies: []
+      dataSize: "314572800"
+      runtime: 5
+      constraints:
+        nodeNames: [anrg-3]
+      env:
+        - { name: WL_ROLE, value: produce }
+        - { name: WL_BYTES, value: "314572800" }
+        - { name: WL_WORK_S, value: "5" }
+      outputs:
+        - { name: payload, dataSize: "314572800" }
+    - name: serve
+      image: 192.168.1.163:5000/wl-e7:latest
+      command: ["true"]
+      type: data
+      dependencies: [produce]
+      dataSize: "314572800"
+      runtime: 0
+      constraints:
+        nodeNames: [anrg-3]
+      inputs:
+        - { producer: produce, object: payload }
+    - name: consume-6
+      image: 192.168.1.163:5000/wl-e7:latest
+      command: [python, task.py]
+      dependencies: [serve]
+      dataSize: "64"
+      runtime: 2
+      constraints:
+        nodeNames: [anrg-6]
+      env:
+        - { name: WL_ROLE, value: consume }
+        - { name: WL_BYTES, value: "314572800" }
+        - { name: WL_WORK_S, value: "2" }
+    - name: consume-8
+      image: 192.168.1.163:5000/wl-e7:latest
+      command: [python, task.py]
+      dependencies: [serve]
+      dataSize: "64"
+      runtime: 2
+      constraints:
+        nodeNames: [anrg-8]
+      env:
+        - { name: WL_ROLE, value: consume }
+        - { name: WL_BYTES, value: "314572800" }
+        - { name: WL_WORK_S, value: "2" }
+    - name: consume-9
+      image: 192.168.1.163:5000/wl-e7:latest
+      command: [python, task.py]
+      dependencies: [serve]
+      dataSize: "64"
+      runtime: 2
+      constraints:
+        nodeNames: [anrg-9]
+      env:
+        - { name: WL_ROLE, value: consume }
+        - { name: WL_BYTES, value: "314572800" }
+        - { name: WL_WORK_S, value: "2" }
+    - name: report
+      image: 192.168.1.163:5000/wl-e7:latest
+      command: [python, task.py]
+      dependencies: [consume-6, consume-8, consume-9]
+      dataSize: "16"
+      runtime: 1
+      constraints:
+        nodeNames: [anrg-1]
+      env:
+        - { name: WL_ROLE, value: report }
+        - { name: WL_BYTES, value: "314572800" }
+        - { name: WL_WORK_S, value: "1" }
