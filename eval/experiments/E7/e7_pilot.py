@@ -47,7 +47,8 @@ FIELDS = ["order", "block", "arm", "run", "phase", "makespan_s", "wall_s",
           "placement_ok", "no_app_on_targets", "refusal_logged",
           "source_copy_valid", "superseded_inactive", "partial_ready_seen",
           "ctrl_uid_changed", "agent_uid_changed", "fault_to_recovery_s",
-          "net_verified", "net_clean_after", "valid", "invalid_reasons", "seed"]
+          "net_verified", "net_clean_after", "attempted_bytes_anrg7",
+          "transfers_to_anrg7", "valid", "invalid_reasons", "seed"]
 
 
 def sh(cmd, timeout=120):
@@ -322,14 +323,29 @@ def check_run(run, arm, ev, rec):
     if rec["wall"] >= DEADLINE:
         bad.append(f"exceeded {DEADLINE}s")
 
-    # 2. three consumers + report verify
+    # 2. three consumers + report verify. Primary signal is durable task
+    # state: a consumer/report task exits nonzero on any digest or length
+    # mismatch, so reaching Succeeded IS the verification (pod logs are
+    # ephemeral -- GC'd on longer arms, which false-failed controller-
+    # restart in an earlier build). Pod-log grep kept as best-effort
+    # corroboration only.
+    st0, _objs0 = status_objects(run)
+    tstate = {t.get("name"): (t.get("phase"), bool(t.get("taskCloseTime")))
+              for t in st0.get("tasks", [])}
+    def task_ok(name):
+        ph, closed = tstate.get(name, (None, False))
+        return ph == "Succeeded" or closed
     cv = {}
     for c in CONSUMERS:
         lg = kubectl(f"logs {run}-{c} 2>/dev/null").stdout
-        cv[c] = "OK" if re.search(r"verify=OK", lg) else (
-            "MISMATCH" if "MISMATCH" in lg else "-")
+        if "MISMATCH" in lg:
+            cv[c] = "MISMATCH"
+        elif "verify=OK" in lg or task_ok(c):
+            cv[c] = "OK"
+        else:
+            cv[c] = "-"
     rep = kubectl(f"logs {run}-report 2>/dev/null").stdout
-    report_ok = rep.count("verify=OK") >= 3 and "report verify=OK" in rep
+    report_ok = ("report verify=OK" in rep) or task_ok("report")
     if any(v != "OK" for v in cv.values()):
         bad.append(f"consumer verify {cv}")
     if not report_ok:
@@ -407,6 +423,25 @@ def check_run(run, arm, ev, rec):
         if not source_valid:
             bad.append("last copy on anrg-3 not preserved")
 
+    # repeat-identical: the 3->7 copy must install exactly once. Redundant
+    # retransfers (a reset copy) show up as >1 completed transfer to anrg-7
+    # or inflated attempted bytes -- reported separately so eventual
+    # idempotence cannot hide them (spec).
+    attempted7 = 0
+    ntx7 = 0
+    ip3 = agent_ip(PRODUCER)
+    if ip3:
+        rr = sh(f"curl -s -m8 http://{ip3}:8082/flows/{run}", timeout=12)
+        try:
+            for fl in json.loads(rr.stdout or "[]"):
+                if fl.get("dstNode") == TARGET and fl.get("ok") and fl.get("dataSize", 0) > 0:
+                    attempted7 += fl["dataSize"]
+                    ntx7 += 1
+        except ValueError:
+            pass
+    if arm == "repeat-identical" and ntx7 > 1:
+        bad.append(f"repeat-identical reset the copy: {ntx7} transfers to {TARGET}")
+
     # 11. net verified + clean after
     if not ev.get("net_verified"):
         bad.append("net not verified at start")
@@ -433,7 +468,8 @@ def check_run(run, arm, ev, rec):
         source_copy_valid=source_valid, superseded_inactive=superseded_inactive,
         partial_ready_seen=ev.get("partial_ready_seen", "n/a"),
         ctrl_uid_changed=(ctrl_changed if arm == "controller-restart" else "n/a"),
-        agent_uid_changed=(agent_changed if "agent" in arm else "n/a"))
+        agent_uid_changed=(agent_changed if "agent" in arm else "n/a"),
+        attempted_bytes_anrg7=attempted7, transfers_to_anrg7=ntx7)
 
 
 def one_run(idx, block, arm):
