@@ -125,6 +125,65 @@ func main() {
 	watchPods(client, dynClient)
 }
 
+// rebuildAssignmentCache reconstructs a run's task->node assignment map from
+// durable state after a controller restart. processReadyTasks bails on an
+// assignmentCache miss ("not yet initialized"), so without this a run that
+// was mid-pipeline when the controller died never resumes dispatch or data-
+// vertex execution -- its object copy converges (reconcileRealization builds
+// its own node map) but consumers gated on the serving copy never run. Prefer
+// the node recorded in status.tasks; fall back to a task's single-node
+// constraint for tasks not yet dispatched (and therefore absent from status).
+func rebuildAssignmentCache(obj *unstructured.Unstructured, client *kubernetes.Clientset) {
+	ns := obj.GetNamespace()
+	if ns == "" {
+		ns = "default"
+	}
+	key := ns + "/" + obj.GetName()
+	if _, ok := assignmentCache.Load(key); ok {
+		return
+	}
+	nodeMap, err := getNodeInfoMap(client)
+	if err != nil {
+		log.Printf("[odag-ctrl] startup: node map for %s: %v", key, err)
+		return
+	}
+	placed := map[string]string{}
+	statusTasks, _, _ := unstructured.NestedSlice(obj.Object, "status", "tasks")
+	for _, raw := range statusTasks {
+		t, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(t, "name")
+		node, _, _ := unstructured.NestedString(t, "node")
+		if name != "" && node != "" {
+			placed[name] = node
+		}
+	}
+	// Fall back to single-node constraints for undispatched tasks.
+	for _, t := range extractTasks(obj) {
+		if _, ok := placed[t.Name]; ok {
+			continue
+		}
+		if len(t.Constraints) == 1 {
+			placed[t.Name] = t.Constraints[0]
+		}
+	}
+	am := make(map[string]nodeInfo, len(placed))
+	for name, node := range placed {
+		if ni, ok := nodeMap[node]; ok {
+			am[name] = ni
+		} else {
+			am[name] = nodeInfo{name: node}
+		}
+	}
+	if len(am) > 0 {
+		assignmentCache.Store(key, am)
+		log.Printf("[odag-ctrl] startup: rebuilt assignment cache for %s (%d tasks)",
+			key, len(am))
+	}
+}
+
 // reconcileStaleODAGs marks any ODAG stuck in Running/Scheduling/Pending with
 // no live task pods as Failed. Runs once at controller startup.
 func reconcileStaleODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
@@ -161,6 +220,10 @@ func reconcileStaleODAGs(dynClient dynamic.Interface, client *kubernetes.Clients
 		}
 		if liveCount > 0 {
 			// Legitimately in progress from a prior instance; leave alone.
+			// Rebuild placement so processReadyTasks can resume dispatch
+			// and data-vertex execution (E7 controller-restart: without
+			// this the object converges but consumers never run).
+			rebuildAssignmentCache(obj, client)
 			runningODAGs.Store(ns+"/"+name, true)
 			// Resume any in-flight realization. reconcileRealization
 			// otherwise fires only on MODIFIED watch events, and a fresh
