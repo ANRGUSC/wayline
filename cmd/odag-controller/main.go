@@ -162,6 +162,16 @@ func reconcileStaleODAGs(dynClient dynamic.Interface, client *kubernetes.Clients
 		if liveCount > 0 {
 			// Legitimately in progress from a prior instance; leave alone.
 			runningODAGs.Store(ns+"/"+name, true)
+			// Resume any in-flight realization. reconcileRealization
+			// otherwise fires only on MODIFIED watch events, and a fresh
+			// watch after a controller restart does not replay existing
+			// runs -- so a revision that was mid-reconcile when the old
+			// controller died would leave its copy stuck Transferring and
+			// never converge (E7 controller-restart arm). reconcileRealization
+			// self-loops to convergence, so one kick is enough.
+			if len(parseRealization(obj)) > 0 {
+				go reconcileRealization(dynClient, client, obj)
+			}
 			continue
 		}
 		total := okCount + badCount
