@@ -28,18 +28,21 @@ their WfCommons cases roughly 150-169 GB, against 57 GB total disk per
 node on our testbed. Reproducing them at original scale is not possible
 here and we will not pretend otherwise.
 
-**Selection: scaled-down Montage and SoyKB.** Two WfCommons-derived
-recipes from different scientific domains (astronomy image mosaicking
-and plant genomics) with different structures, so the claim is about
-workflow shape rather than one pipeline. AI City remains the genuine
+**Selection: all seven WfChef-derived recipe families.** We use BLAST,
+BWA, Cycles, 1000Genome, Montage, Seismology, and SoyKB.  The committed
+instances span 48--104 tasks and 25--103 named intermediate objects, giving
+the experiment breadth across workflow structures rather than selecting only
+the cases that favor direct realization.  AI City remains the genuine
 full-scale end-to-end application.
 
-**Mandatory honesty condition.** Every mention must state that task and
-data scale were reduced while the recipe topology and inter-stage data
-ratios were preserved. Record the reduction factor and both the original
-and scaled per-stage sizes in the results provenance, so a reader can see
-exactly what was shrunk. We are not reproducing WOW's results and must
-not imply a head-to-head comparison.
+**Mandatory honesty condition.** These are frozen WfChef-generated instances
+with synthetic task executors, not the original scientific applications.
+One factor per workflow scales both task runtimes and intermediate sizes to a
+480-second aggregate runtime, preserving the instance topology and its
+relative compute/data weights.  Record that factor, the original and scaled
+sizes, and external inputs omitted from transfer in the results provenance.
+We are not reproducing WOW's results and must not imply a head-to-head
+comparison.
 
 ## Framing (do not overstate)
 
@@ -56,14 +59,12 @@ store-mediated), plus the external Argo+MinIO referent we already use.
 
 | arm | placement | realization | purpose |
 |---|---|---|---|
-| `direct-policy` | scheduler-chosen | policy-selected direct | the contract in use |
-| `direct-frozen` | replayed from `direct-policy` | direct | control for arm 3 |
-| `store-frozen` | same frozen schedule + per-node order | all objects via gateway | isolates realization |
-| `argo-minio` | Argo default | MinIO artifacts | external referent |
+| `direct-frozen` | frozen HEFT placement + per-node order | producer-to-consumer direct | contract realization |
+| `store-frozen` | identical placement + per-node order | every named object via anrg-9 | isolates realization |
 
-Arms 2 and 3 differ only in the data path, as in E5. Arm 1 vs 2 exposes
-any cost of scheduling itself. Arm 4 is the outside comparison and is not
-placement-matched, which must be said explicitly.
+The two arms differ only in the data path.  Each workflow first receives one
+deterministic HEFT schedule, which both arms replay serially.  The paper
+campaign is 20 paired blocks x 7 workflows x 2 arms = 280 runs.
 
 ## Part B: AI City MCMT pilot (specified, runnable)
 
@@ -194,7 +195,7 @@ Carried over from E5, plus application-specific:
 1. Fill the WOW workload row above from the paper.
 2. Part B first: it is fully specified, reuses a working harness, and
    closes the named-object gap the audit identified.
-3. Part A once the workload row is filled.
+3. Part A across all seven WfChef-derived recipe families.
 4. Then the compact correctness/overhead/scale study.
 
 ## What "the frozen HEFT schedule" actually is (recorded 2026-08-28)
