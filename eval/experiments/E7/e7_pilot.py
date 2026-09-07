@@ -596,6 +596,11 @@ def main():
     open(f"{RES}/PROVENANCE.txt", "w").write(
         f"seed {SEED}\nblocks {BLOCKS}\ncontroller_image {img.strip()}\n"
         f"deadline {DEADLINE}s\ntemplate {TEMPLATE}\n")
+    # Start from a clean data plane: leftover payloads from a prior pilot
+    # (never purged from the agents) put a node at the DiskPressure edge
+    # before run 1. purge_all_e7 clears every agent's wl-outputs.
+    print("[e7] pre-campaign purge of all agents ...", flush=True)
+    purge_all_e7()
     rng = random.Random(SEED)
     schedule = []
     for b in range(1, BLOCKS + 1):
