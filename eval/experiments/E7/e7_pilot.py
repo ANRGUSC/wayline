@@ -81,6 +81,65 @@ def refresh_agents():
             AGENTS[f[6]] = f[5]
 
 
+DATA_NODES = [PRODUCER, TARGET, ALT] + list(CONSUMERS.values())
+
+
+def unhealthy_nodes():
+    """Data nodes that are NotReady or under DiskPressure. A tainted/full
+    node silently breaks placement (consume-9's pin) and purge, which
+    voided blocks 2-3 of an earlier pilot -- gate on it."""
+    out = kubectl("get nodes -o json").stdout
+    bad = {}
+    try:
+        import json as _j
+        d = _j.loads(out)
+    except ValueError:
+        return bad
+    for it in d.get("items", []):
+        n = it["metadata"]["name"]
+        if n not in DATA_NODES:
+            continue
+        conds = {c["type"]: c["status"] for c in it["status"].get("conditions", [])}
+        if conds.get("Ready") != "True":
+            bad[n] = "NotReady"
+        elif conds.get("DiskPressure") == "True":
+            bad[n] = "DiskPressure"
+    return bad
+
+
+def purge_all_e7(runs_hint=None):
+    """DELETE every e7recon run's data on every agent. Used for per-run
+    cleanup and for reclaiming a node under pressure."""
+    refresh_agents()
+    for node, ip in AGENTS.items():
+        try:
+            r = sh(f"curl -s -m8 http://{ip}:8082/runs", timeout=12)
+            import re as _re
+            for run in sorted(set(_re.findall(r"e7recon-run-[a-z0-9]+", r.stdout))):
+                sh(f"curl -s -m30 -X DELETE http://{ip}:8082/data/{run} >/dev/null",
+                   timeout=40)
+        except Exception:
+            pass
+
+
+def gate_nodes(timeout=420):
+    """Block until all data nodes are healthy, reclaiming disk if a node is
+    under pressure. Returns True if healthy, False if it could not recover."""
+    bad = unhealthy_nodes()
+    if not bad:
+        return True
+    print(f"[e7] node health gate: {bad} -- reclaiming", flush=True)
+    purge_all_e7()
+    t = time.time()
+    while time.time() - t < timeout:
+        bad = unhealthy_nodes()
+        if not bad:
+            return True
+        time.sleep(15)
+    print(f"[e7] node health gate FAILED: {bad}", flush=True)
+    return False
+
+
 def phase(run):
     return kubectl(f"get odag {run} -o jsonpath='{{.status.phase}}'").stdout.strip()
 
@@ -519,7 +578,10 @@ def one_run(idx, block, arm):
                generations=gens, fault_to_recovery_s=(round(ftr, 1) if ftr else ""),
                net_verified=nv, net_clean_after=ev["net_clean_after"],
                valid=ok, invalid_reasons=";".join(reasons), seed=SEED, **extra)
-    # purge run data
+    # purge run data on EVERY agent (refresh first: an agent-restart arm
+    # can change a pod IP mid-run, and a missed purge is what filled anrg-9
+    # and voided a prior pilot's later blocks).
+    refresh_agents()
     for ip in AGENTS.values():
         sh(f"curl -s -m30 -X DELETE http://{ip}:8082/data/{run} >/dev/null", timeout=40)
     kubectl(f"delete odag {run} --ignore-not-found >/dev/null 2>&1")
@@ -545,6 +607,13 @@ def main():
         w.writeheader()
         f.flush()
         for idx, (block, arm) in enumerate(schedule, 1):
+            if not gate_nodes():
+                print(f"[e7] #{idx} {arm}: ABORT (data node unhealthy)", flush=True)
+                w.writerow({"order": idx, "block": block, "arm": arm,
+                            "valid": False, "invalid_reasons": "node-unhealthy-gate",
+                            "seed": SEED})
+                f.flush()
+                raise SystemExit("data node unhealthy; not producing invalid runs")
             print(f"[e7] #{idx}/{len(schedule)} block={block} {arm}", flush=True)
             row = one_run(idx, block, arm)
             w.writerow({k: row.get(k, "") for k in FIELDS})
