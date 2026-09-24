@@ -1,29 +1,41 @@
 # Wayline
 
-**A data-aware DAG scheduling framework for Kubernetes.**
+**Programmable data realization for DAG workflows on Kubernetes.**
 
-> Status: **v0.1 / beta.** The API is stable enough to run real workloads; expect
-> rough edges in tooling.
+> Status: research prototype. The API is stable enough to run real workloads on a
+> k3s cluster; expect rough edges in tooling. This release covers one-shot DAGs
+> (ODAGs); streaming DAGs are future work.
 
-Kubernetes-native workflow engines (Argo, Tekton, Kubeflow Pipelines) pass
-intermediate results between tasks through a shared **artifact store** (S3/MinIO,
-a PVC, …). That conflates two distinct events — *a task finished computing* and
-*its output is available to the next task* — and forces every intermediate
-through a central round-trip. On bandwidth-asymmetric edge clusters that
-round-trip is the dominant cost.
+A DAG edge `A → B` says that `B` needs an output of `A`. It says nothing about
+*how* that output gets there: whether it goes through a shared store or directly,
+which node serves it, how many copies exist, or how long they live. Workflow
+engines such as Argo, Tekton, and Kubeflow Pipelines fix all of that up front by
+routing every intermediate through an artifact store and tying its lifetime to
+the tasks that produce and consume it.
 
-**Wayline decouples those events.** A per-node **data-agent** moves a task's output
-*directly* to the nodes that need it (peer-to-peer, content-addressed, atomic),
-and exposes data readiness as **scheduler-visible runtime state**. A task pod is
-started only once its inputs are already present on its node, so a downstream
-`recv()` is always a local file read — no central store on the critical path.
+Wayline separates the two. Every intermediate output is a named **object**, and
+each object has a **physical realization**: its copies, its serving point, its
+movement, and its lifetime. The realization is live, revisable state that an
+external policy can patch while the run executes, without changing the DAG or
+moving any task. A per-node **data agent** holds objects and moves them peer to
+peer; the **controller** reconciles the data plane toward the desired
+realization and starts a task pod only once its inputs are already on its node.
 
-On a real AI City multi-camera workload, holding CPU and task placement identical
-to Argo+MinIO, Wayline cuts makespan **1.6–2.2×**; neither a distributed MinIO nor
-a shared NFS filesystem closes the gap. See [`eval/`](eval/) to reproduce.
+On an 8-worker edge testbed with links that degrade, disconnect, or fail:
 
-This release covers **one-shot DAGs (ODAGs)**. Continuous/streaming DAGs (CDAGs)
-are future work and are not included.
+- revising an object's serving point after a producer's uplink degrades cuts
+  traffic through the choked link by 55–63% and completion time by up to 43%,
+  with one policy patch and no task restart;
+- retaining an object on a relay node that runs no task completes every workflow
+  across two contacts 20 s apart, where fixed direct delivery completes none;
+- risk-aware replication gives the survival of always-on replication at 16–77%
+  less replica storage-time;
+- with task placement and per-node order held fixed, changing only the data path
+  moves an 18-task AI City pipeline from 195.5 s (store-mediated) to 163 s
+  (direct), and costs seven scientific-workflow structures 1.03–1.45×.
+
+The evaluation lives in [`eval/experiments`](eval/experiments/); see
+[Reproducing the evaluation](#reproducing-the-evaluation).
 
 ---
 
@@ -35,60 +47,75 @@ are future work and are not included.
 4. [Quick start](#quick-start)
 5. [Writing tasks](#writing-tasks)
 6. [ODAG reference](#odag-reference)
-7. [CLI reference](#cli-reference)
-8. [Web UI](#web-ui)
-9. [Build & deploy reference](#build--deploy-reference)
-10. [Cluster setup](#cluster-setup)
-11. [Reproducing the paper](#reproducing-the-paper)
-12. [Troubleshooting](#troubleshooting)
+7. [Revising a realization at runtime](#revising-a-realization-at-runtime)
+8. [Schedulers and policies](#schedulers-and-policies)
+9. [CLI reference](#cli-reference)
+10. [Web UI](#web-ui)
+11. [Build & deploy reference](#build--deploy-reference)
+12. [Cluster setup](#cluster-setup)
+13. [Reproducing the evaluation](#reproducing-the-evaluation)
+14. [Troubleshooting](#troubleshooting)
+15. [License](#license)
 
 ---
 
 ## How it works
 
 ```
-            wayline apply -f odag.yml
-                      │  ODAG custom resource (wl.io/v1)
-                      ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  wl-system namespace (control plane, on the master node)             │
-│                                                                      │
-│   odag-controller                          ui-server :8080           │
-│   • HEFT placement (runtime/dataSize        • K8s watch cache        │
-│     profiling, EMA, spread-aware)           • SQLite run history     │
-│   • starts a task pod only when its         • REST /api/* + SSE      │
-│     inputs are .wl-ready on its node        • React frontend         │
-│   • injects the WL_* task env contract                               │
-└──────────────────────────────────────────────────────────────────────┘
-                      │ creates task pods
-                      ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  task pods + per-node data-agent DaemonSet (hostPort 8082)           │
-│                                                                      │
-│   ┌──────────┐  1. PUT output → LOCAL agent (atomic, .wl-ready)      │
-│   │ producer │  2. POST /push → agent ships to successor nodes       │
-│   │  (WlTask)│  3. return (pod may exit after local handoff)         │
-│   └────┬─────┘                                                       │
-│        │ agent-to-agent install (content-addressed, idempotent)      │
-│        ▼                                                             │
-│   ┌──────────┐                                                       │
-│   │ consumer │  recv() = local file read (inputs already on node)    │
-│   │  (WlTask)│                                                       │
-│   └──────────┘                                                       │
-└──────────────────────────────────────────────────────────────────────┘
+   wayline apply -f template.yml            kubectl patch odag <run> ...
+   wayline run <template>                   (external policy: spec.realization)
+              │                                        │
+              ▼                                        ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  wl-system namespace (control plane)                                     │
+│                                                                          │
+│   odag-controller                                    ui-server :8080     │
+│   • scheduler: heft | random | saga/<algo> | http://…  • K8s watch cache │
+│   • dispatch: a task pod starts only when every       • SQLite history   │
+│     input object is installed on its node             • REST + SSE       │
+│   • reconciler: converges copies / serving point /    • React frontend   │
+│     eviction toward spec.realization (live)                              │
+│   • profiler: EMA runtime + dataSize per (task, node)                    │
+└──────────────────────────────────────────────────────────────────────────┘
+              │ creates task pods; asks agents to push / alias / evict
+              ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  workers: task pods + data-agent DaemonSet (hostPort 8082)               │
+│                                                                          │
+│   ┌──────────┐  1. PUT output → LOCAL agent (temp → fsync → rename)      │
+│   │ producer │  2. agent pushes to each consumer's node (digest-checked) │
+│   │  (WlTask)│  3. pod may exit; the object outlives it on the agent     │
+│   └────┬─────┘                                                           │
+│        │ agent → agent install (content-addressed, idempotent)           │
+│        ▼            ┌───────┐                                            │
+│   ┌──────────┐      │ relay │  a node that runs NO task can hold a copy  │
+│   │ consumer │      │ agent │  (temporal relay, replica, cache) and      │
+│   │  (WlTask)│      └───────┘  serve consumers from it                   │
+│   └──────────┘  recv() = local file read                                 │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-**State model.** The data-agent tracks two independent signals per task, both
-visible to the controller/scheduler:
+**Objects.** Within a run, an output's identity is `<run, producer, name>`; the
+data-plane key is `producer` for the default output or `producer.name` for a
+named one. A task can emit several named outputs, each with its own consumers
+and its own realization.
 
-- **Task lifecycle** — `Pending → Running → ComputeDone → Failed`.
-- **Per-successor data readiness** — `Pending → Transferring → ReadyRemote`, plus a
-  node-local `ReadyLocal` (`.wl-ready`) marker.
+**State the controller sees.** Each data agent tracks two signals per object:
 
-The agent is the *only* writer of `.wl-ready` (for both local installs and remote
-pushes from peer agents), installs are atomic (temp → fsync → rename → fsync dir)
-and content-addressed (`.wl-sha256`), and remote receives are idempotent. The wire
-protocol and on-disk layout are documented in [`docs/architecture.md`](docs/architecture.md).
+- task lifecycle: `Pending → Running → ComputeDone → Failed`;
+- per-destination transfer state: `Pending → Transferring → ReadyRemote | Failed`,
+  plus a node-local installed marker (`.wl-ready`, with `.wl-sha256`).
+
+The agent is the only writer of `.wl-ready`; installs are atomic and
+digest-verified, and every agent verb (install, push, alias, evict, cancel) is
+idempotent, so the controller can retry any step after a crash. The wire protocol
+and on-disk layout are in [`docs/architecture.md`](docs/architecture.md).
+
+**Safety rules the reconciler enforces.** A consumer runs only when every input
+object is installed on its node, regardless of how the bytes arrived. A node may
+not appear in both `copies` and `evict` of one entry. The last installed copy of
+an object is never evicted while a consumer may still need it. A newer revision
+supersedes a pending one; a partial object is never exposed.
 
 ---
 
@@ -98,17 +125,24 @@ protocol and on-disk layout are documented in [`docs/architecture.md`](docs/arch
 wayline/
 ├── api/v1/                       # CRDs: odags.wl.io, odagtemplates.wl.io
 ├── cmd/
-│   ├── odag-controller/          # one-shot DAG controller + HEFT scheduler
-│   ├── data-agent/               # per-node DaemonSet: p2p data plane
+│   ├── odag-controller/          # controller: scheduling, dispatch, realization reconciler
+│   │   ├── realization.go        #   spec.realization → copies / servingCopy / evict
+│   │   ├── datavertex.go         #   pod-less data vertices and serving-point rebinding
+│   │   ├── saga.go, heft.go      #   SAGA bridge and built-in HEFT
+│   │   └── profiler.go, cache.go #   EMA profiler, cross-run reuse (cacheKey)
+│   ├── data-agent/               # per-node DaemonSet: object store + peer-to-peer transfers
 │   ├── ui-server/                # REST + SSE + embedded React UI
 │   └── cli/                      # `wayline` CLI (cobra, kubectl-style)
-├── pkg/scheduler/                # HEFT scheduling interface
+├── pkg/scheduler/                # scheduler interface
 ├── sdk/python/wl/                # Python SDK: `from wl import WlTask`
 ├── ui/                           # React + Vite frontend
 ├── deployments/                  # namespace, RBAC, Deployments, DaemonSet
-├── examples/                     # 10 ODAG examples (dag-pipeline, rag-refresh, …)
-├── eval/                         # full paper evaluation + benchmark suite
-├── docs/                         # architecture, local-dev, SDK quickstart
+├── examples/                     # ODAG examples (dag-pipeline, named-outputs, wide-pipeline, …)
+├── eval/
+│   ├── experiments/E0…E8/        # the paper's evaluation: scripts, policies, committed results
+│   ├── policies/                 # scheduling-policy comparison (HEFT, CPoP, MinMin, OLB, …)
+│   └── …                         # earlier microbenchmarks and baselines
+├── docs/                         # architecture, getting started, SDK, bring-your-own-scheduler
 └── Makefile                      # build / image / deploy targets
 ```
 
@@ -123,6 +157,7 @@ wayline/
 | `go` ≥ 1.23 | Building the Go binaries |
 | `node` ≥ 20, `npm` | Building the React UI |
 | a **k3s** cluster | Wayline targets k3s; `~/.kube/config` configured |
+| `python3` | Policies, evaluation scripts, and the SAGA scheduler sidecar |
 
 ---
 
@@ -152,13 +187,16 @@ bin/wayline logs   dag-pipeline generate
 bin/wayline delete dag-pipeline
 ```
 
-The UI is available at `http://<master-ip>:30080`.
+Templates are the usual way to run: `wayline apply -f examples/named-outputs/template.yml`
+registers an `ODAGTemplate`, and `wayline run named-outputs` creates a run from it.
+The UI is at `http://<master-ip>:30080`. A longer walkthrough is in
+[`docs/getting-started.md`](docs/getting-started.md).
 
 ---
 
 ## Writing tasks
 
-Tasks are ordinary container images. Inside, use the `wl` SDK — the controller
+Tasks are ordinary container images. Inside, use the `wl` SDK; the controller
 injects all peer/topology configuration as `WL_*` environment variables.
 
 ```python
@@ -166,12 +204,26 @@ from wl import WlTask
 
 task = WlTask()                       # reads WL_* env vars
 
-inputs = task.recv_all()              # dict: {dep_name: payload}; local file reads
+inputs = task.recv_all()              # {dep_name: payload}; local file reads
 result = process(inputs)
-task.send(result)                     # routes to all successors via the data-agent
+task.send(result)                     # default output, delivered to every successor
 ```
 
-`send` / `recv` accept any JSON-serialisable value (`send_raw`/`recv_raw` for bytes).
+A task may emit several **named outputs**, each an independent object with its
+own consumers and its own realization. Names must be declared in the task's
+`spec.outputs`, and consumers pick one in `spec.inputs`:
+
+```python
+task.send(result)                     # default output
+task.send("alert", alert)             # named output <run, task, alert>
+task.send_raw("features", features)   # bytes, no JSON copy
+
+alert = task.recv("infer.alert")      # a named object of an upstream task
+```
+
+`send` / `recv` accept any JSON-serializable value; `send_raw` / `recv_raw`
+move bytes. See [`docs/sdk-quickstart.md`](docs/sdk-quickstart.md) and
+[`examples/named-outputs`](examples/named-outputs/).
 
 ### Dockerfile template
 
@@ -189,44 +241,145 @@ CMD ["python", "task.py"]
 
 ## ODAG reference
 
+An `ODAGTemplate` is a reusable spec; `wayline run <template>` creates an `ODAG`
+run from it. Both share the task schema below.
+
 ```yaml
 apiVersion: wl.io/v1
-kind: ODAG
+kind: ODAGTemplate
 metadata:
   name: my-dag
-  namespace: default
+  namespace: wl-system
 spec:
-  scheduler: heft
+  scheduler: heft                 # random | heft | saga/<algo> | saga/<pkg.Class> | http://host:port
   schedulerConfig:
-    spreadEpsilon: 0          # HEFT tie-break: spread parallel layers (0 = off)
+    spreadEpsilon: 0              # HEFT tie-break: spread parallel layers (0 = off)
   retryPolicy:
     maxRetries: 2
+  defaults:                       # fallbacks for tasks that omit the hints
+    runtime: 3
+    dataSize: 1MB
+  retention:                      # garbage collection of old runs and their data
+    maxRuns: 10
+    data:
+      policy: keepLatest          # immediate | delayed | keepLatest | none
+      keepRuns: 2
   tasks:
-    - name: generate
-      image: 192.168.1.163:5000/my-generate:latest
-      command: ["python", "task.py"]
+    - name: produce
+      image: 192.168.1.163:5000/my-produce:latest
+      command: [python, task.py]
       dependencies: []
-      resources: { cpu: "200m", memory: "128Mi" }
-      dataSize: "1MB"         # used by the HEFT data-transfer cost model
-      runtime: 10             # seed estimate; refined by the EMA profiler
-    - name: transform
-      image: 192.168.1.163:5000/my-transform:latest
-      command: ["python", "task.py"]
-      dependencies: ["generate"]
-      resources: { cpu: "500m", memory: "256Mi" }
+      runtime: 30                 # seed estimate; refined by the EMA profiler
+      dataSize: 300MB             # default output size, for the scheduler's cost model
+      outputs:                    # optional named outputs
+        - { name: alert,    dataSize: 1KB }
+        - { name: features, dataSize: 50MB }
       constraints:
-        nodeNames: [anrg-4, anrg-6, anrg-8]   # restrict placement to these nodes
+        nodeNames: [anrg-3]       # restrict placement
+    - name: actuator
+      image: 192.168.1.163:5000/my-actuator:latest
+      command: [python, task.py]
+      dependencies: [produce]
+      inputs:                     # which object of the producer; default output if omitted
+        - { producer: produce, object: alert }
+      resources: { cpu: "200m", memory: "128Mi" }
+    - name: stage                 # a pod-less data vertex: holds / forwards bytes, runs no container
+      type: data
+      dependencies: [produce]
+    - name: analyze
+      image: 192.168.1.163:5000/my-analyze:latest
+      command: [python, task.py]
+      dependencies: [stage]
+      cacheKey: analyze-v3        # opt-in cross-run reuse of this task's output
 ```
+
+| Task field | Meaning |
+|---|---|
+| `type` | `compute` (default) runs the container; `data` is a vertex the controller realizes through the agent (alias + push) with no pod. A data vertex has exactly one dependency and at least one successor. |
+| `outputs[]` / `inputs[]` | Named outputs and which one a consumer takes. Producers listed in `dependencies` without an `inputs` entry supply their default output. |
+| `runtime`, `dataSize` | Scheduler hints; the profiler refines them per `(task, node)` across runs of a template. |
+| `constraints.nodeNames` | Placement restriction. |
+| `cacheKey` | If an earlier run produced this task's output under the same key and the copy is still installed, the task does not execute: the controller pins it to the node holding the copy, aliases the bytes under this run's name, and serves consumers from there. Requires a retention policy that keeps run data. |
 
 | Status field | Description |
 |---|---|
 | `status.phase` | `Pending → Scheduling → Running → Succeeded / Failed` |
-| `status.makespan` | Wall-clock makespan in seconds (set on completion) |
-| `status.tasks[].phase` | Per-task phase |
-| `status.tasks[].node` | Node the task ran on |
+| `status.makespan` | Wall-clock makespan in seconds |
+| `status.tasks[]` | Per-task `phase`, agent-reported `state`, `node`, `podName`, `startTime`, `completionTime`, `retries`, `cachedFrom` |
+| `status.objects[]` | Per revised object: `copies[{node, state}]` (`Transferring` / `Installed` / `Evicted`) and `servingCopy`, as actually reconciled |
 
-An **ODAGTemplate** is a reusable spec; `wayline run <template>` creates a new run
-and the EMA profiler refines per-`(task, node)` runtime estimates across runs.
+The full schema, with every field's description, is in
+[`api/v1/odag-crd.yml`](api/v1/odag-crd.yml) and
+[`api/v1/odagtemplate-crd.yml`](api/v1/odagtemplate-crd.yml).
+
+---
+
+## Revising a realization at runtime
+
+`spec.realization` on a **live run** is the policy interface. Each entry names an
+object and states the desired copies, serving point, and evictions; the
+controller converges the data plane toward it using only agent verbs, and reports
+the result in `status.objects`. The DAG, the pods, and task placements are never
+touched.
+
+```bash
+kubectl -n wl-system patch odag my-dag-run-abc12 --type merge -p '{
+  "spec": {"realization": [
+    {"object": "produce",          "copies": ["anrg-7"],          "servingCopy": "anrg-7"},
+    {"object": "produce.features", "copies": ["anrg-7","anrg-8"], "evict": ["anrg-3"]}
+  ]}}'
+```
+
+| Field | Semantics |
+|---|---|
+| `object` | Producing task, or `task.output` for a named output |
+| `copies` | Nodes that must hold a valid copy. Additive: copies elsewhere are left alone unless named in `evict`. |
+| `servingCopy` | Node whose copy serves future consumer installs and data-vertex execution. Empty keeps the producer's copy. |
+| `evict` | Nodes whose copy must be removed. Refused for the last copy while consumers may need it. |
+
+What the controller does with it:
+
+1. **Copies.** For each missing copy it picks a source (the serving copy if its
+   bytes are valid, else any valid desired copy, else wherever the object lives)
+   and asks that node's agent to push. A pending or active transfer is polled, not
+   re-posted; a failed one is retried on a later pass, which is how a copy lands
+   when a contact window reopens.
+2. **Serving point.** A data vertex whose input names a `servingCopy` executes
+   from that node instead of its assigned one, and the old node's outbound
+   transfers of the object are cancelled, so a revised path does not compete with
+   the flows it replaces. Consumers are gated on any valid copy on their node, so
+   a copy that arrived from the new serving point satisfies them.
+3. **Eviction.** Per-object delete on the named agents, subject to the last-copy
+   rule.
+
+A revision can be issued before the producer runs, while transfers are in
+flight, or after the producer has exited. Sample policies (a few dozen lines of
+Python each, driven by measurements or signals) are in
+`eval/experiments/E1/policy.py` (serving-point rebinding on a degradation
+signal), `E2` (temporal relay across contacts), and `E3/policy.py` (risk-aware
+replication on a health signal).
+
+---
+
+## Schedulers and policies
+
+`spec.scheduler` accepts four forms:
+
+| Value | Behaviour |
+|---|---|
+| `heft`, `random` | Compiled-in schedulers |
+| `saga/<name>` | A built-in [SAGA](https://github.com/ANRGUSC/saga) algorithm (`heft`, `cpop`, `peft`, `minmin`, `maxmin`, `sufferage`, …) run in the SAGA sidecar |
+| `saga/<pkg.Class>` | Any importable `saga.Scheduler` subclass, so a scheduler validated in simulation runs here unchanged (`WL_SAGA_PATH` / `WL_SAGA_EXTRA_PACKAGES` on the sidecar) |
+| `http(s)://host:port` | Any service implementing the scheduler contract, in any language |
+
+The controller passes the scheduler task and node properties, profiled costs,
+output sizes, network rates, and current data locations, and enacts the returned
+placement and per-node order. On an external scheduler's failure it falls back to
+built-in HEFT. See [`docs/bring-your-own-scheduler.md`](docs/bring-your-own-scheduler.md).
+
+Placement (which node runs a task) and realization (how its outputs are served)
+are separate decisions in separate spec fields; a policy may control either or
+both.
 
 ---
 
@@ -247,7 +400,8 @@ Global flag:  --kubeconfig <path>   (default: $KUBECONFIG or ~/.kube/config)
 ```
 
 The legacy verb groups `wayline odag …` and `wayline template …` remain available
-as hidden aliases for backward compatibility.
+as hidden aliases. Realization revisions are plain `kubectl patch` calls on the
+run object (see above); the CLI does not wrap them.
 
 ---
 
@@ -263,7 +417,7 @@ Served by `ui-server` on NodePort **30080**.
 | Batch | `/batch` | Multi-ODAG submission with a combined Gantt chart |
 | Cluster | `/cluster` | Per-node task counts and utilization |
 
-Live updates arrive via **Server-Sent Events** (`/api/events`) — no polling.
+Live updates arrive via Server-Sent Events (`/api/events`).
 For local UI development see [`docs/local-dev.md`](docs/local-dev.md).
 
 ---
@@ -313,32 +467,39 @@ sudo systemctl restart k3s-agent    # each worker
 ```
 
 The data-agent DaemonSet binds **hostPort 8082** on every node and writes
-node-local intermediates under `/data/wl-outputs`.
+node-local objects under `/data/wl-outputs`. The prototype data-agent image is
+x86-64 only.
 
 ---
 
-## Reproducing the paper
+## Reproducing the evaluation
 
-The complete evaluation lives in [`eval/`](eval/); **start with
-[`eval/README.md`](eval/README.md)**, which maps every paper figure and table
-to the exact command that reproduces it, the expected result, and the approximate
-runtime. Each experiment directory holds its scripts, committed results, and a
-plot script that regenerates the paper figures from those results.
+Every experiment in the paper is a directory under
+[`eval/experiments`](eval/experiments/) with its harness (`*_paper.py` or
+`*_pilot.py`, run from the control node), the network treatment it applies
+(`*_net.sh`, `contacts.sh`: `tc` shaping on the sender's egress), the policy it
+exercises, an analysis script, and the committed per-run results (`runs.csv`,
+run objects, flow records, controller logs, provenance).
 
-| Directory | Paper artifact |
-|---|---|
-| `eval/e0-microbench/` | E0 data-plane microbenchmark (Tab. e0-summary, Fig. e0-*; the 2.7–7.2× same/cross-node results) |
-| `eval/mcmt/` | AI City multi-camera tracking, Wayline vs Argo+MinIO/distributed-MinIO/NFS (Tab/Fig aicity-*, static-ablation, tuned-minio) |
-| `eval/synthetic-dags/e1/`, `.../e2/`, `.../scheduler/` | E1 head-to-head, E2 NetworkOverhead, HEFT-vs-random scheduler ablation |
-| `eval/ray-microbench/` | E0 with Ray as a third comparator (Tab. e0-ray) |
-| `eval/stress/` | concurrent-ODAG throughput + data-agent overhead (Tab. concurrent, overhead) |
-| `eval/data-agent-tests/` | data-agent correctness + adversarial failure injection |
+| Directory | Capability shown | Results |
+|---|---|---|
+| `E0/` | Clean-testbed characterization: goodput and RTT for every node pair | `results/` |
+| `E1/` | Live serving-point revision under a degraded producer uplink (fixed, adaptive-late, adaptive-early, static oracle; B/2 … B/16) | `results-paper/` |
+| `E2/` | Temporal relay across disjoint contacts; the relay runs no task | `results-paper/` |
+| `E3/` | Risk-aware replication before source-copy loss | `results-paper/` |
+| `E4/` | Per-object control with named outputs: equal-sized objects respond differently to rebinding | `results-paper/` |
+| `E5/` | Policy enactment: HEFT, MaxTP, and OLB placements executed with per-node order fixed, direct vs store-mediated; the broader six-policy sweep and the Argo + MinIO referents are in `eval/policies` | `results-paper/` |
+| `E6/` | Applications: AI City multi-camera pipeline (Part B) and seven WfChef scientific-workflow structures (Part A), schedule-matched direct vs store-mediated | `results-paper/`, `partA/results-paper/` |
+| `E7/` | Reconciliation under faults: controller and agent restarts, superseding and conflicting revisions, last-copy eviction | `results-paper/` |
+| `E8/` | Control-plane overhead and scaling: idle cost, object and copy count, concurrent transfers, concurrent runs | `results-campaign/` |
 
-**Kick the tires (no cluster needed):** `make repro-figures` regenerates the
-paper figures from the committed result CSVs in seconds. Reproducing the raw
-measurements requires the 8-node x86 k3s testbed (and the AI City dataset for
-MCMT); see `eval/README.md` for which claims need the testbed vs. which a
-reviewer can reproduce from the shipped data.
+All measurements need the 8-worker x86 k3s testbed (an AI City clip manifest for
+E6 Part B). Analysis scripts (`analyze_*.py`, `E8/plot.py`) regenerate the tables
+and figures from the committed results without a cluster.
+[`eval/policies`](eval/policies/) holds the scheduling-policy comparison, and the
+older `eval/e0-microbench`, `eval/mcmt`, `eval/synthetic-dags`, and `eval/stress`
+directories hold the earlier data-plane microbenchmarks and baselines
+(`make repro-figures` regenerates those).
 
 ---
 
@@ -347,21 +508,28 @@ reviewer can reproduce from the shipped data.
 **Controller pod is Pending.** The control plane targets the master node, which
 is often `SchedulingDisabled`. The Deployment carries a toleration for
 `node.kubernetes.io/unschedulable:NoSchedule` and a `nodeSelector` for the master
-hostname — adjust both to your cluster (`deployments/odag-controller/deployment.yml`).
+hostname; adjust both to your cluster (`deployments/odag-controller/deployment.yml`).
 
 **Task image pull fails.** Confirm the registry container is up
 (`docker ps | grep registry`) and that `/etc/rancher/k3s/registries.yaml` exists on
 the worker and k3s-agent was restarted after writing it.
 
-**An ODAG hangs / a task never starts.** A task pod starts only when all upstream
-`.wl-ready` markers are present on its node. Check the controller and the relevant
-data-agent:
+**An ODAG hangs / a task never starts.** A task pod starts only when every input
+object is installed on its node. Check the controller, the relevant data agent,
+and, if a revision is in flight, `status.objects`:
 
 ```bash
-kubectl logs -n wl-system deployment/odag-controller --tail=40
+kubectl logs -n wl-system deployment/odag-controller --tail=40 | grep -e realize -e vertex
 kubectl logs -n wl-system -l app=data-agent --tail=40
+kubectl -n wl-system get odag <run> -o jsonpath='{.status.objects}'
 kubectl get pods -l wl-odag=<name>
 ```
+
+**A revision does not converge.** `status.objects` shows a copy stuck in
+`Transferring`: the push toward that node is failing (no route, agent down). The
+reconciler keeps retrying a failed transfer every 5 s and logs
+`refusing to evict last copy` or `node … in both copies and evict` when it
+declines an entry.
 
 ---
 
