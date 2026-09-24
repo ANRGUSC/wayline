@@ -75,7 +75,7 @@ export default function BatchExecution() {
           className={`px-4 py-1.5 rounded text-sm font-medium transition-colors ${
             submitting || isAnyActive
               ? 'bg-surface-card text-on-muted cursor-not-allowed'
-              : 'bg-blue-600 text-white hover:bg-blue-500'
+              : 'bg-ctrl text-white hover:bg-ctrl-hover'
           }`}
         >
           {submitting ? 'Submitting...' : isAnyActive ? 'Running...' : 'Run Batch'}
@@ -83,7 +83,7 @@ export default function BatchExecution() {
         {existing.size > 0 && (
           <span className="text-sm text-on-muted">
             {succeededCount}/{BATCH_NAMES.length} succeeded
-            {failedCount > 0 && <span className="text-red-500 dark:text-red-400 ml-2">{failedCount} failed</span>}
+            {failedCount > 0 && <span className="text-fail ml-2">{failedCount} failed</span>}
           </span>
         )}
       </div>

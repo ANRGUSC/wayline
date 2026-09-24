@@ -1,16 +1,8 @@
 import type { ODAGDetail } from '@/api/client'
 import { ODAG_COLORS, BATCH_PRESETS } from '@/data/batchPresets'
 
-function isDark() { return document.documentElement.classList.contains('dark') }
-function rowEven() { return isDark() ? '#0f172a' : '#f9fafb' }
-function rowOdd() { return isDark() ? '#111827' : '#f3f4f6' }
-function gridStroke() { return isDark() ? '#1f2937' : '#e5e7eb' }
-function axisStroke() { return isDark() ? '#374151' : '#d1d5db' }
-function labelFill() { return isDark() ? '#9ca3af' : '#6b7280' }
-function tickFill() { return isDark() ? '#6b7280' : '#9ca3af' }
-function barTextDark() { return isDark() ? '#0f172a' : '#ffffff' }
-function legendFill() { return isDark() ? '#9ca3af' : '#6b7280' }
-function legendSmallFill() { return isDark() ? '#6b7280' : '#9ca3af' }
+import { rowEven, rowOdd, gridStroke, axisStroke, labelFill, tickFill, barText as barTextDark, legendFill, dashStroke } from '@/theme'
+const legendSmallFill = tickFill
 
 interface Props {
   odags: ODAGDetail[]
@@ -270,10 +262,10 @@ export default function BatchGanttChart({ odags }: Props) {
             )
           })}
           <g transform="translate(0, 16)">
-            <rect x={0} y={0} width={12} height={8} fill="#9ca3af" fillOpacity={0.18}
-              stroke="#9ca3af" strokeDasharray="4 2" strokeWidth={1} rx={1} />
+            <rect x={0} y={0} width={12} height={8} fill={dashStroke()} fillOpacity={0.18}
+              stroke={dashStroke()} strokeDasharray="4 2" strokeWidth={1} rx={1} />
             <text x={16} y={4} dominantBaseline="middle" fill={legendSmallFill()} fontSize={10}>Predicted</text>
-            <rect x={90} y={0} width={12} height={8} fill="#9ca3af" fillOpacity={0.85} rx={1} />
+            <rect x={90} y={0} width={12} height={8} fill={dashStroke()} fillOpacity={0.85} rx={1} />
             <text x={106} y={4} dominantBaseline="middle" fill={legendSmallFill()} fontSize={10}>Actual</text>
           </g>
         </g>

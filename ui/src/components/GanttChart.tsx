@@ -2,25 +2,8 @@ import type { ODAGDetail } from '@/api/client'
 import type { ScheduleAlignment } from './scheduleAlignment'
 import { computeAlignment } from './scheduleAlignment'
 
-function isDark() { return document.documentElement.classList.contains('dark') }
-function rowEven() { return isDark() ? '#0f172a' : '#f9fafb' }
-function rowOdd() { return isDark() ? '#111827' : '#f3f4f6' }
-function gridStroke() { return isDark() ? '#1f2937' : '#e5e7eb' }
-function axisStroke() { return isDark() ? '#374151' : '#d1d5db' }
-function labelFill() { return isDark() ? '#9ca3af' : '#6b7280' }
-function tickFill() { return isDark() ? '#6b7280' : '#9ca3af' }
-function barTextDark() { return isDark() ? '#0f172a' : '#ffffff' }
-function legendFill() { return isDark() ? '#6b7280' : '#9ca3af' }
-function dashStroke() { return isDark() ? '#374151' : '#d1d5db' }
+import { rowEven, rowOdd, gridStroke, axisStroke, labelFill, tickFill, barText as barTextDark, legendFill, dashStroke, taskColor } from '@/theme'
 
-const TASK_COLORS = [
-  '#60a5fa', '#34d399', '#f59e0b', '#f87171',
-  '#a78bfa', '#fb923c', '#e879f9', '#2dd4bf',
-]
-
-function taskColor(name: string, names: string[]): string {
-  return TASK_COLORS[names.indexOf(name) % TASK_COLORS.length]
-}
 
 function assignSubRows(bars: Array<{ name: string; start: number; end: number }>): Record<string, number> {
   const sorted = [...bars].sort((a, b) => a.start - b.start)
@@ -183,9 +166,9 @@ export default function GanttChart({ dag, align }: Props) {
 
         {/* Legend */}
         <g transform={`translate(${a.ML}, ${a.MT + a.totalInnerH + 30})`}>
-          <rect x={0} y={0} width={14} height={10} fill="#9ca3af" fillOpacity={0.18} stroke="#9ca3af" strokeDasharray="5 3" strokeWidth={1.5} rx={1} />
+          <rect x={0} y={0} width={14} height={10} fill={dashStroke()} fillOpacity={0.18} stroke={dashStroke()} strokeDasharray="5 3" strokeWidth={1.5} rx={1} />
           <text x={20} y={5} dominantBaseline="middle" fill={legendFill()} fontSize={11}>Predicted</text>
-          <rect x={90} y={0} width={14} height={10} fill="#9ca3af" fillOpacity={0.9} rx={1} />
+          <rect x={90} y={0} width={14} height={10} fill={dashStroke()} fillOpacity={0.9} rx={1} />
           <text x={110} y={5} dominantBaseline="middle" fill={legendFill()} fontSize={11}>Actual</text>
         </g>
       </svg>

@@ -15,7 +15,7 @@ export default function Cluster() {
   })
 
   if (isLoading) return <p className="text-on-muted">Loading...</p>
-  if (error) return <p className="text-red-500 dark:text-red-400">Error: {String(error)}</p>
+  if (error) return <p className="text-fail">Error: {String(error)}</p>
   if (!nodes) return null
 
   const totals = nodes.reduce((acc, n) => {
@@ -79,10 +79,10 @@ function Card({ label, value, sub }: { label: string; value: string; sub?: strin
 
 function NodeRow({ n }: { n: ClusterNode }) {
   const statusColor = !n.ready
-    ? 'text-red-500 dark:text-red-400'
+    ? 'text-fail'
     : !n.schedulable
-    ? 'text-amber-500 dark:text-amber-400'
-    : 'text-green-600 dark:text-green-400'
+    ? 'text-data'
+    : 'text-ok'
   const statusText = !n.ready ? 'NotReady' : !n.schedulable ? 'Cordoned' : 'Ready'
   return (
     <tr className="border-b border-line-soft">
@@ -109,7 +109,7 @@ function NodeRow({ n }: { n: ClusterNode }) {
             <div className="text-xs text-on-faint mt-0.5 font-mono">
               {fmtBytes(n.diskAvailableBytes)} free ({n.diskPct.toFixed(0)}%)
               {n.diskPressure && (
-                <span className="ml-1 text-red-500 dark:text-red-400" title="Kubelet reports DiskPressure">⚠</span>
+                <span className="ml-1 text-fail" title="Kubelet reports DiskPressure">⚠</span>
               )}
             </div>
           </>
@@ -129,9 +129,9 @@ function NodeRow({ n }: { n: ClusterNode }) {
 function Bar({ pct }: { pct: number }) {
   const clamped = Math.max(0, Math.min(100, pct))
   const color =
-    clamped > 85 ? 'bg-red-500 dark:bg-red-400' :
-    clamped > 65 ? 'bg-amber-500 dark:bg-amber-400' :
-    'bg-blue-500 dark:bg-blue-400'
+    clamped > 85 ? 'bg-fail' :
+    clamped > 65 ? 'bg-data' :
+    'bg-ctrl'
   return (
     <div className="w-full bg-surface-alt rounded h-2 overflow-hidden">
       <div className={`h-2 ${color}`} style={{ width: `${clamped}%` }} />

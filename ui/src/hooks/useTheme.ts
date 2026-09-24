@@ -6,6 +6,9 @@ const STORAGE_KEY = 'wayline-theme'
 
 function getInitial(): Theme {
   if (typeof window === 'undefined') return 'light'
+  // ?theme=dark|light overrides the stored choice (useful for links and captures)
+  const fromUrl = new URLSearchParams(window.location.search).get('theme') as Theme | null
+  if (fromUrl === 'light' || fromUrl === 'dark') return fromUrl
   const stored = localStorage.getItem(STORAGE_KEY) as Theme | null
   if (stored === 'light' || stored === 'dark') return stored
   return 'light'

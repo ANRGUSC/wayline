@@ -139,9 +139,9 @@ export function toBatchEntries(): BatchODAGEntry[] {
 }
 
 export const ODAG_COLORS = [
-  '#60a5fa', // blue   - video-transcode
-  '#34d399', // green  - ml-training
-  '#f59e0b', // amber  - etl-wide
-  '#f87171', // red    - sensor-fusion
-  '#a78bfa', // purple - image-batch
+  '#1f4e79', // navy   - video-transcode
+  '#c55a11', // orange - ml-training
+  '#1a9850', // green  - etl-wide
+  '#762a83', // purple - sensor-fusion
+  '#2166ac', // blue   - image-batch
 ]

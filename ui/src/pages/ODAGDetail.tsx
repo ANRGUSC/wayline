@@ -1,5 +1,6 @@
+import { axisStroke, tickFill, ctrl } from '@/theme'
 import { useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { api } from '@/api/client'
@@ -18,7 +19,11 @@ function fmtTime(s?: string): string {
 
 export default function ODAGDetail() {
   const { namespace, name } = useParams<{ namespace: string; name: string }>()
-  const [tab, setTab] = useState<Tab>('graph')
+  // The tab is URL-addressable (?tab=schedule) so views can be linked and captured.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tabParam = searchParams.get('tab') as Tab | null
+  const [tab, setTabState] = useState<Tab>(tabParam ?? 'graph')
+  const setTab = (t: Tab) => { setTabState(t); setSearchParams({ tab: t }, { replace: true }) }
   const { data: dag, isLoading, error } = useQuery({
     queryKey: ['odag', namespace, name],
     queryFn: () => api.getODAG(namespace!, name!),
@@ -36,7 +41,7 @@ export default function ODAGDetail() {
   })
 
   if (isLoading) return <p className="text-on-muted">Loading...</p>
-  if (error || !dag) return <p className="text-red-500 dark:text-red-400">Error: {String(error)}</p>
+  if (error || !dag) return <p className="text-fail">Error: {String(error)}</p>
 
   return (
     <div>
@@ -63,7 +68,7 @@ export default function ODAGDetail() {
               <span>predicted: <span className="text-on-secondary">{predMs != null ? `${predMs.toFixed(1)}s` : '—'}</span></span>
               <span>actual: <span className="text-on-secondary">{actMs != null ? `${actMs.toFixed(1)}s` : '—'}</span></span>
               {diff != null && (
-                <span className={diff > 0 ? 'text-red-500 dark:text-red-400' : diff < 0 ? 'text-green-600 dark:text-green-400' : ''}>
+                <span className={diff > 0 ? 'text-fail' : diff < 0 ? 'text-ok' : ''}>
                   Δ {diff > 0 ? '+' : ''}{diff.toFixed(1)}s{diffPct != null ? ` (${diff > 0 ? '+' : ''}${diffPct.toFixed(0)}%)` : ''}
                 </span>
               )}
@@ -78,7 +83,7 @@ export default function ODAGDetail() {
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`pb-2 capitalize ${tab === t ? 'text-on border-b-2 border-on' : 'text-on-faint hover:text-on-secondary'}`}
+            className={`pb-2 capitalize ${tab === t ? 'text-ctrl font-semibold border-b-2 border-ctrl' : 'text-on-muted hover:text-on'}`}
           >
             {t}
           </button>
@@ -208,13 +213,13 @@ export default function ODAGDetail() {
             <>
               <ResponsiveContainer width="100%" height={200}>
                 <LineChart data={history.map((h, i) => ({ run: i + 1, makespan: h.makespan }))}>
-                  <XAxis dataKey="run" stroke="#6b7280" tick={{ fill: '#9ca3af' }} />
-                  <YAxis stroke="#6b7280" tick={{ fill: '#9ca3af' }} unit="s" />
+                  <XAxis dataKey="run" stroke={axisStroke()} tick={{ fill: tickFill() }} />
+                  <YAxis stroke={axisStroke()} tick={{ fill: tickFill() }} unit="s" />
                   <Tooltip
                     contentStyle={{ background: 'var(--surface)', border: '1px solid var(--line)', color: 'var(--on-surface)' }}
                     formatter={(v: number) => [`${v.toFixed(1)}s`, 'Makespan']}
                   />
-                  <Line type="monotone" dataKey="makespan" stroke="#60a5fa" dot={false} />
+                  <Line type="monotone" dataKey="makespan" stroke={ctrl()} dot={false} />
                 </LineChart>
               </ResponsiveContainer>
               <table className="w-full text-sm border-collapse mt-6">

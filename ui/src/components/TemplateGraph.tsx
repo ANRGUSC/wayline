@@ -37,23 +37,22 @@ export interface TemplateGraphProps {
 
 // ─── colour helpers ─────────────────────────────────────────────────────────
 
-function isDark() {
-  return document.documentElement.classList.contains('dark')
-}
+import * as T from '@/theme'
 
 const neutral = {
-  border: () => isDark() ? '#6b7280' : '#9ca3af',
-  bg: () => isDark() ? '#1f2937' : '#f9fafb',
-  text: () => isDark() ? '#e5e7eb' : '#1f2937',
-  label: () => isDark() ? '#9ca3af' : '#6b7280',
-  value: () => isDark() ? '#d1d5db' : '#374151',
-  tooltipBg: () => isDark() ? '#111827' : '#ffffff',
-  tooltipShadow: () => isDark() ? '0 4px 24px rgba(0,0,0,0.6)' : '0 4px 24px rgba(0,0,0,0.15)',
-  chipBg: () => isDark() ? '#374151' : '#e5e7eb',
-  chipBorder: () => isDark() ? '#4b5563' : '#d1d5db',
-  chipText: () => isDark() ? '#d1d5db' : '#374151',
-  edgeColor: () => isDark() ? '#4b5563' : '#d1d5db',
-  accent: () => isDark() ? '#60a5fa' : '#3b82f6',
+  border: () => T.ink(),
+  bg: () => T.surface(),
+  text: () => T.textPrimary(),
+  label: () => T.textMuted(),
+  value: () => T.textSecondary(),
+  tooltipBg: () => T.surface(),
+  tooltipShadow: () => T.isDark() ? '0 4px 24px rgba(0,0,0,0.6)' : '0 4px 24px rgba(0,0,0,0.15)',
+  chipBg: () => T.surfaceCard(),
+  chipBorder: () => T.line(),
+  chipText: () => T.textSecondary(),
+  edgeColor: () => T.ink(),
+  accent: () => T.ctrl(),
+  data: () => T.data(),
 }
 
 // ─── custom node ────────────────────────────────────────────────────────────
@@ -78,8 +77,8 @@ function TemplateNode({ data }: NodeProps) {
       className="relative group"
       style={{
         background: neutral.bg(),
-        border: `2px solid ${neutral.border()}`,
-        borderRadius: 10,
+        border: `1.5px solid ${neutral.border()}`,
+        borderRadius: 3,
         minWidth: 175,
         padding: '10px 14px',
         color: neutral.text(),
@@ -100,7 +99,7 @@ function TemplateNode({ data }: NodeProps) {
           <span>{d.runtime}s</span>
         )}
         {d.dataSize && d.dataSize !== '0' && (
-          <span style={{ color: '#67e8f9' }}>{d.dataSize}</span>
+          <span style={{ color: neutral.data() }}>{d.dataSize}</span>
         )}
       </div>
 
@@ -155,7 +154,7 @@ function TemplateNode({ data }: NodeProps) {
             <TipRow label="Runtime hint" value={`${d.runtime}s`} />
           )}
           {d.dataSize && d.dataSize !== '0' && (
-            <TipRow label="Data size" value={d.dataSize} color="#67e8f9" />
+            <TipRow label="Data size" value={d.dataSize} color={neutral.data()} />
           )}
 
           {d.resources && (d.resources.cpu || d.resources.memory) && (
@@ -278,13 +277,14 @@ function TemplateGraphInner({ tasks }: TemplateGraphProps) {
         source: dep,
         target: task.name,
         animated: false,
-        style: { stroke: neutral.edgeColor(), strokeWidth: 2 },
+        style: { stroke: neutral.edgeColor(), strokeWidth: 1.5 },
+        markerEnd: { type: 'arrowclosed' as const, color: neutral.edgeColor(), width: 16, height: 16 },
       }))
     ),
   [tasks])
 
   return (
-    <div style={{ height: 480, border: `1px solid ${neutral.border()}`, borderRadius: 8 }}>
+    <div style={{ height: 480, border: `1px solid ${T.line()}`, borderRadius: 4 }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}

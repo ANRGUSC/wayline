@@ -1,27 +1,10 @@
 import type { ODAGDetail, PredictedNetworkFlow, ActualNetworkFlow } from '@/api/client'
+import { rowEven, rowOdd, gridStroke, axisStroke, labelFill, tickFill, barText as barTextDark, legendFill, dashStroke, sepStroke, taskColor, data } from '@/theme'
 
-function isDark() { return document.documentElement.classList.contains('dark') }
-function rowEven() { return isDark() ? '#0f172a' : '#f9fafb' }
-function rowOdd() { return isDark() ? '#111827' : '#f3f4f6' }
-function gridStroke() { return isDark() ? '#1f2937' : '#e5e7eb' }
-function axisStroke() { return isDark() ? '#374151' : '#d1d5db' }
-function labelFill() { return isDark() ? '#9ca3af' : '#6b7280' }
-function tickFill() { return isDark() ? '#6b7280' : '#9ca3af' }
-function barTextDark() { return isDark() ? '#0f172a' : '#ffffff' }
-function legendFill() { return isDark() ? '#6b7280' : '#9ca3af' }
-function bandSep() { return isDark() ? '#1f2937' : '#e5e7eb' }
+function bandSep() { return dashStroke() }
 
-// Red dashed line dividing execution and network bands within each node row.
-const EXEC_NET_DIVIDER = '#ef4444'
-
-const TASK_COLORS = [
-  '#60a5fa', '#34d399', '#f59e0b', '#f87171',
-  '#a78bfa', '#fb923c', '#e879f9', '#2dd4bf',
-]
-
-function taskColor(name: string, names: string[]): string {
-  return TASK_COLORS[names.indexOf(name) % TASK_COLORS.length]
-}
+// Dashed divider between the execution and network bands of a node row (data plane).
+function execNetDivider() { return data() }
 
 // TEMP: keep this around — used by the commented-out network rendering blocks.
 function fmtBytes(bytes: number): string {
@@ -235,7 +218,7 @@ export default function UnifiedGantt({ dag }: Props) {
               key={`sep-${node}`}
               x1={ML} y1={nodeYOffset[node]}
               x2={ML + innerW} y2={nodeYOffset[node]}
-              stroke={isDark() ? '#f3f4f6' : '#000000'} strokeWidth={1}
+              stroke={sepStroke()} strokeWidth={1}
             />
           )
         })}
@@ -255,7 +238,7 @@ export default function UnifiedGantt({ dag }: Props) {
                 key={`bs-${node}-${i}`}
                 x1={ML} y1={y}
                 x2={ML + innerW} y2={y}
-                stroke={isExecNetBoundary ? EXEC_NET_DIVIDER : bandSep()}
+                stroke={isExecNetBoundary ? execNetDivider() : bandSep()}
                 strokeWidth={isExecNetBoundary ? 1.2 : 0.5}
                 strokeDasharray={isExecNetBoundary ? '6 4' : undefined}
                 strokeOpacity={isExecNetBoundary ? 0.75 : 0.3}
@@ -355,7 +338,7 @@ export default function UnifiedGantt({ dag }: Props) {
         })}
 
         {actualFlows.flatMap((f, i) => {
-          const color = f.ok ? taskColor(f.fromTask, taskNames) : '#ef4444'
+          const color = f.ok ? taskColor(f.fromTask, taskNames) : fail()
           const x = xs(f.start)
           const w = Math.max(xs(f.end) - xs(f.start), 3)
           const key = `a${i}`
@@ -399,22 +382,22 @@ export default function UnifiedGantt({ dag }: Props) {
         {/* Legend — vertically stacked */}
         <g transform={`translate(${ML}, ${MT + totalInnerH + AXIS_LABEL_H + 8})`}>
           <g transform="translate(0, 0)">
-            <rect x={0} y={0} width={14} height={10} fill="#9ca3af" fillOpacity={0.18} stroke="#9ca3af" strokeWidth={1.2} strokeDasharray="5 3" rx={1} />
+            <rect x={0} y={0} width={14} height={10} fill={dashStroke()} fillOpacity={0.18} stroke={dashStroke()} strokeWidth={1.2} strokeDasharray="5 3" rx={1} />
             <text x={20} y={5} dominantBaseline="middle" fill={legendFill()} fontSize={11}>Exec predicted (dashed outline, light fill)</text>
           </g>
           <g transform={`translate(0, ${LEGEND_ROW_H})`}>
-            <rect x={0} y={0} width={14} height={10} fill="#9ca3af" fillOpacity={0.9} rx={1} />
+            <rect x={0} y={0} width={14} height={10} fill={dashStroke()} fillOpacity={0.9} rx={1} />
             <text x={20} y={5} dominantBaseline="middle" fill={legendFill()} fontSize={11}>Exec actual (solid fill)</text>
           </g>
           {/* TEMP: networking legend entries disabled. Restore below to bring them back. */}
           {/*
           <g transform={`translate(0, ${LEGEND_ROW_H * 2})`}>
-            <rect x={0} y={0} width={14} height={10} fill="transparent" stroke="#9ca3af" strokeWidth={1.2} strokeDasharray="5 3" rx={1} />
+            <rect x={0} y={0} width={14} height={10} fill="transparent" stroke={dashStroke()} strokeWidth={1.2} strokeDasharray="5 3" rx={1} />
             <text x={20} y={5} dominantBaseline="middle" fill={legendFill()} fontSize={11}>Net predicted (dashed outline — src light fill, dst hollow)</text>
           </g>
           <g transform={`translate(0, ${LEGEND_ROW_H * 3})`}>
-            <rect x={0} y={0} width={14} height={10} fill="#9ca3af" fillOpacity={0.9} rx={1} />
-            <rect x={18} y={0} width={14} height={10} fill="#9ca3af" fillOpacity={0.35} stroke="#9ca3af" strokeWidth={1} rx={1} />
+            <rect x={0} y={0} width={14} height={10} fill={dashStroke()} fillOpacity={0.9} rx={1} />
+            <rect x={18} y={0} width={14} height={10} fill={dashStroke()} fillOpacity={0.35} stroke={dashStroke()} strokeWidth={1} rx={1} />
             <text x={38} y={5} dominantBaseline="middle" fill={legendFill()} fontSize={11}>Net actual (src solid / dst faded+outlined)</text>
           </g>
           */}

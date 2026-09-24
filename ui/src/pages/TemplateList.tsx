@@ -74,7 +74,7 @@ export default function TemplateList() {
   }
 
   if (isLoading) return <p className="text-on-muted">Loading...</p>
-  if (error) return <p className="text-red-500 dark:text-red-400">Error: {String(error)}</p>
+  if (error) return <p className="text-fail">Error: {String(error)}</p>
 
   return (
     <div>

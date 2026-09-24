@@ -92,7 +92,7 @@ export default function UtilizationView({ dag }: Props) {
                     <td className="py-2 pr-4">
                       <div className="w-full bg-surface-alt rounded h-3 overflow-hidden">
                         <div
-                          className="h-3 bg-blue-500 dark:bg-blue-400"
+                          className="h-3 bg-ctrl"
                           style={{ width: `${pct}%` }}
                         />
                       </div>
@@ -131,7 +131,7 @@ export default function UtilizationView({ dag }: Props) {
                     <td className="py-2 pr-4">
                       <div className="w-full bg-surface-alt rounded h-3 overflow-hidden">
                         <div
-                          className="h-3 bg-emerald-500 dark:bg-emerald-400"
+                          className="h-3 bg-data"
                           style={{ width: `${pct}%` }}
                         />
                       </div>

@@ -4,6 +4,10 @@ export default {
   darkMode: 'class',
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['Arial', 'Helvetica', 'Liberation Sans', 'sans-serif'],
+        mono: ['Menlo', 'DejaVu Sans Mono', 'Consolas', 'monospace'],
+      },
       colors: {
         surface: {
           DEFAULT: 'var(--surface)',
@@ -20,10 +24,20 @@ export default {
           DEFAULT: 'var(--line)',
           soft: 'var(--line-soft)',
         },
+        ink: 'var(--ink)',
         accent: {
           DEFAULT: 'var(--accent)',
           hover: 'var(--accent-hover)',
         },
+        // the two planes
+        ctrl: { DEFAULT: 'var(--ctrl)', hover: 'var(--ctrl-hover)', tint: 'var(--ctrl-tint)' },
+        data: { DEFAULT: 'var(--data)', hover: 'var(--data-hover)', tint: 'var(--data-tint)' },
+        // statuses
+        run:     { DEFAULT: 'var(--run)',     tint: 'var(--run-tint)' },
+        ok:      { DEFAULT: 'var(--ok)',      tint: 'var(--ok-tint)' },
+        fail:    { DEFAULT: 'var(--fail)',    tint: 'var(--fail-tint)' },
+        alt:     { DEFAULT: 'var(--alt)',     tint: 'var(--alt-tint)' },
+        pending: { DEFAULT: 'var(--pending)', tint: 'var(--pending-tint)' },
       },
     },
   },

@@ -2,24 +2,7 @@ import type { ODAGDetail, PredictedNetworkFlow, ActualNetworkFlow } from '@/api/
 import type { ScheduleAlignment } from './scheduleAlignment'
 import { computeAlignment } from './scheduleAlignment'
 
-function isDark() { return document.documentElement.classList.contains('dark') }
-function rowEven() { return isDark() ? '#0f172a' : '#f9fafb' }
-function rowOdd() { return isDark() ? '#111827' : '#f3f4f6' }
-function gridStroke() { return isDark() ? '#1f2937' : '#e5e7eb' }
-function axisStroke() { return isDark() ? '#374151' : '#d1d5db' }
-function labelFill() { return isDark() ? '#9ca3af' : '#6b7280' }
-function tickFill() { return isDark() ? '#6b7280' : '#9ca3af' }
-function barTextDark() { return isDark() ? '#0f172a' : '#ffffff' }
-function legendFill() { return isDark() ? '#6b7280' : '#9ca3af' }
-
-const TASK_COLORS = [
-  '#60a5fa', '#34d399', '#f59e0b', '#f87171',
-  '#a78bfa', '#fb923c', '#e879f9', '#2dd4bf',
-]
-
-function taskColor(name: string, names: string[]): string {
-  return TASK_COLORS[names.indexOf(name) % TASK_COLORS.length]
-}
+import { rowEven, rowOdd, gridStroke, axisStroke, labelFill, tickFill, barText as barTextDark, legendFill, dashStroke, sepStroke, taskColor, fail } from '@/theme'
 
 function fmtBytes(bytes: number): string {
   if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`
@@ -136,7 +119,7 @@ export default function NetworkGantt({ dag, align }: Props) {
       <div className="text-xs text-on-faint mb-2">
         {predicted.length} predicted, {actual.length} actual flow{actual.length === 1 ? '' : 's'}
         {peakActualPerNode > 1 && (
-          <span className="ml-2 text-amber-500 dark:text-amber-400">
+          <span className="ml-2 text-data">
             ⚠ observed peak NIC concurrency: {peakActualPerNode}
           </span>
         )}
@@ -160,7 +143,7 @@ export default function NetworkGantt({ dag, align }: Props) {
               key={`sep-${node}`}
               x1={a.ML} y1={a.nodeYOffset[node]}
               x2={a.ML + a.innerW} y2={a.nodeYOffset[node]}
-              stroke={isDark() ? '#f3f4f6' : '#000000'} strokeWidth={1}
+              stroke={sepStroke()} strokeWidth={1}
             />
           )
         })}
@@ -192,7 +175,7 @@ export default function NetworkGantt({ dag, align }: Props) {
 
         {/* Bars */}
         {bars.map(b => {
-          const color = b.ok ? taskColor(b.fromTask, taskNames) : '#ef4444'
+          const color = b.ok ? taskColor(b.fromTask, taskNames) : fail()
           const x = a.xs(b.start)
           const w = Math.max(a.xs(b.end) - a.xs(b.start), 3)
           const y = barY(b)
@@ -236,19 +219,19 @@ export default function NetworkGantt({ dag, align }: Props) {
         {/* Legend — stacked vertically */}
         <g transform={`translate(${a.ML}, ${a.MT + a.totalInnerH + 28})`}>
           <g transform="translate(0, 0)">
-            <rect x={0} y={0} width={14} height={10} fill="#9ca3af" fillOpacity={0.18} stroke="#9ca3af" strokeWidth={1.5} strokeDasharray="5 3" rx={1} />
+            <rect x={0} y={0} width={14} height={10} fill={dashStroke()} fillOpacity={0.18} stroke={dashStroke()} strokeWidth={1.5} strokeDasharray="5 3" rx={1} />
             <text x={20} y={5} dominantBaseline="middle" fill={legendFill()} fontSize={11}>Predicted egress</text>
           </g>
           <g transform="translate(0, 15)">
-            <rect x={0} y={0} width={14} height={10} fill="transparent" stroke="#9ca3af" strokeWidth={1.5} strokeDasharray="5 3" rx={1} />
+            <rect x={0} y={0} width={14} height={10} fill="transparent" stroke={dashStroke()} strokeWidth={1.5} strokeDasharray="5 3" rx={1} />
             <text x={20} y={5} dominantBaseline="middle" fill={legendFill()} fontSize={11}>Predicted ingress</text>
           </g>
           <g transform="translate(0, 30)">
-            <rect x={0} y={0} width={14} height={10} fill="#9ca3af" fillOpacity={0.9} rx={1} />
+            <rect x={0} y={0} width={14} height={10} fill={dashStroke()} fillOpacity={0.9} rx={1} />
             <text x={20} y={5} dominantBaseline="middle" fill={legendFill()} fontSize={11}>Actual egress</text>
           </g>
           <g transform="translate(0, 45)">
-            <rect x={0} y={0} width={14} height={10} fill="#9ca3af" fillOpacity={0.35} stroke="#9ca3af" strokeWidth={1} rx={1} />
+            <rect x={0} y={0} width={14} height={10} fill={dashStroke()} fillOpacity={0.35} stroke={dashStroke()} strokeWidth={1} rx={1} />
             <text x={20} y={5} dominantBaseline="middle" fill={legendFill()} fontSize={11}>Actual ingress</text>
           </g>
         </g>

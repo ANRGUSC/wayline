@@ -131,8 +131,8 @@ function SummaryDiff({ left, right }: { left: any; right: any }) {
 
 function Card({ label, value, highlight }: { label: string; value: string; highlight?: 'better' | 'worse' | 'same' }) {
   const cls =
-    highlight === 'better' ? 'text-green-600 dark:text-green-400' :
-    highlight === 'worse'  ? 'text-red-500 dark:text-red-400' :
+    highlight === 'better' ? 'text-ok' :
+    highlight === 'worse'  ? 'text-fail' :
     'text-on'
   return (
     <div className="bg-surface-alt border border-line rounded p-3">

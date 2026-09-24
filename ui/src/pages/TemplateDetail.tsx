@@ -1,3 +1,4 @@
+import { axisStroke, tickFill, ctrl } from '@/theme'
 import { useMemo, useState } from 'react'
 import { useParams, Link, useLocation } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -45,7 +46,7 @@ export default function TemplateDetail() {
   })
 
   if (isLoading) return <p className="text-on-muted">Loading...</p>
-  if (error) return <p className="text-red-500 dark:text-red-400">Error: {String(error)}</p>
+  if (error) return <p className="text-fail">Error: {String(error)}</p>
   if (!template) return <p className="text-on-muted">Not found</p>
 
   const tabs: { key: Tab; label: string }[] = [
@@ -76,7 +77,7 @@ export default function TemplateDetail() {
         <button
           onClick={() => runMutation.mutate()}
           disabled={runMutation.isPending}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-400 dark:disabled:bg-gray-600 text-white text-sm rounded"
+          className="px-4 py-2 bg-ctrl hover:bg-ctrl-hover disabled:bg-pending text-white text-sm rounded"
         >
           {runMutation.isPending ? 'Creating...' : 'New Run'}
         </button>
@@ -90,14 +91,14 @@ export default function TemplateDetail() {
         {template.lastRunMakespan != null && template.lastRunMakespan > 0 && (
           <span>Last makespan: <span className="text-on">{template.lastRunMakespan.toFixed(1)}s</span></span>
         )}
-        <span>Profiling: <span className={template.profilingEnabled ? 'text-green-600 dark:text-green-400' : 'text-on-faint'}>
+        <span>Profiling: <span className={template.profilingEnabled ? 'text-ok' : 'text-on-faint'}>
           {template.profilingEnabled ? 'on' : 'off'}
         </span></span>
       </div>
 
       {/* Run result toast */}
       {runMutation.isSuccess && (
-        <div className="mb-4 p-2 bg-green-100/30 dark:bg-green-900/30 border border-green-300 dark:border-green-800 rounded text-green-700 dark:text-green-300 text-sm">
+        <div className="mb-4 p-2 bg-ok-tint border border-ok rounded text-ok">
           {runMutation.data.message}
         </div>
       )}
@@ -110,7 +111,7 @@ export default function TemplateDetail() {
             onClick={() => setTab(t.key)}
             className={`px-4 py-2 text-sm border-b-2 -mb-px ${
               tab === t.key
-                ? 'border-blue-500 text-on'
+                ? 'border-ctrl text-on'
                 : 'border-transparent text-on-muted hover:text-on-secondary'
             }`}
           >
@@ -219,18 +220,18 @@ function MakespanTrend({ history }: { history: TemplateHistoryEntry[] }) {
   const points = history.map((h, i) => `${xs(i)},${ys(h.makespan)}`).join(' ')
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block' }}>
-      <line x1={ML} y1={MT + innerH} x2={ML + innerW} y2={MT + innerH} stroke="#9ca3af" strokeOpacity={0.4} />
-      <line x1={ML} y1={MT} x2={ML} y2={MT + innerH} stroke="#9ca3af" strokeOpacity={0.4} />
-      <polyline points={points} fill="none" stroke="#60a5fa" strokeWidth={1.5} />
+      <line x1={ML} y1={MT + innerH} x2={ML + innerW} y2={MT + innerH} stroke={axisStroke()} strokeOpacity={0.6} />
+      <line x1={ML} y1={MT} x2={ML} y2={MT + innerH} stroke={axisStroke()} strokeOpacity={0.6} />
+      <polyline points={points} fill="none" stroke={ctrl()} strokeWidth={1.5} />
       {history.map((h, i) => (
-        <circle key={i} cx={xs(i)} cy={ys(h.makespan)} r={3} fill="#60a5fa">
+        <circle key={i} cx={xs(i)} cy={ys(h.makespan)} r={3} fill={ctrl()}>
           <title>{`${h.name}: ${h.makespan.toFixed(1)}s`}</title>
         </circle>
       ))}
-      <text x={ML - 4} y={ys(maxV) + 4} textAnchor="end" fontSize={10} fill="#9ca3af">{maxV.toFixed(0)}s</text>
-      <text x={ML - 4} y={ys(0) + 4} textAnchor="end" fontSize={10} fill="#9ca3af">0</text>
-      <text x={ML} y={H - 6} fontSize={10} fill="#9ca3af">run 1</text>
-      <text x={ML + innerW} y={H - 6} textAnchor="end" fontSize={10} fill="#9ca3af">run {history.length}</text>
+      <text x={ML - 4} y={ys(maxV) + 4} textAnchor="end" fontSize={10} fill={tickFill()}>{maxV.toFixed(0)}s</text>
+      <text x={ML - 4} y={ys(0) + 4} textAnchor="end" fontSize={10} fill={tickFill()}>0</text>
+      <text x={ML} y={H - 6} fontSize={10} fill={tickFill()}>run 1</text>
+      <text x={ML + innerW} y={H - 6} textAnchor="end" fontSize={10} fill={tickFill()}>run {history.length}</text>
     </svg>
   )
 }
@@ -358,11 +359,11 @@ function ProfileTab({ profileSummary }: { profileSummary?: Record<string, Record
   }
 
   const heatColor = (val: number) => {
-    if (max === min) return 'bg-blue-100/50 dark:bg-blue-900/50'
+    if (max === min) return 'bg-ctrl-tint'
     const ratio = (val - min) / (max - min)
-    if (ratio < 0.33) return 'bg-green-100/60 dark:bg-green-900/60 text-green-700 dark:text-green-300'
-    if (ratio < 0.66) return 'bg-yellow-100/60 dark:bg-yellow-900/60 text-yellow-700 dark:text-yellow-300'
-    return 'bg-red-100/60 dark:bg-red-900/60 text-red-700 dark:text-red-300'
+    if (ratio < 0.33) return 'bg-ok-tint text-ok'
+    if (ratio < 0.66) return 'bg-data-tint text-data'
+    return 'bg-fail-tint text-fail'
   }
 
   return (

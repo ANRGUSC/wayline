@@ -26,24 +26,20 @@ function AppRoutes() {
   )
 }
 
+const linkClass = ({ isActive }: { isActive: boolean }) =>
+  isActive
+    ? 'text-ctrl font-semibold border-b-2 border-ctrl pb-0.5'
+    : 'text-on-muted hover:text-on border-b-2 border-transparent pb-0.5'
+
 /** NavLink that highlights when ?type= matches the expected value on /templates */
 function TemplateNavLink({ type, children }: { type: string; children: React.ReactNode }) {
+  const [searchParams] = useSearchParams()
+  const isActive = window.location.pathname === '/templates' && searchParams.get('type') === type
   return (
-    <NavLink
-      to={`/templates?type=${type}`}
-      className={() => 'text-on-muted hover:text-on-secondary'}
-    >
-      {/* We render children through a wrapper that checks the real active state */}
-      <TemplateNavInner type={type}>{children}</TemplateNavInner>
+    <NavLink to={`/templates?type=${type}`} className={() => linkClass({ isActive })}>
+      {children}
     </NavLink>
   )
-}
-
-function TemplateNavInner({ type, children }: { type: string; children: React.ReactNode }) {
-  const [searchParams] = useSearchParams()
-  const pathname = window.location.pathname
-  const isActive = pathname === '/templates' && searchParams.get('type') === type
-  return <span className={isActive ? 'text-on' : ''}>{children}</span>
 }
 
 export default function App() {
@@ -51,40 +47,19 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <div className="min-h-screen bg-surface text-on font-mono">
-        <header className="border-b border-line px-6 py-3 flex items-center gap-8">
-          <span className="font-bold text-on tracking-tight">Wayline</span>
+      <div className="min-h-screen bg-surface text-on font-sans">
+        <header className="border-b-2 border-ctrl px-6 py-3 flex items-center gap-8">
+          <span className="text-lg font-bold text-ctrl tracking-tight">Wayline</span>
           <nav className="flex gap-6 text-sm">
-            <TemplateNavLink type="odag">ODAG Templates</TemplateNavLink>
-            <NavLink
-              to="/"
-              end
-              className={({ isActive }) =>
-                isActive ? 'text-on' : 'text-on-muted hover:text-on-secondary'
-              }
-            >
-              ODAGs
-            </NavLink>
-            <NavLink
-              to="/cluster"
-              className={({ isActive }) =>
-                isActive ? 'text-on' : 'text-on-muted hover:text-on-secondary'
-              }
-            >
-              Cluster
-            </NavLink>
-            <NavLink
-              to="/compare"
-              className={({ isActive }) =>
-                isActive ? 'text-on' : 'text-on-muted hover:text-on-secondary'
-              }
-            >
-              Compare
-            </NavLink>
+            <TemplateNavLink type="odag">Templates</TemplateNavLink>
+            <NavLink to="/" end className={linkClass}>Runs</NavLink>
+            <NavLink to="/cluster" className={linkClass}>Cluster</NavLink>
+            <NavLink to="/compare" className={linkClass}>Compare</NavLink>
+            <NavLink to="/batch" className={linkClass}>Batch</NavLink>
           </nav>
           <button
             onClick={toggle}
-            className="ml-auto text-on-muted hover:text-on text-sm px-2 py-1 border border-line rounded"
+            className="ml-auto text-on-muted hover:text-on text-xs px-2 py-1 border border-line rounded-sm"
             title={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
           >
             {theme === 'light' ? 'Dark' : 'Light'}
