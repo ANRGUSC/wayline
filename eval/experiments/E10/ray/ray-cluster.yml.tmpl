@@ -1,0 +1,21 @@
+# E10 Ray cluster: head on the control node (no CPUs, so no tasks run there),
+# one worker per node listed in the harness. Ports are pinned so network
+# treatments can match Ray's object transfers (object manager: 8076).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e10-ray-head
+  namespace: wl-system
+  labels: {app: e10-ray, role: head}
+spec:
+  nodeName: anrg-2
+  hostNetwork: true
+  restartPolicy: Never
+  tolerations:
+  - {key: node.kubernetes.io/unschedulable, operator: Exists, effect: NoSchedule}
+  containers:
+  - name: ray
+    image: 192.168.1.163:5000/wl-ray-baseline:2.58.0
+    command: ["sh", "-c", "ray start --head --port 6379 --num-cpus 0 --dashboard-host 0.0.0.0 --object-manager-port 8076 --node-manager-port 8077 --min-worker-port 10002 --max-worker-port 10100 --block"]
+---
+@@WORKERS@@
