@@ -44,10 +44,11 @@ def load_gen_e5():
     return mod
 
 
-def template_yaml(nodes):
+def template_yaml(nodes, cpu="5", enact="serial"):
     """E5's direct template, every task restricted to the given nodes."""
     g = load_gen_e5()
-    y = g.direct(TEMPLATE, "saga/heft")
+    y = g.direct(TEMPLATE, "saga/heft").replace('cpu: "5"', f'cpu: "{cpu}"').replace(
+        "enactOrder: serial", f"enactOrder: {enact}")
     pin = f"    constraints:\n      nodeNames: [{', '.join(nodes)}]\n"
     out = []
     for block in y.split("\n  - name: "):
@@ -56,6 +57,25 @@ def template_yaml(nodes):
 
 
 # ─── Wayline arm ─────────────────────────────────────────────────────────────
+
+def agent_ips():
+    raw = kubectl("get pods -l app=data-agent -o jsonpath="
+                  "'{range .items[*]}{.spec.nodeName}={.status.podIP} {end}'").stdout
+    return dict(t.split("=", 1) for t in raw.split() if "=" in t)
+
+
+def task_timings(run, placement):
+    """SDK phase boundaries per task, from the agent on the task's node."""
+    import urllib.request
+    ips, out = agent_ips(), {}
+    for t, node in placement.items():
+        try:
+            with urllib.request.urlopen(f"http://{ips[node]}:8082/timings/{run}/{t}", timeout=5) as r:
+                out[t] = json.loads(r.read().decode())
+        except Exception:
+            out[t] = {}
+    return out
+
 
 def wayline_run():
     t0 = time.time()
@@ -73,8 +93,10 @@ def wayline_run():
     placement = {t["name"]: t.get("node") for t in st.get("tasks", [])}
     pred = sorted(st.get("predictedTasks", []) or [], key=lambda p: p["estStart"])
     order = [p["name"] for p in pred] or list(placement)
+    tim = task_timings(run, placement)
     return {"arm": "wayline", "run": run, "phase": phase, "wall": round(wall, 3),
             "makespan": st.get("makespan"), "placement": placement, "order": order,
+            "timings": tim, "submitted": t0,
             "predicted_makespan": round(max((p["estEnd"] for p in pred), default=0), 3)}
 
 
@@ -120,12 +142,16 @@ def main():
     ap.add_argument("--nodes", nargs="+", default=["anrg-1", "anrg-3", "anrg-4", "anrg-5", "anrg-9"])
     ap.add_argument("--reps", type=int, default=1)
     ap.add_argument("--keep-ray", action="store_true")
+    ap.add_argument("--cpu", default="5", help="per-task CPU request for the Wayline arm")
+    ap.add_argument("--enact", default="serial", help="Wayline enactOrder: serial|order|none")
+    ap.add_argument("--arms", nargs="+", default=["wayline", "ray-plan", "ray-default"])
     args = ap.parse_args()
 
     out = os.path.join(RES, datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     os.makedirs(out)
-    kubectl("apply -f -", stdin=template_yaml(args.nodes))
-    ray_up(args.nodes)
+    kubectl("apply -f -", stdin=template_yaml(args.nodes, args.cpu, args.enact))
+    if any(a.startswith("ray") for a in args.arms):
+        ray_up(args.nodes)
 
     results = []
     for rep in range(args.reps):
@@ -136,6 +162,8 @@ def main():
         plan_path = os.path.join(out, f"plan-{rep}.json")
         json.dump({"placement": w["placement"], "order": w["order"]}, open(plan_path, "w"))
         for mode, p in (("plan", plan_path), ("default", None)):
+            if f"ray-{mode}" not in args.arms:
+                continue
             r = ray_run(mode, p)
             r["rep"] = rep
             results.append(r)
@@ -149,7 +177,7 @@ def main():
                 wr.writerow([x.get("rep", rep), x["arm"], x["phase"], x.get("makespan"),
                              x.get("wall", x.get("wall_incl_init"))])
         sh(f"{WAYLINE} delete {w['run']} -n {NS}")
-    if not args.keep_ray:
+    if not args.keep_ray and any(a.startswith("ray") for a in args.arms):
         ray_down()
     print("results in", out)
 

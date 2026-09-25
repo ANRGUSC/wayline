@@ -62,3 +62,44 @@ RES=~/E10-results python3 e10.py --reps 1          # add --keep-ray to leave the
 Placement-aware Ray is 28% faster than default Ray (default put `c` and `j2` on
 the quarter-speed gateway). At identical placement, Wayline is 7 s (8%) slower
 than Ray, consistent with E9's ~1 s of pod overhead per critical-path task.
+
+## Full cluster (2026-09-25, eight workers, one run per configuration)
+
+Nodes `anrg-1, 3-9` after the anrg-6/7/8 node-IP repair, so the fast class
+(speed 2.0) takes part. HEFT's estimate is 19.0 s. `results-full/<stamp>/`.
+
+| run | arm | enactOrder | CPU request | makespan (s) |
+|---|---|---|---|---|
+| 184357Z | ray-plan | - | 5 | 20.4 |
+| 184357Z | ray-default | - | 5 | 37.4 |
+| 184357Z | wayline | serial | 5 | 33 (35.6 wall) |
+| 184625Z | wayline | serial | 5 | 28 (30.8 wall) |
+| 184851Z | wayline | serial | 1 | 29 (31.2 wall) |
+| 185008Z | wayline | order | 5 | 28 (29.4 wall) |
+| 185039Z | wayline | order | 1 | 24 (26.0 wall) |
+
+Placement-aware Ray is 46% faster than default Ray. The placement is
+identical in every row except ray-default.
+
+Where Wayline's extra time goes (`gaps.py`, which reports each task's SDK
+start minus its last parent's output close):
+
+- The critical path runs `source -> b -> j2` on `anrg-6`, then `sink` on
+  `anrg-7`, so consecutive critical tasks share a node.
+- With 5-CPU requests on 8-CPU nodes, the next pod on a node cannot be
+  admitted until the previous one has exited. The kubelet enforces this even
+  when enactOrder does not, and it costs about 2.5 to 2.8 s per same-node
+  successor.
+- `serial` enactment adds the same wait by gating on the predecessor pod's
+  `Succeeded` phase rather than on its outputs being sealed. Only removing
+  both helps; either one alone leaves the gap.
+- With both removed, the same-node gap is 0.5 to 1.0 s and the remaining 3.6 s
+  over Ray is container launch on the critical path (about 0.9 s each for
+  `source`, `b`, `j2`, `sink`), matching E9.
+
+Two consequences for Wayline. `serial` should gate on the predecessor's
+outputs being sealed rather than on pod exit. Warm runners should remove the
+remaining launch cost.
+
+`e10.py` options added for this: `--arms`, `--cpu`, `--enact`. The Wayline arm
+also records per-task SDK timings from each node's agent.
