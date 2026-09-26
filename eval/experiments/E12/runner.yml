@@ -1,0 +1,45 @@
+# E12 warm runner: one per anrg worker, serving E11's unchanged task script.
+# Same image as the cold arm, so both execute identical code.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: wl-runner-e12
+  namespace: wl-system
+  labels: {wl.io/runner: e12}
+spec:
+  selector:
+    matchLabels: {wl.io/runner: e12}
+  template:
+    metadata:
+      labels: {wl.io/runner: e12}
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values: [anrg-1, anrg-3, anrg-4, anrg-5, anrg-6, anrg-7, anrg-8, anrg-9]
+      containers:
+      - name: runner
+        image: 192.168.1.163:5000/wl-e11:v2
+        imagePullPolicy: Always
+        # 4 slots = Ray's concurrency for 2-CPU tasks on 8-CPU workers.
+        command: [python, -m, wl.runner, --script, /app/task.py, --slots, "4"]
+        env:
+        - name: NODE_NAME
+          valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+        ports:
+        - {containerPort: 8090, name: invoke}
+        readinessProbe:
+          httpGet: {path: /healthz, port: 8090}
+          periodSeconds: 2
+        volumeMounts:
+        - {name: wl-outputs, mountPath: /data/wl-outputs}
+        - {name: wl-shared, mountPath: /shared/wl-outputs}
+      volumes:
+      - name: wl-outputs
+        hostPath: {path: /data/wl-outputs, type: DirectoryOrCreate}
+      - name: wl-shared
+        hostPath: {path: /shared/wl-outputs, type: DirectoryOrCreate}

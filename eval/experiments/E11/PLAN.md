@@ -86,6 +86,29 @@ What the runs show:
 - Scheduler outputs move between runs (CPoP 70 to 96 s on Ray) because the
   calibrated rates differ slightly between runs.
 
-Next: the matched setting (5-CPU tasks, one per node, the model the
-schedulers assume) with several Ray-default samples, and slot-aware machine
-models for the schedulers.
+## Matched setting (2026-09-26, 5-CPU tasks, one per node)
+
+Here each node runs one task at a time on both runtimes, the machine model
+the SAGA schedulers assume. One Wayline run per scheduler, three Ray-default
+samples. `results/20260926T005239Z/`.
+
+| scheduler | estimate | Wayline | Ray pinned |
+|---|---|---|---|
+| PEFT | 47.4 | 61.6 | 52.5 |
+| CPoP | 70.9 | 82.2 | 81.1 |
+| MinMin | 74.9 | 92.5 | 81.6 |
+| HEFT | 85.6 | 98.6 | 92.4 |
+| random | 101.9 | 111.1 | 99.4 |
+| Ray default | | | 129.7, 78.6, 137.8 (mean 115.4) |
+
+- Every SAGA placement pinned onto Ray beats Ray's default mean; PEFT by
+  2.2x, HEFT by 1.25x. Random placement also beats it, because default Ray
+  packs onto whichever class it starts in.
+- Wayline trails Ray at the same placement by 1 to 12 s. With 5-CPU pods, a
+  node's next pod waits for the previous one to exit (E10), so the pod
+  overhead grows with the number of same-node successors.
+- The scheduler ranking is not stable across runs yet (HEFT led PEFT in the
+  2-CPU runs); more repetitions are needed before ranking schedulers.
+
+Next: slot-aware machine models so schedulers can use multi-task nodes, and
+E12 (warm runners) to remove the pod overhead.
