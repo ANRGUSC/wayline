@@ -38,6 +38,14 @@ Model-conversion rules (each guards a known SAGA trap):
     __super_sink__ for multi-source/multi-sink DAGs. They are stripped from
     the returned mapping.
 
+  * Slots. SAGA's machine model runs one task at a time per node. With
+    "slots": "auto" a node becomes floor(allocatable CPU / task CPU)
+    identical processors "<node>#<i>", joined by the local link, so the
+    scheduler can overlap tasks on it; placements are folded back onto the
+    real node. Exact only when every task requests the same CPU: mixed
+    requests would need capacity-aware placement, which a node-splitting
+    wrapper cannot give every SAGA scheduler, so they are rejected.
+
   * Constraints. Most SAGA schedulers ignore node constraints (HEFT/PEFT
     raise rather than avoid). Constraints are enforced by post-override,
     the same pattern ncsim uses for pinned tasks: a task assigned outside
@@ -62,6 +70,7 @@ SUPER_NODES = ("__super_source__", "__super_sink__")
 LOCAL_SPEED = 1e12  # bytes/sec for self-loops; large finite, never math.inf
 MIN_BANDWIDTH = 1.0  # bytes/sec floor so comm cost stays finite
 MIN_RUNTIME = 1e-6  # seconds floor so log() stays finite
+SLOT_SEP = "#"  # virtual processor "<node>#<i>"; '#' cannot occur in a k8s node name
 
 
 # ---------------------------------------------------------------------------
@@ -245,12 +254,40 @@ def _rank1_fit(rt: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
     return np.exp(log_cost), np.exp(log_speed), rmse
 
 
+def slot_counts(tasks: List[dict], nodes: List[dict]) -> Dict[str, int]:
+    """Processors per node for slots=auto: floor(node CPU / task CPU).
+
+    Every task must request the same, nonzero CPU; otherwise splitting a node
+    into identical processors misstates what fits on it, so this raises.
+    """
+    demands = sorted({int(t.get("cpuMillis") or 0) for t in tasks})
+    if len(demands) != 1 or demands[0] <= 0:
+        raise ValueError(
+            "slots=auto needs every task to request the same nonzero CPU "
+            f"(resources.cpu); got millicores {demands}")
+    d = demands[0]
+    counts = {}
+    for n in nodes:
+        cap = int(n.get("cpuMillis") or 0)
+        if cap <= 0:
+            raise ValueError(f"slots=auto: node {n['name']!r} reports no allocatable CPU")
+        counts[n["name"]] = max(1, cap // d)
+    return counts
+
+
+def real_node(name: str) -> str:
+    """Fold a virtual processor name back onto its node."""
+    return name.split(SLOT_SEP, 1)[0]
+
+
 def build_saga_models(
-    dag: dict, cluster_state: dict
+    dag: dict, cluster_state: dict, slots: Optional[Dict[str, int]] = None
 ) -> Tuple[TaskGraph, Network, List[str], float]:
     """Convert the Wayline request into SAGA TaskGraph + Network.
 
-    Returns (task_graph, network, node_names, cost_model_rmse).
+    With `slots`, node n becomes slots[n] identical processors (see the
+    module docstring). Returns (task_graph, network, node_names,
+    cost_model_rmse); node_names are the real nodes.
     """
     tasks: List[dict] = dag["tasks"]
     nodes = [n for n in cluster_state["nodes"] if n.get("ready", True)]
@@ -296,16 +333,24 @@ def build_saga_models(
     for e in cluster_state.get("bandwidth", []) or []:
         bw[(e["from"], e["to"])] = float(e["bytesPerSec"])
 
-    net_nodes = [(n, float(speeds[j])) for j, n in enumerate(node_names)]
+    def link(u: str, v: str) -> float:
+        fwd = bw.get((u, v))
+        rev = bw.get((v, u))
+        candidates = [x for x in (fwd, rev) if x is not None and x > 0]
+        speed = min(candidates) if candidates else MIN_BANDWIDTH
+        return max(speed, MIN_BANDWIDTH)
+
+    procs = [
+        (f"{n}{SLOT_SEP}{i}" if slots else n, n, float(speeds[j]))
+        for j, n in enumerate(node_names)
+        for i in range(slots[n] if slots else 1)
+    ]
+    net_nodes = [(p, sp) for p, _, sp in procs]
     net_edges = []
-    for j, u in enumerate(node_names):
-        net_edges.append((u, u, LOCAL_SPEED))  # explicit self-loop, finite
-        for v in node_names[j + 1 :]:
-            fwd = bw.get((u, v))
-            rev = bw.get((v, u))
-            candidates = [x for x in (fwd, rev) if x is not None and x > 0]
-            speed = min(candidates) if candidates else MIN_BANDWIDTH
-            net_edges.append((u, v, max(speed, MIN_BANDWIDTH)))
+    for a, (p, pn, _) in enumerate(procs):
+        net_edges.append((p, p, LOCAL_SPEED))  # explicit self-loop, finite
+        for q, qn, _ in procs[a + 1 :]:
+            net_edges.append((p, q, LOCAL_SPEED if pn == qn else link(pn, qn)))
     network = Network.create(nodes=net_nodes, edges=net_edges)
 
     return task_graph, network, node_names, rmse
@@ -336,7 +381,14 @@ def schedule_request(request: dict) -> dict:
         return {"assignments": [], "estimatedMakespan": 0.0, "algorithm": algorithm}
 
     scheduler = get_scheduler(algorithm, options)
-    task_graph, network, node_names, rmse = build_saga_models(dag, cluster_state)
+    slots = None
+    mode = request.get("slots") or ""
+    if mode == "auto":
+        ready = [n for n in cluster_state["nodes"] if n.get("ready", True)]
+        slots = slot_counts(tasks, ready)
+    elif mode not in ("", "none"):
+        raise ValueError(f"unknown slots mode {mode!r}; use 'auto'")
+    task_graph, network, node_names, rmse = build_saga_models(dag, cluster_state, slots)
 
     sched: Schedule = scheduler.schedule(network, task_graph)
 
@@ -347,7 +399,7 @@ def schedule_request(request: dict) -> dict:
         for st in scheduled:
             if st.name in SUPER_NODES:
                 continue
-            placement[st.name] = node_name
+            placement[st.name] = real_node(node_name)
             times[st.name] = (float(st.start), float(st.end))
 
     missing = [t["name"] for t in tasks if t["name"] not in placement]
@@ -360,7 +412,7 @@ def schedule_request(request: dict) -> dict:
     # to the single "best" allowed node packs constrained siblings onto
     # one node and serializes parallel tiers — measured on the wpf
     # benchmark as SAGA arms landing below even random placement.
-    node_speed = {nn.name: nn.speed for nn in network.nodes}
+    node_speed = {real_node(nn.name): nn.speed for nn in network.nodes}
     load = collections.Counter(placement.values())
     overrides: List[dict] = []
     for t in tasks:
@@ -392,6 +444,8 @@ def schedule_request(request: dict) -> dict:
         "algorithm": algorithm,
         "costModelFitRMSE": rmse,
     }
+    if slots:
+        result["slots"] = slots
     if overrides:
         result["constraintOverrides"] = overrides
         logger.warning("constraint overrides applied: %s", overrides)

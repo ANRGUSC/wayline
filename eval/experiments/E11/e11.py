@@ -183,6 +183,7 @@ def main(argv=None):
     ap.add_argument("--modes", nargs="+", default=["cold"], help="cold (a pod per task) and/or warm (runner)")
     ap.add_argument("--runner", default="e12", help="runner name for warm mode")
     ap.add_argument("--image", default=gen.REG)
+    ap.add_argument("--slots", default="", help="auto: SAGA models node CPU / task CPU processors per node")
     ap.add_argument("--no-caps", action="store_true", help="leave clocks uncapped (homogeneous control)")
     args = ap.parse_args(argv)
     if not args.no_caps and not os.environ.get("SUDO_PASS"):
@@ -227,7 +228,7 @@ def main(argv=None):
                     tmpl = f"e11-{short}" + ("-warm" if warm else "")
                     kubectl("apply -f -", stdin=gen.template(tmpl, sched, d, rates, args.cpu, args.enact,
                                                              runner=args.runner if warm else None,
-                                                             image=args.image))
+                                                             image=args.image, slots=args.slots))
                     w = wayline_run(tmpl, sched); w["rep"] = rep; w["mode"] = mode
                     w["arm"] = ("wayline-warm:" if warm else "wayline:") + sched
                     results.append(w); dump()

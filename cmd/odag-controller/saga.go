@@ -64,6 +64,7 @@ type sagaTaskRequest struct {
 	RuntimeProfile  map[string]float64 `json:"runtimeProfile,omitempty"`
 	DataSizeProfile map[string]int64   `json:"dataSizeProfile,omitempty"`
 	Constraints     *sagaConstraints   `json:"constraints,omitempty"`
+	CPUMillis       int64              `json:"cpuMillis,omitempty"`
 }
 
 type sagaConstraints struct {
@@ -86,6 +87,7 @@ type sagaBandwidthEntry struct {
 type sagaScheduleRequest struct {
 	Algorithm string                 `json:"algorithm"`
 	Options   map[string]interface{} `json:"options,omitempty"`
+	Slots     string                 `json:"slots,omitempty"`
 	DAG       struct {
 		Tasks []sagaTaskRequest `json:"tasks"`
 	} `json:"dag"`
@@ -137,7 +139,7 @@ type sagaScheduleResponse struct {
 // built-in name, a dotted path to any saga.Scheduler subclass, or "" when
 // the service implements a single scheduler of its own. options are passed
 // to the scheduler's constructor.
-func sagaAssignTasks(algorithm, baseURL string, options map[string]interface{},
+func sagaAssignTasks(algorithm, baseURL string, options map[string]interface{}, slots string,
 	tasks []taskSpec, nodeMap map[string]nodeInfo,
 	rtRes runtimeResolver, dsRes dataSizeResolver, bwRes bandwidthResolver) (map[string]nodeInfo, schedulePlan, error) {
 
@@ -150,6 +152,7 @@ func sagaAssignTasks(algorithm, baseURL string, options map[string]interface{},
 	var req sagaScheduleRequest
 	req.Algorithm = algorithm
 	req.Options = options
+	req.Slots = slots
 	byName := make(map[string]taskSpec, len(tasks))
 	for _, t := range tasks {
 		byName[t.Name] = t
@@ -205,6 +208,7 @@ func sagaAssignTasks(algorithm, baseURL string, options map[string]interface{},
 		if len(t.Constraints) > 0 {
 			tr.Constraints = &sagaConstraints{NodeNames: t.Constraints}
 		}
+		tr.CPUMillis = parseTaskCPUMillis(t.CPU)
 		req.DAG.Tasks = append(req.DAG.Tasks, tr)
 	}
 	for _, n := range nodeNames {

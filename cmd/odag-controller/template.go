@@ -245,6 +245,13 @@ type schedulerConfig struct {
 	// 0 preserves strict EFT selection (with least-loaded exact-tie break).
 	SpreadEpsilon float64
 
+	// Slots, for SAGA schedulers: "auto" models each node as
+	// floor(allocatable CPU / task CPU request) identical processors, so a
+	// node can run several tasks at once in the scheduler's model. Exact
+	// only when all tasks request the same CPU; the sidecar rejects mixed
+	// requests rather than approximate them. "" keeps one task per node.
+	Slots string
+
 	// Options are passed verbatim to an external scheduler as constructor
 	// keyword arguments, so a parameterised scheduler is configurable from
 	// the ODAG spec without any code change here. Ignored by the built-ins.
@@ -281,6 +288,15 @@ func extractSchedulerConfig(templateObj *unstructured.Unstructured) schedulerCon
 			cfg.EnactOrder = v
 		default:
 			log.Printf("[template] unknown enactOrder %q; ignoring", v)
+		}
+	}
+	if v, ok := sc["slots"].(string); ok {
+		switch v {
+		case "", "none":
+		case "auto":
+			cfg.Slots = v
+		default:
+			log.Printf("[template] unknown slots %q; ignoring", v)
 		}
 	}
 	if v, ok := sc["spreadEpsilon"].(float64); ok {

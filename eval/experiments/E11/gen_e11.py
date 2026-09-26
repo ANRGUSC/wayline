@@ -48,7 +48,7 @@ def dag(seed=11, nodes=(), layers=(1, 5, 5, 5, 3, 1), frac=0.8,
     return {"seed": seed, "nodes": list(nodes), "frac": frac, "order": names, "tasks": tasks}
 
 
-def template(name, scheduler, d, rates, cpu="2", enact="order", runner=None, image=REG):
+def template(name, scheduler, d, rates, cpu="2", enact="order", runner=None, image=REG, slots=""):
     """rates: {node: Mhash/s}; the full-clock reference rate is the max."""
     ref = max(rates.values())
     out = [f"""apiVersion: wl.io/v1
@@ -60,7 +60,8 @@ spec:
   description: 'E11: CPU-bound random DAG on frequency-capped nodes, 80% constraints.'
   scheduler: {scheduler}
   schedulerConfig:
-    enactOrder: {enact}
+    enactOrder: {enact}{f"""
+    slots: {slots}""" if slots else ""}
   profiling:
     enabled: false
     runtimeSource: manual

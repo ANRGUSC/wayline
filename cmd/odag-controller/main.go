@@ -478,7 +478,7 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 				url, algo = schedulerName, ""
 			}
 			log.Printf("[odag-ctrl] using external scheduler %q for %s (endpoint %s)", schedulerName, key, url)
-			am, plan, err := sagaAssignTasks(algo, url, schedCfg.Options, tasks, nodeMap, rtRes, dsRes, bwRes)
+			am, plan, err := sagaAssignTasks(algo, url, schedCfg.Options, schedCfg.Slots, tasks, nodeMap, rtRes, dsRes, bwRes)
 			plan.Mode = schedCfg.EnactOrder
 			sagaPlan = plan
 			if err != nil {

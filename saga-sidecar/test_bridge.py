@@ -234,3 +234,67 @@ def test_bare_unknown_name_suggests_dotted_path():
     with pytest.raises(KeyError) as e:
         bridge.schedule_request(_request(algorithm="totally-unknown"))
     assert "dotted path" in str(e.value)
+
+
+# --- slots=auto -------------------------------------------------------------
+
+def _wide(n_tasks=8, cpu=2000):
+    tasks = [{"name": "src", "dependencies": [], "runtime": 1, "dataSize": "0", "cpuMillis": cpu}]
+    tasks += [{"name": f"w{i}", "dependencies": ["src"], "runtime": 10, "dataSize": "0",
+               "cpuMillis": cpu} for i in range(n_tasks)]
+    return tasks
+
+
+def _nodes_fast_slow(cpu=8000):
+    return [{"name": "fast", "ready": True, "cpuMillis": cpu},
+            {"name": "slow", "ready": True, "cpuMillis": cpu}]
+
+
+def _fast_slow_profile(tasks):
+    for t in tasks:
+        t["runtimeProfile"] = {"fast": t["runtime"], "slow": t["runtime"] * 4}
+    return tasks
+
+
+def test_slots_let_a_fast_node_run_tasks_concurrently():
+    tasks = _fast_slow_profile(_wide(n_tasks=4))
+    base = bridge.schedule_request(_request(tasks=tasks, nodes=_nodes_fast_slow()))
+    req = _request(tasks=tasks, nodes=_nodes_fast_slow())
+    req["slots"] = "auto"
+    slotted = bridge.schedule_request(req)
+    assert slotted["slots"] == {"fast": 4, "slow": 4}
+    # Four 10 s workers fit side by side on the fast node: ~11 s, not ~41 s.
+    assert all(a["node"] == "fast" for a in slotted["assignments"])
+    assert slotted["estimatedMakespan"] < 15
+    assert base["estimatedMakespan"] > slotted["estimatedMakespan"]
+
+
+def test_slots_placements_are_real_node_names():
+    req = _request(tasks=_fast_slow_profile(_wide()), nodes=_nodes_fast_slow())
+    req["slots"] = "auto"
+    for a in bridge.schedule_request(req)["assignments"]:
+        assert a["node"] in {"fast", "slow"}
+
+
+def test_slots_count_is_capacity_over_demand():
+    tasks = _wide(cpu=3000)
+    assert bridge.slot_counts(tasks, _nodes_fast_slow(cpu=8000)) == {"fast": 2, "slow": 2}
+    assert bridge.slot_counts(tasks, [{"name": "tiny", "cpuMillis": 1000}]) == {"tiny": 1}
+
+
+def test_slots_reject_mixed_cpu_requests():
+    tasks = _wide()
+    tasks[1]["cpuMillis"] = 4000
+    req = _request(tasks=tasks, nodes=_nodes_fast_slow())
+    req["slots"] = "auto"
+    with pytest.raises(ValueError, match="same nonzero CPU"):
+        bridge.schedule_request(req)
+
+
+def test_slots_respect_constraints_after_folding():
+    tasks = _fast_slow_profile(_wide(n_tasks=4))
+    tasks[2]["constraints"] = {"nodeNames": ["slow"]}
+    req = _request(tasks=tasks, nodes=_nodes_fast_slow())
+    req["slots"] = "auto"
+    res = bridge.schedule_request(req)
+    assert {a["task"]: a["node"] for a in res["assignments"]}[tasks[2]["name"]] == "slow"
