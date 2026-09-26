@@ -46,16 +46,17 @@ The evaluation lives in [`eval/experiments`](eval/experiments/); see
 3. [Prerequisites](#prerequisites)
 4. [Quick start](#quick-start)
 5. [Writing tasks](#writing-tasks)
-6. [ODAG reference](#odag-reference)
-7. [Revising a realization at runtime](#revising-a-realization-at-runtime)
-8. [Schedulers and policies](#schedulers-and-policies)
-9. [CLI reference](#cli-reference)
-10. [Web UI](#web-ui)
-11. [Build & deploy reference](#build--deploy-reference)
-12. [Cluster setup](#cluster-setup)
-13. [Reproducing the evaluation](#reproducing-the-evaluation)
-14. [Troubleshooting](#troubleshooting)
-15. [License](#license)
+6. [Warm runners](#warm-runners)
+7. [ODAG reference](#odag-reference)
+8. [Revising a realization at runtime](#revising-a-realization-at-runtime)
+9. [Schedulers and policies](#schedulers-and-policies)
+10. [CLI reference](#cli-reference)
+11. [Web UI](#web-ui)
+12. [Build & deploy reference](#build--deploy-reference)
+13. [Cluster setup](#cluster-setup)
+14. [Reproducing the evaluation](#reproducing-the-evaluation)
+15. [Troubleshooting](#troubleshooting)
+16. [License](#license)
 
 ---
 
@@ -236,6 +237,57 @@ COPY sdk/python/wl ./wl
 COPY examples/my-dag/tasks/my-task/task.py .
 CMD ["python", "task.py"]
 ```
+
+## Warm runners
+
+A task normally runs in its own pod, which costs about a second of pod
+startup per task (E9). For short tasks that overhead dominates. A task can
+instead run as a call on a **warm runner**: a long-lived process on each
+node that executes invocations without creating a pod. Add one field:
+
+```yaml
+  - name: resize
+    image: <registry>/my-runner:latest   # the runner's image
+    runner: images                       # run on the "images" runner
+    function: resize                     # optional; defaults to the task name
+    dependencies: [capture]
+```
+
+Nothing else changes. The scheduler places the task as usual, the
+controller invokes it on the runner of the chosen node with the same
+environment the pod would have had, and the task uses the same SDK and data
+agent (inputs, named outputs, pushes, timings). Pod and warm tasks can be
+mixed in one DAG.
+
+A runner is any pod labeled `wl.io/runner=<name>` that serves the runner
+API on port 8090 and mounts `/data/wl-outputs` from the host. The SDK
+provides one. Either register functions:
+
+```python
+import wl
+
+@wl.function
+def resize(task):              # receives a ready WlTask; close() is automatic
+    img = task.recv_raw()
+    task.send_raw(shrink(img))
+
+wl.serve()
+```
+
+or serve an existing task script unchanged:
+
+```bash
+python -m wl.runner --script task.py --preload numpy --slots 4
+```
+
+The runner forks a zygote once all imports are done. The zygote forks one
+child per invocation, so a call starts in milliseconds, CPU-bound calls run
+in parallel, and a crash fails only that task. `--slots` bounds concurrent
+calls per node; the rest queue. A DaemonSet is the usual way to run one per
+node; see `eval/experiments/E12/runner.yml`.
+
+Limits today: the runner's resources are shared by its calls (no per-task
+CPU request), and a task's `command` is ignored in warm mode.
 
 ---
 

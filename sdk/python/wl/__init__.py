@@ -21,4 +21,12 @@ The SDK reads these env vars automatically.
 
 from wl.api import WlTask
 
-__all__ = ["WlTask"]
+__all__ = ["WlTask", "function", "serve"]
+
+
+def __getattr__(name):
+    # Lazy, so `python -m wl.runner` does not import wl.runner twice.
+    if name in ("function", "serve"):
+        from wl import runner
+        return getattr(runner, name)
+    raise AttributeError(f"module 'wl' has no attribute {name!r}")

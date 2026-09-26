@@ -193,6 +193,7 @@ class WlTask:
 
     def close(self) -> None:
         """Close all open sockets / file handles. Call on shutdown."""
+        self._closed = True
         self._transport.close()
 
     # ------------------------------------------------------------------

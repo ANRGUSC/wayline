@@ -340,6 +340,7 @@ func watchODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
 				// post-campaign idle CPU ~100x the pre-campaign baseline).
 				runningODAGs.Delete(key)
 				schedulePlanCache.Delete(key)
+				forgetWarm(key)
 			}
 		}
 		log.Println("[odag-ctrl] ODAG watcher closed; reconnecting in 2s")
@@ -657,6 +658,10 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		return true
 	})
 
+	// Warm invocations have no pod; each is presented as an in-memory pod
+	// so dispatch gates, statuses, completion and makespan treat both alike.
+	podItems = append(podItems, warmPods(namespace, odagName, ownerUID, tasks)...)
+
 	// Build a map of which tasks already have pods, and their current pod phase.
 	existingPods := make(map[string]bool)
 	podPhases := make(map[string]corev1.PodPhase)
@@ -829,6 +834,12 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		}
 		envVars := buildEnvVars(odagName, task, assignMap, tasks)
 		envVars = addTemplateEnvVars(envVars, odagObj.GetLabels())
+		if task.Runner != "" {
+			if err := invokeWarm(dynClient, client, namespace, odagName, ownerUID, task, ni, envVars); err != nil {
+				log.Printf("[odag-ctrl] warm invoke %s/%s on %s: %v (will retry)", key, task.Name, ni.name, err)
+			}
+			continue
+		}
 		if err := ensurePod(client, namespace, odagName, task, ni.name, envVars, ownerUID); err != nil {
 			log.Printf("[odag-ctrl] error creating pod for %s/%s: %v", key, task.Name, err)
 		} else {
@@ -863,6 +874,8 @@ type taskSpec struct {
 	Name           string
 	Type           string       // "" = compute (pod); "data" = data vertex (no pod)
 	CacheKey       string       // non-empty: eligible for cross-run reuse
+	Runner         string       // non-empty: execute on this warm runner instead of a fresh pod (warm.go)
+	Function       string       // function to call on the runner; defaults to the task name
 	Outputs        []outputSpec // named outputs; empty = single default output
 	Inputs         []inputSpec  // which named object each dependency supplies
 	Image          string
@@ -1012,6 +1025,8 @@ func extractTasks(obj *unstructured.Unstructured) []taskSpec {
 		}
 		typ, _ := t["type"].(string)
 		cacheKey, _ := t["cacheKey"].(string)
+		runner, _ := t["runner"].(string)
+		function, _ := t["function"].(string)
 		var outputs []outputSpec
 		if rawOuts, ok := t["outputs"].([]interface{}); ok {
 			for _, ro := range rawOuts {
@@ -1090,6 +1105,8 @@ func extractTasks(obj *unstructured.Unstructured) []taskSpec {
 			Name:                     name,
 			Type:                     typ,
 			CacheKey:                 cacheKey,
+			Runner:                   runner,
+			Function:                 function,
 			Outputs:                  outputs,
 			Inputs:                   inputs,
 			Image:                    image,
