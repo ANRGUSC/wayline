@@ -1157,6 +1157,36 @@ func consumedKeys(t taskSpec, dep string) []string {
 }
 
 // getNodeInfoMap returns a map of node name -> nodeInfo for all schedulable nodes.
+// reservedByOthers sums, per node, the CPU and memory requested by running
+// or pending pods that are not Wayline task pods. Best-effort: on a list
+// error nothing is subtracted.
+func reservedByOthers(client *kubernetes.Clientset) map[string]nodeInfo {
+	out := map[string]nodeInfo{}
+	pods, err := client.CoreV1().Pods("").List(context.Background(), metav1.ListOptions{
+		FieldSelector: "status.phase!=Succeeded,status.phase!=Failed",
+	})
+	if err != nil {
+		log.Printf("[odag-ctrl] listing pods for reserved capacity: %v", err)
+		return out
+	}
+	for _, p := range pods.Items {
+		if p.Spec.NodeName == "" || p.Labels[labelODAGName] != "" {
+			continue
+		}
+		r := out[p.Spec.NodeName]
+		for _, c := range p.Spec.Containers {
+			if q, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
+				r.cpuMillis += q.MilliValue()
+			}
+			if q, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+				r.memBytes += q.Value()
+			}
+		}
+		out[p.Spec.NodeName] = r
+	}
+	return out
+}
+
 func getNodeInfoMap(client *kubernetes.Clientset) (map[string]nodeInfo, error) {
 	nodeList, err := client.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{
 		FieldSelector: "spec.unschedulable!=true",
@@ -1164,6 +1194,7 @@ func getNodeInfoMap(client *kubernetes.Clientset) (map[string]nodeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	reserved := reservedByOthers(client)
 	result := make(map[string]nodeInfo)
 	for _, n := range nodeList.Items {
 		noSchedule := false
@@ -1195,6 +1226,12 @@ func getNodeInfoMap(client *kubernetes.Clientset) (map[string]nodeInfo, error) {
 		if mem, ok := n.Status.Allocatable[corev1.ResourceMemory]; ok {
 			memBytes = mem.Value()
 		}
+		// What Wayline's tasks can actually use: the kubelet admits a pod
+		// only if its request fits beside every other pod's, so capacity
+		// already reserved by non-Wayline pods (monitoring agents, etc.)
+		// is not ours to plan with.
+		cpuMillis = max(cpuMillis-reserved[n.Name].cpuMillis, 0)
+		memBytes = max(memBytes-reserved[n.Name].memBytes, 0)
 		result[n.Name] = nodeInfo{name: n.Name, ip: ip, cpuMillis: cpuMillis, memBytes: memBytes}
 	}
 	return result, nil

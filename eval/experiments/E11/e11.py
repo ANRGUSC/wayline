@@ -176,6 +176,7 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--frac", type=float, default=0.8)
     ap.add_argument("--cpu", default="2")
+    ap.add_argument("--ray-cpus", default=None, help="Ray num_cpus per task (default: --cpu); Ray needs whole numbers above 1")
     ap.add_argument("--enact", default="order")
     ap.add_argument("--schedulers", nargs="+",
                     default=["saga/heft", "saga/cpop", "saga/peft", "saga/minmin", "random"])
@@ -239,11 +240,11 @@ def main(argv=None):
                         continue
                     plan = os.path.join(out, f"plan-{short}-{rep}.json")
                     json.dump({"placement": w["placement"], "order": w["order"]}, open(plan, "w"))
-                    r = ray_run(f"ray-plan:{sched}", "plan", args.cpu, plan); r["rep"] = rep
+                    r = ray_run(f"ray-plan:{sched}", "plan", args.ray_cpus or args.cpu, plan); r["rep"] = rep
                     results.append(r); dump()
                     print(f"[{rep}] ray-plan:{sched}: {r['phase']} makespan={r.get('makespan')}s", flush=True)
             for k in range(args.default_reps):
-                r = ray_run("ray-default", "default", args.cpu); r["rep"] = rep; r["sample"] = k
+                r = ray_run("ray-default", "default", args.ray_cpus or args.cpu); r["rep"] = rep; r["sample"] = k
                 results.append(r); dump()
                 print(f"[{rep}] ray-default#{k}: {r['phase']} makespan={r.get('makespan')}s", flush=True)
     finally:
