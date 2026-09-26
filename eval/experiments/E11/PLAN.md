@@ -112,3 +112,40 @@ samples. `results/20260926T005239Z/`.
 
 Next: slot-aware machine models so schedulers can use multi-task nodes, and
 E12 (warm runners) to remove the pod overhead.
+
+## Slot-aware schedulers (2026-09-26)
+
+`schedulerConfig.slots: auto` splits each node into free CPU / task CPU
+identical processors for SAGA. Wayline's built-in `heft` is capacity-aware
+already and is included as a fifth scheduler. One Wayline run per scheduler,
+three Ray-default samples per run. Makespans in seconds.
+
+Run A, `results/20260926T014104Z/`: 2-CPU tasks, nodes advertised at 8 CPUs.
+Monitoring pods reserve 0.6 CPU per worker, so the kubelet admitted three
+task pods per node while the schedulers planned four, and pods queued.
+
+Run B, `results/20260926T015659Z/`: the controller now plans with free CPU
+(allocatable minus non-Wayline requests). Wayline tasks request 1.8 CPUs and
+Ray tasks 2, so both runtimes run four per node.
+
+| scheduler | A: Wayline | A: Ray pinned | B: estimate | B: Wayline | B: Ray pinned |
+|---|---|---|---|---|---|
+| SAGA HEFT | 77.2 | 56.1 | 47.5 | 66.6 | 57.0 |
+| SAGA CPoP | 78.5 | 56.4 | 47.5 | 67.5 | 57.8 |
+| SAGA PEFT | 76.2 | 56.1 | 47.5 | 69.5 | 56.9 |
+| SAGA MinMin | 69.4 | 53.5 | 51.6 | 63.3 | 58.8 |
+| built-in HEFT | 71.6 | 54.2 | 40.0 | 61.3 | 52.7 |
+| Ray default | | 52.5, 52.9, 58.3 | | | 83.0, 80.9, 80.9 |
+
+- With slots, every scheduler's placement lands at 53 to 59 s on Ray in both
+  runs, against 70 to 105 s without slots. Modeling concurrency matters more
+  than which list heuristic is used.
+- Ray's default was 52 to 58 s in run A and 81 to 83 s in run B. Across all
+  E11 runs it has ranged from 52 to 170 s. Slot-aware placement is not faster
+  than Ray's best draws, but it is consistent, and it avoids Ray's bad ones.
+- Planning with free capacity cut Wayline's gap to Ray at the same placement
+  from 16 to 22 s (run A) to 4.5 to 12.6 s (run B). The rest is per-task pod
+  start, which E12's warm runners remove.
+- Wayline's built-in capacity-aware HEFT gave the best estimate and the best
+  result on both runtimes in run B.
+- One run each; rankings between schedulers are not yet stable.
