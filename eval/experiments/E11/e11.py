@@ -133,7 +133,7 @@ def wayline_run(template, sched):
             "makespan": round(max(closes) - t0, 3) if len(closes) == len(placement) else None,
             "placement": placement, "order": [p["name"] for p in pred],
             "predicted_makespan": round(max((p["estEnd"] for p in pred), default=0), 3) or None,
-            "timings": tim, "submitted": t0}
+            "timings": tim, "submitted": t0, "scheduling": st.get("scheduling")}
 
 
 # ─── Ray arms ────────────────────────────────────────────────────────────────
@@ -233,6 +233,9 @@ def main(argv=None):
                     w = wayline_run(tmpl, sched); w["rep"] = rep; w["mode"] = mode
                     w["arm"] = ("wayline-warm:" if warm else "wayline:") + sched
                     results.append(w); dump()
+                    sc = w.get("scheduling") or {}
+                    if sc.get("used") != sc.get("requested"):
+                        print(f"[{rep}] WARNING {w['arm']} fell back to {sc.get('used')}: {sc.get('fallbackError')}", flush=True)
                     print(f"[{rep}] {w['arm']}: {w['phase']} makespan={w['makespan']}s "
                           f"(estimate {w['predicted_makespan']}s, wall {w['wall']}s)", flush=True)
                     sh(f"{WAYLINE} delete {w['run']} -n {NS}")

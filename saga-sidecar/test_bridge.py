@@ -57,7 +57,7 @@ def test_super_nodes_stripped_multi_source_multi_sink():
         assert not a["task"].startswith("__super")
 
 
-def test_constraint_post_override():
+def test_constraint_honored_while_scheduling():
     tasks = [
         {
             "name": "pinned",
@@ -80,6 +80,9 @@ def test_constraint_post_override():
     result = bridge.schedule_request(_request(tasks=tasks, nodes=nodes))
     placement = {a["task"]: a["node"] for a in result["assignments"]}
     assert placement["pinned"] == "slow"
+    # The estimate describes the schedule that runs: pinned really takes 100 s.
+    assert result["estimatedMakespan"] >= 100
+    assert "constraintOverrides" not in result
 
 
 def test_heterogeneous_runtime_profile_drives_placement():
@@ -298,3 +301,52 @@ def test_slots_respect_constraints_after_folding():
     req["slots"] = "auto"
     res = bridge.schedule_request(req)
     assert {a["task"]: a["node"] for a in res["assignments"]}[tasks[2]["name"]] == "slow"
+
+
+# --- exact runtimes and constraints for every scheduler --------------------
+
+def _constrained_instance(seed):
+    import random
+    rng = random.Random(seed)
+    nodes = [f"n{i}" for i in range(5)]
+    speed = {n: s for n, s in zip(nodes, [4.0, 2.0, 2.0, 1.0, 0.5])}
+    names = [f"t{i}" for i in range(12)]
+    tasks = []
+    for i, t in enumerate(names):
+        deps = sorted(rng.sample(names[:i], min(i, rng.randint(0, 2))))
+        work = rng.uniform(1, 8)
+        tasks.append({
+            "name": t, "dependencies": deps, "runtime": work, "dataSize": "2MB", "cpuMillis": 1000,
+            # Deliberately non-separable: a per-(task, node) factor.
+            "runtimeProfile": {n: work / speed[n] * rng.uniform(0.6, 1.4) for n in nodes},
+            "constraints": {"nodeNames": sorted(rng.sample(nodes, 3))},
+        })
+    return tasks, [{"name": n, "cpuMillis": 4000} for n in nodes]
+
+
+@pytest.mark.parametrize("slots", ["", "auto"])
+@pytest.mark.parametrize("algorithm", sorted(bridge.available_algorithms()))
+def test_every_scheduler_honors_constraints_and_true_runtimes(algorithm, slots):
+    for seed in range(3):
+        tasks, nodes = _constrained_instance(seed)
+        req = _request(algorithm=algorithm, tasks=tasks, nodes=nodes)
+        req["slots"] = slots
+        res = bridge.schedule_request(req)
+        spec = {t["name"]: t for t in tasks}
+        for a in res["assignments"]:
+            t = spec[a["task"]]
+            assert a["node"] in t["constraints"]["nodeNames"], (algorithm, a)
+            dur = a["estimatedFinish"] - a["estimatedStart"]
+            assert dur == pytest.approx(t["runtimeProfile"][a["node"]]), (algorithm, a)
+
+
+def test_scheduler_that_ignores_constraints_fails_loudly():
+    tasks, nodes = _constrained_instance(0)
+    for t in tasks:
+        t["constraints"] = {"nodeNames": ["n4"]}
+    tasks[0]["constraints"] = {"nodeNames": ["n1"]}
+    req = _request(algorithm="mysched.PinFirstNodeScheduler", tasks=tasks, nodes=nodes)
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).parent / "testdata"))
+    with pytest.raises(RuntimeError, match="violated placement constraints"):
+        bridge.schedule_request(req)

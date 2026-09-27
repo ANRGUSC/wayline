@@ -167,7 +167,7 @@ func computePredictedSchedule(tasks []taskSpec, assignMap map[string]nodeInfo, r
 	return result, flows
 }
 
-func writePredictedSchedule(dynClient dynamic.Interface, namespace, odagName string, predicted []predictedTaskEntry, flows []predictedFlowEntry) {
+func writePredictedSchedule(dynClient dynamic.Interface, namespace, odagName string, predicted []predictedTaskEntry, flows []predictedFlowEntry, scheduling map[string]any) {
 	if flows == nil {
 		flows = []predictedFlowEntry{}
 	}
@@ -175,6 +175,7 @@ func writePredictedSchedule(dynClient dynamic.Interface, namespace, odagName str
 		"status": map[string]any{
 			"predictedTasks":        predicted,
 			"predictedNetworkFlows": flows,
+			"scheduling":            scheduling,
 		},
 	}
 	data, _ := json.Marshal(patch)

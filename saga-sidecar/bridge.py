@@ -12,13 +12,16 @@ only the placement and discards SAGA's predicted times.
 
 Model-conversion rules (each guards a known SAGA trap):
 
-  * Cost model. SAGA's heterogeneity is separable: runtime(t, n) = cost_t /
-    speed_n. Wayline supplies a true per-(task, node) runtime matrix, which a
-    separable model cannot represent exactly. We compute the best rank-1 fit
-    in log space (two-way additive decomposition): with L = log RT,
-    log cost_t = rowmean_t(L), log speed_n = mean(L) - colmean_n(L).
-    The fit residual is reported per request as "costModelFitRMSE" (in log
-    space) so callers can see how much heterogeneity the model loses.
+  * Cost model. SAGA's schedulers compute a task's runtime on a node as
+    task.cost / node.speed, a separable model that cannot represent an
+    arbitrary per-(task, node) runtime matrix. Every scheduler goes through
+    that one division, so the bridge makes it exact: each task's cost and
+    each node's speed are float subclasses carrying their names, and the
+    division returns the true runtime from Wayline's matrix. Their plain
+    float values are the best rank-1 fit (log space), used wherever a
+    scheduler reads a cost or speed on its own (ranking heuristics, sums).
+    "costModelFitRMSE" reports that fit's log-space residual; it no longer
+    affects the runtimes any scheduler plans with.
 
   * Network completeness. A missing SAGA edge defaults to speed 0.0 and
     comm time = size/speed divides by zero. We always emit every unordered
@@ -46,11 +49,13 @@ Model-conversion rules (each guards a known SAGA trap):
     requests would need capacity-aware placement, which a node-splitting
     wrapper cannot give every SAGA scheduler, so they are rejected.
 
-  * Constraints. Most SAGA schedulers ignore node constraints (HEFT/PEFT
-    raise rather than avoid). Constraints are enforced by post-override,
-    the same pattern ncsim uses for pinned tasks: a task assigned outside
-    its allowed set is moved to the allowed node with the highest fitted
-    speed. Overrides are reported in the response.
+  * Constraints. Most SAGA schedulers do not read placement constraints.
+    They are enforced through the same division: a forbidden (task, node)
+    pair has a runtime longer than any feasible schedule, so every
+    finish-time-driven scheduler avoids it by construction. The result is
+    then verified; a scheduler that still places a task on a forbidden
+    node fails the request loudly. Placements are never moved after
+    scheduling, so the estimate returned is the schedule that runs.
 """
 
 from __future__ import annotations
@@ -112,6 +117,8 @@ def _builtin_registry() -> Dict[str, "Scheduler"]:
         WBAScheduler,
     )
 
+    from constrained import ConstrainedETF, ConstrainedFastestNode, ConstrainedOLB
+
     return {
         "heft": HeftScheduler(),
         "cpop": CpopScheduler(),
@@ -121,11 +128,11 @@ def _builtin_registry() -> Dict[str, "Scheduler"]:
         "sufferage": SufferageScheduler(),
         "mct": MCTScheduler(),
         "met": METScheduler(),
-        "olb": OLBScheduler(),
-        "etf": ETFScheduler(),
+        "olb": ConstrainedOLB(),
+        "etf": ConstrainedETF(),
         "duplex": DuplexScheduler(),
         "wba": WBAScheduler(),
-        "fastest_node": FastestNodeScheduler(),
+        "fastest_node": ConstrainedFastestNode(),
         "cpop_ranking": CpopScheduler(),  # alias kept for experiment scripts
     }
 
@@ -280,6 +287,41 @@ def real_node(name: str) -> str:
     return name.split(SLOT_SEP, 1)[0]
 
 
+class _Cost(float):
+    """A task's cost: a float (rank-1 fitted value) that, divided by a
+    _Speed, returns the true runtime of this task on that node."""
+
+    def __new__(cls, value: float, task: str, table: Dict[Tuple[str, str], float]):
+        obj = float.__new__(cls, value)
+        obj.task, obj.table = task, table
+        return obj
+
+    def __truediv__(self, other):
+        if isinstance(other, _Speed):
+            return self.table[(self.task, other.node)]
+        return float.__truediv__(self, other)
+
+
+class _Speed(float):
+    """A node's speed: a float (rank-1 fitted value) naming its real node,
+    so slot processors share their node's runtimes."""
+
+    def __new__(cls, value: float, node: str):
+        obj = float.__new__(cls, value)
+        obj.node = node
+        return obj
+
+    def __rtruediv__(self, other):
+        # Reached for a plain-float numerator (e.g. SAGA's super nodes).
+        return float.__truediv__(float(other), float(self))
+
+
+def forbidden_runtime(rt: np.ndarray, total_bytes: float, min_bw: float) -> float:
+    """A runtime no feasible schedule can reach: every task run back to back
+    at its slowest node, plus every edge over the slowest link, doubled."""
+    return 2.0 * (float(rt.max(axis=1).sum()) + total_bytes / max(min_bw, MIN_BANDWIDTH)) + 1.0
+
+
 def build_saga_models(
     dag: dict, cluster_state: dict, slots: Optional[Dict[str, int]] = None
 ) -> Tuple[TaskGraph, Network, List[str], float]:
@@ -353,6 +395,21 @@ def build_saga_models(
             net_edges.append((p, q, LOCAL_SPEED if pn == qn else link(pn, qn)))
     network = Network.create(nodes=net_nodes, edges=net_edges)
 
+    # Exact runtimes and constraints through task.cost / node.speed.
+    allowed = {t["name"]: set(_allowed_nodes(t, node_names) or node_names) for t in tasks}
+    total_bytes = sum(e[2] for e in tg_edges)
+    min_bw = min([e[2] for e in net_edges if e[0] != e[1]] or [LOCAL_SPEED])
+    big = forbidden_runtime(rt, total_bytes, min_bw)
+    table: Dict[Tuple[str, str], float] = {}
+    for i, t in enumerate(tasks):
+        for j, n in enumerate(node_names):
+            table[(t["name"], n)] = float(rt[i, j]) if n in allowed[t["name"]] else big
+    for i, t in enumerate(tasks):
+        node = task_graph.get_task(t["name"])
+        node.__dict__["cost"] = _Cost(float(costs[i]), t["name"], table)
+    for p, pn, sp in procs:
+        network.get_node(p).__dict__["speed"] = _Speed(sp, pn)
+
     return task_graph, network, node_names, rmse
 
 
@@ -390,7 +447,16 @@ def schedule_request(request: dict) -> dict:
         raise ValueError(f"unknown slots mode {mode!r}; use 'auto'")
     task_graph, network, node_names, rmse = build_saga_models(dag, cluster_state, slots)
 
-    sched: Schedule = scheduler.schedule(network, task_graph)
+    import constrained
+    constrained.current.allowed = {
+        t["name"]: {nn.name for nn in network.nodes if real_node(nn.name) in allowed}
+        for t in tasks
+        if (allowed := _allowed_nodes(t, node_names)) is not None
+    }
+    try:
+        sched: Schedule = scheduler.schedule(network, task_graph)
+    finally:
+        constrained.current.allowed = None
 
     # mapping: node -> [ScheduledTask]; invert, strip super nodes.
     placement: Dict[str, str] = {}
@@ -406,27 +472,15 @@ def schedule_request(request: dict) -> dict:
     if missing:
         raise RuntimeError(f"{algorithm} left tasks unassigned: {missing}")
 
-    # Constraint post-override (ncsim's pinning pattern), load-balanced:
-    # a violating task moves to the allowed node currently holding the
-    # fewest tasks (ties broken by fitted speed). Moving every violator
-    # to the single "best" allowed node packs constrained siblings onto
-    # one node and serializes parallel tiers — measured on the wpf
-    # benchmark as SAGA arms landing below even random placement.
-    node_speed = {real_node(nn.name): nn.speed for nn in network.nodes}
-    load = collections.Counter(placement.values())
-    overrides: List[dict] = []
+    # Verify, never repair: moving a task after scheduling would make the
+    # returned estimate describe a schedule that does not run.
+    violations = []
     for t in tasks:
         allowed = _allowed_nodes(t, node_names)
-        if allowed is None:
-            continue
-        if placement[t["name"]] not in allowed:
-            target = min(allowed, key=lambda n: (load[n], -node_speed[n]))
-            overrides.append(
-                {"task": t["name"], "from": placement[t["name"]], "to": target}
-            )
-            load[placement[t["name"]]] -= 1
-            load[target] += 1
-            placement[t["name"]] = target
+        if allowed is not None and placement[t["name"]] not in allowed:
+            violations.append(f"{t['name']} on {placement[t['name']]} (allowed {sorted(allowed)})")
+    if violations:
+        raise RuntimeError(f"{algorithm} violated placement constraints: {violations}")
 
     makespan = float(sched.makespan) if placement else 0.0
     assignments = [
@@ -446,7 +500,4 @@ def schedule_request(request: dict) -> dict:
     }
     if slots:
         result["slots"] = slots
-    if overrides:
-        result["constraintOverrides"] = overrides
-        logger.warning("constraint overrides applied: %s", overrides)
     return result

@@ -435,6 +435,9 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 	var assignMap map[string]nodeInfo
 	var predicted []predictedTaskEntry
 	var flows []predictedFlowEntry
+	// What actually placed this run, recorded in status.scheduling so a
+	// fallback is visible to anyone reading the run, not only in logs.
+	scheduling := map[string]any{"requested": schedulerName, "used": schedulerName}
 	switch schedulerName {
 	case "heft":
 		log.Printf("[odag-ctrl] using HEFT scheduler for %s (spreadEpsilon=%.2fs)", key, schedCfg.SpreadEpsilon)
@@ -491,8 +494,11 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 				log.Printf("[odag-ctrl] external scheduler %q failed for %s: %v — falling back to random placement",
 					schedulerName, key, err)
 				assignMap = assignTasks(tasks, nodeMap)
+				scheduling["used"] = "random"
+				scheduling["fallbackError"] = err.Error()
 			} else {
 				assignMap = am
+				scheduling["externalEstimatedMakespan"] = plan.EstMakespan
 			}
 			predicted, flows = computePredictedSchedule(tasks, assignMap, rtRes, dsRes, bwRes)
 			break
@@ -520,7 +526,7 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 		schedulePlanCache.Delete(key)
 	}
 
-	writePredictedSchedule(dynClient, namespace, odagName, predicted, flows)
+	writePredictedSchedule(dynClient, namespace, odagName, predicted, flows, scheduling)
 
 	log.Printf("[odag-ctrl] task placement for %s:", key)
 	for task, ni := range assignMap {

@@ -7,7 +7,7 @@ FROM python:3.12-slim
 RUN pip install --no-cache-dir "anrg-saga>=2.1.0"
 
 WORKDIR /app
-COPY bridge.py server.py /app/
+COPY bridge.py server.py constrained.py /app/
 
 EXPOSE 8090
 ENTRYPOINT ["python", "server.py", "--port", "8090"]

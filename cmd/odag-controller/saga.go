@@ -119,6 +119,8 @@ type schedulePlan struct {
 	Mode      string              // "" | "order" | "serial"
 	Order     map[string][]string // node -> tasks, nondecreasing start
 	Overrides int
+	// EstMakespan is the external scheduler's own makespan estimate.
+	EstMakespan float64
 }
 
 type sagaScheduleResponse struct {
@@ -308,6 +310,7 @@ func sagaAssignTasks(algorithm, baseURL string, options map[string]interface{}, 
 	if name == "" {
 		name = baseURL
 	}
+	plan.EstMakespan = out.EstimatedMakespan
 	log.Printf("[saga] %s placed %d tasks (makespan estimate %.1fs, "+
 		"cost-model fit RMSE %.3f, constraint overrides %d)",
 		name, len(assignMap), out.EstimatedMakespan, out.CostModelFitRMSE,
