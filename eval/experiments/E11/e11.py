@@ -33,19 +33,30 @@ sh, kubectl, NS, WAYLINE = e10.sh, e10.kubectl, e10.NS, e10.WAYLINE
 
 RES = os.environ.get("RES", os.path.expanduser("~/E11-results"))
 NODES = ["anrg-1", "anrg-3", "anrg-4", "anrg-5", "anrg-6", "anrg-7", "anrg-8", "anrg-9"]
-FULL = 3800000
-# Three clock classes, mixed across the old edge/compute groups.
-CAPS = {"anrg-1": FULL, "anrg-6": FULL, "anrg-7": FULL,
-        "anrg-3": 1900000, "anrg-5": 1900000, "anrg-8": 1900000,
-        "anrg-4": 900000, "anrg-9": 900000}
+FULL = 3800000      # hardware ceiling (single-core turbo); restored afterwards
+MIN_FREQ = 800000   # hardware floor; restored afterwards
+# Three clock classes, locked (floor = ceiling), mixed across the old
+# edge/compute groups. 3.0 GHz is the highest clock that holds with four
+# busy cores (the slots per node); an unlocked 3.8 GHz ceiling let the power
+# limit slow each task by up to 1.46x under load.
+CAPS = {"anrg-1": 3000000, "anrg-6": 3000000, "anrg-7": 3000000,
+        "anrg-3": 1500000, "anrg-5": 1500000, "anrg-8": 1500000,
+        "anrg-4": 800000, "anrg-9": 800000}
 
 
 # ─── clocks ──────────────────────────────────────────────────────────────────
 
-def set_cap(node, khz):
-    """Cap every core's scaling_max_freq on `node` (kHz). The sudo password is
-    read from the environment on both ends and never appears in argv."""
-    inner = (f"for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo {khz} > $f; done")
+def set_cap(node, khz, floor=None):
+    """Lock every core of `node` to `khz` (floor and ceiling both), or with
+    floor=MIN_FREQ restore the default range. A ceiling alone is not a lock:
+    below it the chip's power limit still moves the real clock with the
+    number of busy cores (see docs/limitations-and-future-work/cpu-clock-under-load.md).
+    The sudo password is read from the environment and never appears in argv."""
+    lo = khz if floor is None else floor
+    # Drop the floor first, so the kernel never sees a ceiling below the floor.
+    inner = ("for c in /sys/devices/system/cpu/cpu*/cpufreq; do "
+             f"echo {MIN_FREQ} > $c/scaling_min_freq; echo {khz} > $c/scaling_max_freq; "
+             f"echo {lo} > $c/scaling_min_freq; done")
     remote = (f"read -r P; echo \"$P\" | sudo -S sh -c {shlex.quote(inner)} 2>/dev/null; "
               "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq")
     r = subprocess.run(["sshpass", "-e", "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
@@ -58,9 +69,9 @@ def set_cap(node, khz):
     return int(got)
 
 
-def set_caps(caps):
+def set_caps(caps, floor=None):
     with ThreadPoolExecutor(len(caps)) as ex:
-        return dict(zip(caps, ex.map(lambda kv: set_cap(*kv), caps.items())))
+        return dict(zip(caps, ex.map(lambda kv: set_cap(kv[0], kv[1], floor), caps.items())))
 
 
 # ─── calibration ─────────────────────────────────────────────────────────────
@@ -178,7 +189,7 @@ def main(argv=None):
     ap.add_argument("--cpu", default="2")
     ap.add_argument("--ray-cpus", default=None, help="Ray num_cpus per task (default: --cpu); Ray needs whole numbers above 1")
     ap.add_argument("--enact", default="order")
-    ap.add_argument("--schedulers", nargs="+",
+    ap.add_argument("--schedulers", nargs="*",
                     default=["saga/heft", "saga/cpop", "saga/peft", "saga/minmin", "random"])
     ap.add_argument("--default-reps", type=int, default=1, help="ray-default samples per repetition")
     ap.add_argument("--modes", nargs="+", default=["cold"], help="cold (a pod per task) and/or warm (runner)")
@@ -256,7 +267,7 @@ def main(argv=None):
         finally:
             cm_restore(saved_cm)
             if not args.no_caps:
-                print("restored", set_caps({n: FULL for n in NODES}), flush=True)
+                print("restored", set_caps({n: FULL for n in NODES}, floor=MIN_FREQ), flush=True)
     print("results in", out)
 
 
