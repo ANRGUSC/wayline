@@ -85,3 +85,50 @@ four tasks per node on both runtimes. Makespan in seconds.
 - Warm matches or beats Ray at the same placement for built-in HEFT and
   MinMin; SAGA HEFT warm was 5.5 s behind Ray in this run.
 - Default Ray again ranged widely, 49.7 to 83.7 s.
+
+## After the bridge fix: exact runtimes and constraints (2026-09-27)
+
+`results/20260927T084123Z/`. Same setting as above, with the SAGA bridge
+now planning with exact per-(task, node) runtimes and honoring constraints
+while scheduling (no post-scheduling moves). Makespan in seconds.
+
+| scheduler | estimate | Wayline pods | Ray pinned | Wayline warm |
+|---|---|---|---|---|
+| SAGA HEFT | 40.1 | 54.3 | 48.9 | 48.8 |
+| SAGA PEFT | 40.1 | 56.2 | 47.6 | 48.6 |
+| SAGA MinMin | 40.1 | 57.1 | 51.4 | 49.4 |
+| built-in HEFT | 40.1 | 61.8 | 51.9 | 52.3 |
+| Ray default | | | 59.3, 106.1, 81.2 (mean 82.2) | |
+
+All four schedulers converge on almost the same placement (MinMin and
+built-in HEFT identical to SAGA HEFT, PEFT differs on two tasks off the
+critical path): with four slots per fast node, the fast nodes absorb nearly
+the whole DAG.
+
+### Where estimate and reality differ
+
+`critpath.py` walks the realized critical path back from the last task.
+SAGA HEFT, 8.7 s (warm) and 14.3 s (pods) over the estimate:
+
+| component on the critical path | warm | pods |
+|---|---|---|
+| compute over plan | +5.5 | +7.1 |
+| launch (parent sealed to task start) | 1.5 | 5.4 |
+| of which planned transfer | 0.3 | 0.3 |
+| output handoff and close | 1.5 | 1.6 |
+| input read | 0.2 | 0.2 |
+
+The compute excess is turbo. Calibration benchmarks one busy core; fast
+nodes (3.8 GHz cap) run slower as more tasks share them, on Wayline and
+Ray alike (actual / planned compute over all runs):
+
+| fast node, tasks at once | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|
+| actual / planned | 1.03 | 1.17 | 1.32 | 1.40 |
+
+Medium nodes (1.9 GHz cap, below the all-core clock) stay at 1.02 to 1.03.
+The remaining warm overhead is about 0.2 s launch and 0.25 s handoff per
+critical-path task; pods add about 0.65 s more launch per task.
+
+Fix for the model: calibrate each node with as many concurrent benchmark
+processes as it has slots, or cap fast nodes below the all-core clock.
