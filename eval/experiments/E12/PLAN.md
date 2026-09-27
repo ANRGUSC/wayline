@@ -66,3 +66,22 @@ starting:
   at 50 ms and the controller's readiness checks), not execution.
 - One repetition only; the Ray-default sample is a single draw from a
   high-variance distribution (see E11).
+
+## With slots and free-capacity planning (2026-09-27)
+
+`results/20260927T081549Z/`: `slots: auto`, Wayline tasks 1.8 CPU, Ray 2,
+four tasks per node on both runtimes. Makespan in seconds.
+
+| scheduler | estimate | Wayline pods | Ray pinned | Wayline warm |
+|---|---|---|---|---|
+| built-in HEFT | 40.0 | 54.5 | 47.4 | 47.4 |
+| SAGA MinMin | 51.5 | 62.4 | 57.6 | 56.6 |
+| SAGA HEFT | 47.3 | 64.4 | 57.6 | 63.1 |
+| Ray default | | | 83.7, 49.7, 50.5 | |
+
+- Best overall: built-in HEFT, warm or pinned onto Ray, at 47.4 s. The two
+  values match to the millisecond by coincidence (independent runs 48 s
+  apart; the controller's own figure for the warm run is 47.05 s).
+- Warm matches or beats Ray at the same placement for built-in HEFT and
+  MinMin; SAGA HEFT warm was 5.5 s behind Ray in this run.
+- Default Ray again ranged widely, 49.7 to 83.7 s.
