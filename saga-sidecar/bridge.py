@@ -109,8 +109,14 @@ def _builtin_registry() -> Dict[str, "Scheduler"]:
         WBAScheduler,
     )
 
+    from saga.schedulers.contention import ContentionHeftScheduler, RoutingHeftScheduler
+
     return {
         "heft": HeftScheduler(),
+        # One transfer at a time per node interface; routing also relays via
+        # intermediate nodes (SAGA feature/contention-aware, feature/routing-aware).
+        "contention_heft": ContentionHeftScheduler(),
+        "routing_heft": RoutingHeftScheduler(),
         "cpop": CpopScheduler(),
         "peft": PEFTScheduler(),
         "minmin": MinMinScheduler(),

@@ -1,7 +1,8 @@
 # SAGA scheduler sidecar for the Wayline odag-controller.
 #
 # The bridge needs SAGA with capacity, demand, exact per-node runtimes and
-# placement constraints in its core model (branch feature/capacity of
+# placement constraints in its core model, plus contention-/routing-aware HEFT
+# (branch feature/capacity of
 # ANRGUSC/saga, not yet on PyPI). Build a wheel of that branch into
 # saga-sidecar/wheels/ first:
 #   (cd <saga checkout on feature/capacity> && uv build --wheel -o <wayline>/saga-sidecar/wheels)
