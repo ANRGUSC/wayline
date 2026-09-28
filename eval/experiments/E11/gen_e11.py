@@ -50,9 +50,12 @@ def dag(seed=11, nodes=(), layers=(1, 5, 5, 5, 3, 1), frac=0.8,
     return {"seed": seed, "nodes": list(nodes), "frac": frac, "order": names, "tasks": tasks}
 
 
-def template(name, scheduler, d, rates, cpu=None, enact="order", runner=None, image=REG):
+def template(name, scheduler, d, rates, cpu=None, enact="order", runner=None, image=REG,
+             warm_tasks=None):
     """rates: {node: Mhash/s}; the full-clock reference rate is the max.
-    cpu: request for every task, or None for each task's own "cpu"."""
+    cpu: request for every task, or None for each task's own "cpu".
+    runner: run tasks warm on this runner; warm_tasks limits that to a subset
+    (the rest run as pods)."""
     ref = max(rates.values())
     out = [f"""apiVersion: wl.io/v1
 kind: ODAGTemplate
@@ -83,7 +86,7 @@ spec:
         deps = sorted({p for p, _ in s["inputs"]})
         L = [f"  - name: {t}", f"    image: {image}", "    command: [python, task.py]",
              f"    dependencies: [{', '.join(deps)}]"]
-        if runner:
+        if runner and (warm_tasks is None or t in warm_tasks):
             L.append(f"    runner: {runner}")          # warm: a call on the node's runner, no pod
         if s["inputs"]:
             L.append("    inputs:")

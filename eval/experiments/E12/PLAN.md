@@ -132,3 +132,44 @@ critical-path task; pods add about 0.65 s more launch per task.
 
 Fix for the model: calibrate each node with as many concurrent benchmark
 processes as it has slots, or cap fast nodes below the all-core clock.
+
+## Capacity-aware scheduling, mixed CPU requests, locked clocks (2026-09-28)
+
+`results/20260928T003132Z/`. SAGA plans with node capacity (free CPU) and
+each task's own CPU request (seeded 1, 2 or 3 cores; DAG unchanged), exact
+runtimes and constraints natively (SAGA feature/capacity). Clocks locked at
+2.4 / 1.2 / 0.8 GHz. Ray gets the same CPU per task and 7 CPUs per worker.
+
+| scheduler | estimate | Wayline pods | Ray pinned | Wayline warm |
+|---|---|---|---|---|
+| SAGA HEFT | 40.0 | 51.0 | 44.6 | 44.1 |
+| SAGA PEFT | 40.0 | 50.7 | 44.3 | 43.5 |
+| SAGA MinMin | 40.0 | 49.8 | 45.1 | 43.5 |
+| built-in HEFT | 40.0 | 54.8 | 43.8 | 44.3 |
+| Ray default | | | 133.7, 64.0, 102.9 (mean 100.2) | |
+
+- Warm Wayline is 3.5 to 4.3 s over the estimate (was 8.7 s with an unlocked
+  clock) and matches or beats Ray at the same placement.
+- Aware placement on Ray averages 2.3x faster than Ray's default.
+- `contention.py`: peak CPU requested by tasks actually computing on one node
+  is 7 (plan 7.4, 8 cores) in every arm; compute over plan averages 1.02 to
+  1.03 warm and 1.05 to 1.09 with pods (max 1.25; other pods starting on the
+  node take CPU nobody requests).
+
+## Pods and warm tasks in one run (2026-09-28)
+
+`results/20260928T004715Z/`. Built-in HEFT, the same placement run three
+ways; "mixed" runs every other task warm and the rest as pods.
+
+| arm | makespan | peak CPU on a node | compute / plan (mean, max) |
+|---|---|---|---|
+| pods | 51.6 | 6 | 1.09, 1.23 |
+| warm | 44.1 | 7 | 1.03, 1.06 |
+| mixed | 47.3 | 6 | 1.05, 1.28 |
+
+Mixed runs correctly and lands between the two. Open: pods are admitted by
+the kubelet (pod requests only) and warm calls by the runner (its own
+budget), so neither sees the other's tasks. Nothing overbooked here because
+execution followed the plan closely, but a node could run more than its
+capacity when tasks drift from plan. A controller-side capacity gate over
+both kinds of task would close it.

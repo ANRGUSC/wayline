@@ -195,7 +195,8 @@ def main(argv=None):
     ap.add_argument("--schedulers", nargs="*",
                     default=["saga/heft", "saga/cpop", "saga/peft", "saga/minmin", "random"])
     ap.add_argument("--default-reps", type=int, default=1, help="ray-default samples per repetition")
-    ap.add_argument("--modes", nargs="+", default=["cold"], help="cold (a pod per task) and/or warm (runner)")
+    ap.add_argument("--modes", nargs="+", default=["cold"],
+                    help="cold (a pod per task), warm (runner) and/or mixed (every other task warm)")
     ap.add_argument("--runner", default="e12", help="runner name for warm mode")
     ap.add_argument("--image", default=gen.REG)
     ap.add_argument("--no-caps", action="store_true", help="leave clocks uncapped (homogeneous control)")
@@ -239,13 +240,16 @@ def main(argv=None):
             for sched in args.schedulers:
                 short = sched.split("/")[-1].lower()
                 for mode in args.modes:
-                    warm = mode == "warm"
-                    tmpl = f"e11-{short}" + ("-warm" if warm else "")
+                    warm = mode in ("warm", "mixed")
+                    tmpl = f"e11-{short}" + ("" if mode == "cold" else f"-{mode}")
+                    warm_set = set(d["order"][1::2]) if mode == "mixed" else None
                     kubectl("apply -f -", stdin=gen.template(tmpl, sched, d, rates, None, args.enact,
                                                              runner=args.runner if warm else None,
-                                                             image=args.image))
+                                                             image=args.image, warm_tasks=warm_set))
                     w = wayline_run(tmpl, sched); w["rep"] = rep; w["mode"] = mode
-                    w["arm"] = ("wayline-warm:" if warm else "wayline:") + sched
+                    w["arm"] = {"cold": "wayline:", "warm": "wayline-warm:", "mixed": "wayline-mixed:"}[mode] + sched
+                    if warm_set is not None:
+                        w["warm_tasks"] = sorted(warm_set)
                     results.append(w); dump()
                     sc = w.get("scheduling") or {}
                     if sc.get("used") != sc.get("requested"):
