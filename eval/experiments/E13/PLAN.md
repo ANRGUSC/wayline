@@ -102,3 +102,41 @@ full rate; here up to a gigabyte crosses a few slow links at once. Next:
 the same runs with `saga/contention_heft` (one transfer at a time per node
 interface, merged into SAGA 2.2.0.dev1 and now deployed), and a look at the
 agent's push path for the warm-vs-Ray gap on transfer-heavy runs.
+
+## Contention-aware HEFT (2026-09-28)
+
+`saga/contention_heft` (one transfer at a time per node interface; SAGA
+2.2.0.dev1) against plain `saga/heft`, same run, same calibration and links.
+"SAGA estimate" is the scheduler's own makespan estimate.
+
+Network only (`results/20260928T094912Z/`):
+
+| scheduler | SAGA estimate | Wayline pods | Ray pinned | Wayline warm |
+|---|---|---|---|---|
+| contention HEFT | 45.8 | 62.8 | 57.1 | 63.6 |
+| SAGA HEFT | 42.8 | 69.9 | 57.0 | 67.1 |
+| Ray default | | | 62.9, 54.0, 83.6 (mean 66.8) | |
+
+CPU and network (`results/20260928T100033Z/`):
+
+| scheduler | SAGA estimate | Wayline pods | Ray pinned | Wayline warm |
+|---|---|---|---|---|
+| contention HEFT | 49.3 | 64.1 | 52.1 | 65.0 |
+| SAGA HEFT | 46.3 | 72.8 | 62.8 | 63.8 |
+| Ray default | | | 137.8, 118.3, 60.8 (mean 105.6) | |
+
+- With CPU and network heterogeneity, contention-aware HEFT's placement is
+  17% faster on Ray (52.1 vs 62.8 s) and its estimate is 2.8 s under Ray,
+  against 16.5 s for plain HEFT. It spreads inbound data over three nodes
+  (0.98 GB) instead of pushing 0.68 GB into anrg-6's B/4 link.
+- Network only, both place equally well on Ray (57 s); the contention
+  estimate is closer (11.3 s under, against 14.2 s).
+- Plain SAGA HEFT's network-only placement changed since the previous run
+  (it now uses anrg-9's B/4 link; Ray pinned 57.0 s, was 49.1 s): with every
+  CPU equal many candidates tie, and the merged determinism fix changed how
+  ties break. Single runs; tie-heavy settings need repetitions.
+- On these transfer-heavy runs warm Wayline trails Ray at the same placement
+  by 1 to 13 s and is no faster than Wayline pods (62.8/64.1 pods vs
+  63.6/65.0 warm for contention HEFT): moving data, not starting tasks, is
+  Wayline's bottleneck here. Next: the agent's push path (serial per source,
+  a cap on concurrent pushes per node) against Ray's parallel pulls.
