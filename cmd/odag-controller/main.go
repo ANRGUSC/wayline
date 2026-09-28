@@ -38,6 +38,7 @@ const (
 	labelODAGName  = "wl-odag"
 	labelTaskName  = "wl-task"
 	dataOutputPath = "/data/wl-outputs"
+	defaultTaskCPU = "1" // CPU request of a task that states none (see extractTasks)
 	dataAgentPort  = 8082
 )
 
@@ -481,7 +482,7 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 				url, algo = schedulerName, ""
 			}
 			log.Printf("[odag-ctrl] using external scheduler %q for %s (endpoint %s)", schedulerName, key, url)
-			am, plan, err := sagaAssignTasks(algo, url, schedCfg.Options, schedCfg.Slots, tasks, nodeMap, rtRes, dsRes, bwRes)
+			am, plan, err := sagaAssignTasks(algo, url, schedCfg.Options, tasks, nodeMap, rtRes, dsRes, bwRes)
 			plan.Mode = schedCfg.EnactOrder
 			sagaPlan = plan
 			if err != nil {
@@ -1086,6 +1087,11 @@ func extractTasks(obj *unstructured.Unstructured) []taskSpec {
 
 		constraints, _, _ := unstructured.NestedStringSlice(t, "constraints", "nodeNames")
 		cpu, _, _ := unstructured.NestedString(t, "resources", "cpu")
+		if cpu == "" {
+			// Every task has a CPU demand: the scheduler needs one to plan
+			// concurrency on a node, and the pod gets the same request.
+			cpu = defaultTaskCPU
+		}
 		mem, _, _ := unstructured.NestedString(t, "resources", "memory")
 
 		var userEnv []corev1.EnvVar

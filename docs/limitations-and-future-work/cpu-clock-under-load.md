@@ -45,21 +45,28 @@ planned load. On anrg-1:
 | 3.0 GHz | 2.21 | 2.19 | 1.40 |
 | 2.0 GHz | 1.47 | 1.37 | 1.42 |
 
-3.0 GHz is flat up to four copies (the E11/E12 slot count); with all eight
-cores busy only about 2.0 GHz holds.
+3.0 GHz is flat up to four copies; with all eight cores busy it is not.
+The highest lock that holds from one busy core to all eight:
 
-Done: `eval/experiments/E11/e11.py` now locks floor and ceiling together
-(fast 3.0, medium 1.5, slow 0.8 GHz) and restores 0.8 to 3.8 GHz afterward.
-Experiments before 2026-09-27 used ceilings only.
+| lock | 1 copy | 4 copies | 7 copies | 8 copies |
+|---|---|---|---|---|
+| 2.2 GHz | 1.59 | 1.55 | 1.58 | 1.56 |
+| 2.4 GHz | 1.76 | 1.71 | 1.75 | 1.68 |
+| 2.6 GHz | 1.92 | 1.87 | 1.87 | 1.75 |
+
+Done: `eval/experiments/E11/e11.py` locks floor and ceiling together at
+fast 2.4, medium 1.2, slow 0.8 GHz, so a task's runtime is within 4% however
+many tasks share its node, and restores 0.8 to 3.8 GHz afterward.
+Experiments before 2026-09-28 used ceilings only (3.8 GHz for fast nodes).
 
 ## Future work
 
 - **Calibrate under the planned load.** Benchmark each node with as many
   concurrent copies as it has slots, so the cost model matches execution
   even without a lock. On a production cluster clocks cannot be locked.
-- **Model speed as a function of co-located load.** Slot-aware scheduling
-  assumes a slot's speed is independent of its neighbours; on these nodes
-  it is not. A scheduler could use rate(node, busy slots) instead of a
+- **Model speed as a function of co-located load.** Capacity-aware
+  scheduling assumes a task's speed is independent of what else shares its
+  node; on these nodes that holds only with a lock at or below 2.4 GHz. A scheduler could use rate(node, busy slots) instead of a
   single speed.
 - **Profiler.** Wayline's profiler keeps one smoothed runtime per (task,
   node). It would average over whatever co-location occurred, which moves

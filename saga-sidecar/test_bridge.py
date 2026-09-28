@@ -239,12 +239,14 @@ def test_bare_unknown_name_suggests_dotted_path():
     assert "dotted path" in str(e.value)
 
 
-# --- slots=auto -------------------------------------------------------------
+# --- capacity: CPU requests share a node ------------------------------------
 
-def _wide(n_tasks=8, cpu=2000):
+def _wide(n_tasks=4, cpu=2000):
     tasks = [{"name": "src", "dependencies": [], "runtime": 1, "dataSize": "0", "cpuMillis": cpu}]
     tasks += [{"name": f"w{i}", "dependencies": ["src"], "runtime": 10, "dataSize": "0",
                "cpuMillis": cpu} for i in range(n_tasks)]
+    for t in tasks:
+        t["runtimeProfile"] = {"fast": t["runtime"], "slow": t["runtime"] * 4}
     return tasks
 
 
@@ -253,54 +255,39 @@ def _nodes_fast_slow(cpu=8000):
             {"name": "slow", "ready": True, "cpuMillis": cpu}]
 
 
-def _fast_slow_profile(tasks):
-    for t in tasks:
-        t["runtimeProfile"] = {"fast": t["runtime"], "slow": t["runtime"] * 4}
-    return tasks
+def test_tasks_share_a_fast_node_within_its_cpu():
+    res = bridge.schedule_request(_request(tasks=_wide(4, cpu=2000), nodes=_nodes_fast_slow(8000)))
+    assert res["capacityModel"] == "cpu"
+    assert all(a["node"] == "fast" for a in res["assignments"])
+    assert res["estimatedMakespan"] == pytest.approx(11.0)   # 1 s source + four 10 s side by side
 
 
-def test_slots_let_a_fast_node_run_tasks_concurrently():
-    tasks = _fast_slow_profile(_wide(n_tasks=4))
-    base = bridge.schedule_request(_request(tasks=tasks, nodes=_nodes_fast_slow()))
-    req = _request(tasks=tasks, nodes=_nodes_fast_slow())
-    req["slots"] = "auto"
-    slotted = bridge.schedule_request(req)
-    assert slotted["slots"] == {"fast": 4, "slow": 4}
-    # Four 10 s workers fit side by side on the fast node: ~11 s, not ~41 s.
-    assert all(a["node"] == "fast" for a in slotted["assignments"])
-    assert slotted["estimatedMakespan"] < 15
-    assert base["estimatedMakespan"] > slotted["estimatedMakespan"]
+def test_mixed_cpu_requests_are_planned_by_capacity():
+    tasks = _wide(3, cpu=1000)
+    tasks[1]["cpuMillis"], tasks[2]["cpuMillis"], tasks[3]["cpuMillis"] = 3000, 2000, 2000
+    res = bridge.schedule_request(_request(tasks=tasks, nodes=_nodes_fast_slow(4000)))
+    fast = [a for a in res["assignments"] if a["node"] == "fast" and a["task"] != "src"]
+    # At no instant may the fast node's running requests exceed 4 cores.
+    cpu = {t["name"]: t["cpuMillis"] for t in tasks}
+    for a in fast:
+        running = sum(cpu[b["task"]] for b in fast
+                      if b["estimatedStart"] <= a["estimatedStart"] < b["estimatedFinish"])
+        assert running <= 4000
 
 
-def test_slots_placements_are_real_node_names():
-    req = _request(tasks=_fast_slow_profile(_wide()), nodes=_nodes_fast_slow())
-    req["slots"] = "auto"
-    for a in bridge.schedule_request(req)["assignments"]:
-        assert a["node"] in {"fast", "slow"}
+def test_classic_model_without_node_cpu():
+    tasks = _wide(4)
+    res = bridge.schedule_request(_request(tasks=tasks, nodes=[{"name": "fast"}, {"name": "slow"}]))
+    assert res["capacityModel"] == "classic"
+    fast = sorted((a["estimatedStart"], a["estimatedFinish"]) for a in res["assignments"] if a["node"] == "fast")
+    assert all(x[1] <= y[0] + 1e-9 for x, y in zip(fast, fast[1:]))   # one at a time
 
 
-def test_slots_count_is_capacity_over_demand():
-    tasks = _wide(cpu=3000)
-    assert bridge.slot_counts(tasks, _nodes_fast_slow(cpu=8000)) == {"fast": 2, "slow": 2}
-    assert bridge.slot_counts(tasks, [{"name": "tiny", "cpuMillis": 1000}]) == {"tiny": 1}
-
-
-def test_slots_reject_mixed_cpu_requests():
-    tasks = _wide()
-    tasks[1]["cpuMillis"] = 4000
-    req = _request(tasks=tasks, nodes=_nodes_fast_slow())
-    req["slots"] = "auto"
-    with pytest.raises(ValueError, match="same nonzero CPU"):
-        bridge.schedule_request(req)
-
-
-def test_slots_respect_constraints_after_folding():
-    tasks = _fast_slow_profile(_wide(n_tasks=4))
-    tasks[2]["constraints"] = {"nodeNames": ["slow"]}
-    req = _request(tasks=tasks, nodes=_nodes_fast_slow())
-    req["slots"] = "auto"
-    res = bridge.schedule_request(req)
-    assert {a["task"]: a["node"] for a in res["assignments"]}[tasks[2]["name"]] == "slow"
+def test_task_without_cpu_request_is_rejected_when_nodes_report_cpu():
+    tasks = _wide(2)
+    tasks[1]["cpuMillis"] = 0
+    with pytest.raises(ValueError, match="no CPU request"):
+        bridge.schedule_request(_request(tasks=tasks, nodes=_nodes_fast_slow()))
 
 
 # --- exact runtimes and constraints for every scheduler --------------------
@@ -324,14 +311,11 @@ def _constrained_instance(seed):
     return tasks, [{"name": n, "cpuMillis": 4000} for n in nodes]
 
 
-@pytest.mark.parametrize("slots", ["", "auto"])
 @pytest.mark.parametrize("algorithm", sorted(bridge.available_algorithms()))
-def test_every_scheduler_honors_constraints_and_true_runtimes(algorithm, slots):
+def test_every_scheduler_honors_constraints_and_true_runtimes(algorithm):
     for seed in range(3):
         tasks, nodes = _constrained_instance(seed)
-        req = _request(algorithm=algorithm, tasks=tasks, nodes=nodes)
-        req["slots"] = slots
-        res = bridge.schedule_request(req)
+        res = bridge.schedule_request(_request(algorithm=algorithm, tasks=tasks, nodes=nodes))
         spec = {t["name"]: t for t in tasks}
         for a in res["assignments"]:
             t = spec[a["task"]]
@@ -348,5 +332,8 @@ def test_scheduler_that_ignores_constraints_fails_loudly():
     req = _request(algorithm="mysched.PinFirstNodeScheduler", tasks=tasks, nodes=nodes)
     import sys, pathlib
     sys.path.insert(0, str(pathlib.Path(__file__).parent / "testdata"))
-    with pytest.raises(RuntimeError, match="violated placement constraints"):
+    # Stopped by SAGA itself when the task is inserted, or by the bridge's
+    # final check; either way the request fails instead of being repaired.
+    from saga import ConstraintViolation
+    with pytest.raises((ConstraintViolation, RuntimeError)):
         bridge.schedule_request(req)

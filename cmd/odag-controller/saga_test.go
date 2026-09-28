@@ -74,7 +74,7 @@ func TestSagaHeft_Diamond_QualityParity(t *testing.T) {
 	builtin := heftAssignTasks(tasks, nodes, rtRes, dsRes, bwRes, heftOptions{})
 	builtinMS := predictedMakespan(tasks, builtin.assignMap, rtRes, dsRes, bwRes)
 
-	sagaMap, _, err := sagaAssignTasks("heft", sagaSchedulerURL(), nil, "", tasks, nodes, rtRes, dsRes, bwRes)
+	sagaMap, _, err := sagaAssignTasks("heft", sagaSchedulerURL(), nil, tasks, nodes, rtRes, dsRes, bwRes)
 	if err != nil {
 		t.Fatalf("sagaAssignTasks: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestSaga_ConstraintsRespected(t *testing.T) {
 	tasks[0].Constraints = []string{"n3"} // pin A to the slow node
 	nodes := makeNodes("n1", "n2", "n3")
 
-	sagaMap, _, err := sagaAssignTasks("heft", sagaSchedulerURL(), nil, "", tasks, nodes, separableRT(), constDS(1_000_000), constBW(100e6))
+	sagaMap, _, err := sagaAssignTasks("heft", sagaSchedulerURL(), nil, tasks, nodes, separableRT(), constDS(1_000_000), constBW(100e6))
 	if err != nil {
 		t.Fatalf("sagaAssignTasks: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestSaga_MultipleAlgorithms(t *testing.T) {
 	for _, algo := range []string{"heft", "cpop", "peft", "minmin", "maxmin", "sufferage"} {
 		algo := algo
 		t.Run(algo, func(t *testing.T) {
-			m, _, err := sagaAssignTasks(algo, sagaSchedulerURL(), nil, "", tasks, nodes, rtRes, dsRes, bwRes)
+			m, _, err := sagaAssignTasks(algo, sagaSchedulerURL(), nil, tasks, nodes, rtRes, dsRes, bwRes)
 			if err != nil {
 				t.Fatalf("%s: %v", algo, err)
 			}
@@ -139,7 +139,7 @@ func TestSaga_MultipleAlgorithms(t *testing.T) {
 
 func TestSaga_UnknownAlgorithmFallsThroughAsError(t *testing.T) {
 	requireSidecar(t)
-	_, _, err := sagaAssignTasks("not-a-real-algorithm", sagaSchedulerURL(), nil, "", diamondTasks(), makeNodes("n1", "n2"),
+	_, _, err := sagaAssignTasks("not-a-real-algorithm", sagaSchedulerURL(), nil, diamondTasks(), makeNodes("n1", "n2"),
 		nil, nil, constBW(100e6))
 	if err == nil {
 		t.Fatal("expected error for unknown algorithm")
@@ -175,7 +175,7 @@ func TestSaga_ExternalSchedulerByDottedPathOverExplicitURL(t *testing.T) {
 	nodes := makeNodes("n1", "n2", "n3")
 
 	// A class that exists in no registry: it must be imported by name.
-	m, _, err := sagaAssignTasks("mysched.PinFirstNodeScheduler", url, nil, "",
+	m, _, err := sagaAssignTasks("mysched.PinFirstNodeScheduler", url, nil,
 		tasks, nodes, separableRT(), constDS(1_000_000), constBW(100e6))
 	if err != nil {
 		t.Skipf("sidecar cannot import the test scheduler (start it with "+
@@ -201,7 +201,7 @@ func TestSaga_ConstructorOptionsReachTheScheduler(t *testing.T) {
 
 	// which=2 selects the third node alphabetically.
 	m, _, err := sagaAssignTasks("mysched.ParamScheduler", url,
-		map[string]interface{}{"which": 2}, "",
+		map[string]interface{}{"which": 2},
 		tasks, nodes, separableRT(), constDS(1_000_000), constBW(100e6))
 	if err != nil {
 		t.Skipf("sidecar cannot import the test scheduler: %v", err)

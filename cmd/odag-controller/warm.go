@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -161,6 +162,8 @@ func invokeWarm(dynClient dynamic.Interface, client *kubernetes.Clientset, names
 	vars := resolveEnv(env, ni.name, ni.ip)
 	vars["WL_RUNNER"] = task.Runner
 	vars["WL_FUNCTION"] = fn
+	// The runner admits calls by CPU, like the kubelet admits pods by request.
+	vars["WL_CPU_MILLIS"] = strconv.FormatInt(parseTaskCPUMillis(task.CPU), 10)
 	body, _ := json.Marshal(map[string]interface{}{
 		"odag": odagName, "task": task.Name, "function": fn, "env": vars,
 	})

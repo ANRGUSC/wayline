@@ -28,7 +28,13 @@ user's modules are imported; the zygote forks one child per invocation,
 with the invocation's environment applied to os.environ. Children start
 in milliseconds with every import already done, run in parallel on
 separate cores (no GIL sharing), and a crash kills only that invocation.
-At most `slots` children run at once; the rest queue in arrival order.
+
+Admission is by CPU, as the kubelet admits pods: an invocation declares its
+CPU request (WL_CPU_MILLIS, set by the controller from the task's request)
+and starts once it fits beside the running ones within `cpus`. Queued
+invocations are considered in arrival order and any that fits starts, so a
+small task is not held behind a large one the scheduler planned to wait.
+`slots` optionally caps the number running as well.
 
 HTTP API (port 8090):
     POST /invoke                     {odag, task, function, env} -> 202, 409 if seen
@@ -116,10 +122,17 @@ def _run_child(fname: str, env: dict) -> None:
 
 # ─── zygote ──────────────────────────────────────────────────────────────────
 
-def _zygote(req_fd: int, ev_fd: int, slots: int) -> None:
+def _demand(inv: dict) -> float:
+    try:
+        return max(float(inv["env"].get("WL_CPU_MILLIS", "1000")) / 1000.0, 0.0)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _zygote(req_fd: int, ev_fd: int, slots: int, cpus: float) -> None:
     """Single-threaded: reads invocations, forks children, reports exits."""
     queue: deque = deque()
-    running: dict = {}
+    running: dict = {}            # pid -> (key, demand)
     buf = b""
 
     def emit(obj):
@@ -142,24 +155,32 @@ def _zygote(req_fd: int, ev_fd: int, slots: int) -> None:
                 break
             if pid == 0:
                 break
-            key = running.pop(pid, None)
-            if key:
-                emit({"key": key, "event": "exit", "code": os.waitstatus_to_exitcode(status)})
-        while queue and len(running) < slots:   # start
-            inv = queue.popleft()
+            entry = running.pop(pid, None)
+            if entry:
+                emit({"key": entry[0], "event": "exit", "code": os.waitstatus_to_exitcode(status)})
+        used = sum(d for _, d in running.values())
+        for inv in list(queue):                 # start whatever fits, in arrival order
+            if len(running) >= slots:
+                break
+            d = _demand(inv)
+            # A call larger than the whole runner still runs, alone.
+            if used + d > cpus + 1e-9 and running:
+                continue
+            queue.remove(inv)
             pid = os.fork()
             if pid == 0:
                 os.close(req_fd)
                 os.close(ev_fd)
                 _run_child(inv["function"], inv["env"])
-            running[pid] = inv["key"]
+            running[pid] = (inv["key"], d)
+            used += d
             emit({"key": inv["key"], "event": "start", "pid": pid, "t": time.time()})
 
 
 # ─── server ──────────────────────────────────────────────────────────────────
 
 class _Runner:
-    def __init__(self, slots: int):
+    def __init__(self, slots: int, cpus: float):
         self.lock = threading.Lock()
         self.table: dict = {}                   # key -> {state, exit, env, t}
         req_r, self.req_w = os.pipe()
@@ -168,7 +189,7 @@ class _Runner:
         if pid == 0:
             os.close(self.req_w)
             os.close(ev_r)
-            _zygote(req_r, ev_w, slots)
+            _zygote(req_r, ev_w, slots, cpus)
         os.close(req_r)
         os.close(ev_w)
         self.ev = os.fdopen(ev_r, "rb")
@@ -214,9 +235,12 @@ class _Runner:
             return None if rec is None else {"state": rec["state"], "exit": rec["exit"]}
 
 
-def serve(port: int = 8090, slots: int | None = None) -> None:
-    """Serve registered functions (and the --script, if any) forever."""
-    runner = _Runner(slots or os.cpu_count() or 1)
+def serve(port: int = 8090, slots: int | None = None, cpus: float | None = None) -> None:
+    """Serve registered functions (and the --script, if any) forever.
+
+    cpus: CPU the runner admits calls into (default: the machine's cores);
+    slots: optional cap on the number of calls running at once."""
+    runner = _Runner(slots or 1_000_000, cpus or float(os.cpu_count() or 1))
 
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -266,14 +290,17 @@ def main(argv=None) -> None:
     ap.add_argument("--module", action="append", default=[], help="import to register @wl.function bodies")
     ap.add_argument("--preload", default="", help="comma-separated modules to import before forking")
     ap.add_argument("--port", type=int, default=int(os.environ.get("WL_RUNNER_PORT", "8090")))
-    ap.add_argument("--slots", type=int, default=int(os.environ.get("WL_RUNNER_SLOTS", "0")) or None)
+    ap.add_argument("--slots", type=int, default=int(os.environ.get("WL_RUNNER_SLOTS", "0")) or None,
+                    help="optional cap on calls running at once")
+    ap.add_argument("--cpus", type=float, default=float(os.environ.get("WL_RUNNER_CPUS", "0")) or None,
+                    help="CPU to admit calls into by their requests (default: all cores)")
     a = ap.parse_args(argv)
     for m in [m for m in a.preload.split(",") if m] + a.module:
         importlib.import_module(m)
     import wl.api  # noqa: F401  (warm the SDK itself)
     if a.script:
         _SCRIPT = os.path.abspath(a.script)
-    serve(a.port, a.slots)
+    serve(a.port, a.slots, a.cpus)
 
 
 if __name__ == "__main__":

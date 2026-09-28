@@ -42,7 +42,7 @@ def main():
     ap.add_argument("--rates", required=True)
     ap.add_argument("--mode", choices=["default", "plan"], required=True)
     ap.add_argument("--plan")
-    ap.add_argument("--cpus", type=float, default=2)
+    ap.add_argument("--cpus", type=float, default=None, help="override every task's own cpu")
     args = ap.parse_args()
 
     d = json.load(open(args.dag))
@@ -66,7 +66,7 @@ def main():
     t0 = time.time()
     for t in order:
         s = T[t]
-        opts = {"num_returns": 1 + len(s["outputs"]), "num_cpus": args.cpus}
+        opts = {"num_returns": 1 + len(s["outputs"]), "num_cpus": args.cpus or s.get("cpu", 2)}
         if args.mode == "plan":
             opts["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
                 node_id=node_id[plan["placement"][t]], soft=False)

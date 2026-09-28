@@ -277,17 +277,33 @@ wl.serve()
 or serve an existing task script unchanged:
 
 ```bash
-python -m wl.runner --script task.py --preload numpy --slots 4
+python -m wl.runner --script task.py --preload numpy --cpus 7.4
 ```
 
 The runner forks a zygote once all imports are done. The zygote forks one
 child per invocation, so a call starts in milliseconds, CPU-bound calls run
-in parallel, and a crash fails only that task. `--slots` bounds concurrent
-calls per node; the rest queue. A DaemonSet is the usual way to run one per
-node; see `eval/experiments/E12/runner.yml`.
+in parallel, and a crash fails only that task. Calls are admitted by their
+CPU requests, as the kubelet admits pods: a call starts once its request
+fits beside the running ones within `--cpus`, and the rest queue. A
+DaemonSet is the usual way to run one per node; see
+`eval/experiments/E12/runner.yml`.
 
-Limits today: the runner's resources are shared by its calls (no per-task
-CPU request), and a task's `command` is ignored in warm mode.
+Limits today: a task's `command` is ignored in warm mode.
+
+---
+
+## CPU requests and concurrency
+
+Every task has a CPU request: its own `resources.cpu`, else the template's
+`defaults.resources.cpu`, else 1 CPU. The pod requests exactly that, and
+schedulers plan with it: a node's capacity is its free CPU (allocatable
+minus what non-Wayline pods request), and tasks share a node while their
+requests fit. Wayline's built-in `heft` and every SAGA scheduler plan this
+way, so a 1-CPU task and a 3-CPU task can run side by side on a 4-CPU node,
+and a schedule's times assume they do.
+
+That keeps each task's runtime known only if a node runs as fast with many
+tasks as with one. See `docs/limitations-and-future-work/cpu-clock-under-load.md`.
 
 ---
 

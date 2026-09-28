@@ -12,16 +12,12 @@ only the placement and discards SAGA's predicted times.
 
 Model-conversion rules (each guards a known SAGA trap):
 
-  * Cost model. SAGA's schedulers compute a task's runtime on a node as
-    task.cost / node.speed, a separable model that cannot represent an
-    arbitrary per-(task, node) runtime matrix. Every scheduler goes through
-    that one division, so the bridge makes it exact: each task's cost and
-    each node's speed are float subclasses carrying their names, and the
-    division returns the true runtime from Wayline's matrix. Their plain
-    float values are the best rank-1 fit (log space), used wherever a
-    scheduler reads a cost or speed on its own (ranking heuristics, sums).
-    "costModelFitRMSE" reports that fit's log-space residual; it no longer
-    affects the runtimes any scheduler plans with.
+  * Runtimes. Wayline sends a per-(task, node) runtime matrix. It goes to
+    SAGA as each task's exact per-node runtimes (TaskGraphNode.runtimes),
+    so every scheduler plans with the true runtime on every node, separable
+    or not. Each task's cost and each node's speed are also set to the
+    best rank-1 fit in log space, used only where a heuristic reads a cost
+    or speed on its own; "costModelFitRMSE" reports that fit's residual.
 
   * Network completeness. A missing SAGA edge defaults to speed 0.0 and
     comm time = size/speed divides by zero. We always emit every unordered
@@ -41,21 +37,18 @@ Model-conversion rules (each guards a known SAGA trap):
     __super_sink__ for multi-source/multi-sink DAGs. They are stripped from
     the returned mapping.
 
-  * Slots. SAGA's machine model runs one task at a time per node. With
-    "slots": "auto" a node becomes floor(allocatable CPU / task CPU)
-    identical processors "<node>#<i>", joined by the local link, so the
-    scheduler can overlap tasks on it; placements are folded back onto the
-    real node. Exact only when every task requests the same CPU: mixed
-    requests would need capacity-aware placement, which a node-splitting
-    wrapper cannot give every SAGA scheduler, so they are rejected.
+  * Capacity. A node's capacity is its free CPU in cores (allocatable
+    minus what non-Wayline pods request) and a task's demand is its CPU
+    request in cores, so tasks share a node while their requests fit, as the
+    kubelet admits them. Every task has a request (the controller defaults
+    it). A request without node CPU figures falls back to the classic model:
+    capacity 1, demand 1, one task at a time per node.
 
-  * Constraints. Most SAGA schedulers do not read placement constraints.
-    They are enforced through the same division: a forbidden (task, node)
-    pair has a runtime longer than any feasible schedule, so every
-    finish-time-driven scheduler avoids it by construction. The result is
-    then verified; a scheduler that still places a task on a forbidden
-    node fails the request loudly. Placements are never moved after
-    scheduling, so the estimate returned is the schedule that runs.
+  * Constraints. A task's allowed nodes go to SAGA as
+    TaskGraphNode.allowed_nodes, and every scheduler chooses only among
+    them. The result is verified anyway; a violation fails the request.
+    Placements are never moved after scheduling, so the estimate returned
+    is the schedule that runs.
 """
 
 from __future__ import annotations
@@ -67,7 +60,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from saga import Network, Schedule, Scheduler, TaskGraph
+from saga import Network, NetworkNode, Schedule, Scheduler, TaskGraph, TaskGraphNode
 
 logger = logging.getLogger("saga-sidecar")
 
@@ -75,7 +68,6 @@ SUPER_NODES = ("__super_source__", "__super_sink__")
 LOCAL_SPEED = 1e12  # bytes/sec for self-loops; large finite, never math.inf
 MIN_BANDWIDTH = 1.0  # bytes/sec floor so comm cost stays finite
 MIN_RUNTIME = 1e-6  # seconds floor so log() stays finite
-SLOT_SEP = "#"  # virtual processor "<node>#<i>"; '#' cannot occur in a k8s node name
 
 
 # ---------------------------------------------------------------------------
@@ -117,8 +109,6 @@ def _builtin_registry() -> Dict[str, "Scheduler"]:
         WBAScheduler,
     )
 
-    from constrained import ConstrainedETF, ConstrainedFastestNode, ConstrainedOLB
-
     return {
         "heft": HeftScheduler(),
         "cpop": CpopScheduler(),
@@ -128,11 +118,11 @@ def _builtin_registry() -> Dict[str, "Scheduler"]:
         "sufferage": SufferageScheduler(),
         "mct": MCTScheduler(),
         "met": METScheduler(),
-        "olb": ConstrainedOLB(),
-        "etf": ConstrainedETF(),
+        "olb": OLBScheduler(),
+        "etf": ETFScheduler(),
         "duplex": DuplexScheduler(),
         "wba": WBAScheduler(),
-        "fastest_node": ConstrainedFastestNode(),
+        "fastest_node": FastestNodeScheduler(),
         "cpop_ranking": CpopScheduler(),  # alias kept for experiment scripts
     }
 
@@ -261,75 +251,12 @@ def _rank1_fit(rt: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
     return np.exp(log_cost), np.exp(log_speed), rmse
 
 
-def slot_counts(tasks: List[dict], nodes: List[dict]) -> Dict[str, int]:
-    """Processors per node for slots=auto: floor(node CPU / task CPU).
-
-    Every task must request the same, nonzero CPU; otherwise splitting a node
-    into identical processors misstates what fits on it, so this raises.
-    """
-    demands = sorted({int(t.get("cpuMillis") or 0) for t in tasks})
-    if len(demands) != 1 or demands[0] <= 0:
-        raise ValueError(
-            "slots=auto needs every task to request the same nonzero CPU "
-            f"(resources.cpu); got millicores {demands}")
-    d = demands[0]
-    counts = {}
-    for n in nodes:
-        cap = int(n.get("cpuMillis") or 0)
-        if cap <= 0:
-            raise ValueError(f"slots=auto: node {n['name']!r} reports no allocatable CPU")
-        counts[n["name"]] = max(1, cap // d)
-    return counts
-
-
-def real_node(name: str) -> str:
-    """Fold a virtual processor name back onto its node."""
-    return name.split(SLOT_SEP, 1)[0]
-
-
-class _Cost(float):
-    """A task's cost: a float (rank-1 fitted value) that, divided by a
-    _Speed, returns the true runtime of this task on that node."""
-
-    def __new__(cls, value: float, task: str, table: Dict[Tuple[str, str], float]):
-        obj = float.__new__(cls, value)
-        obj.task, obj.table = task, table
-        return obj
-
-    def __truediv__(self, other):
-        if isinstance(other, _Speed):
-            return self.table[(self.task, other.node)]
-        return float.__truediv__(self, other)
-
-
-class _Speed(float):
-    """A node's speed: a float (rank-1 fitted value) naming its real node,
-    so slot processors share their node's runtimes."""
-
-    def __new__(cls, value: float, node: str):
-        obj = float.__new__(cls, value)
-        obj.node = node
-        return obj
-
-    def __rtruediv__(self, other):
-        # Reached for a plain-float numerator (e.g. SAGA's super nodes).
-        return float.__truediv__(float(other), float(self))
-
-
-def forbidden_runtime(rt: np.ndarray, total_bytes: float, min_bw: float) -> float:
-    """A runtime no feasible schedule can reach: every task run back to back
-    at its slowest node, plus every edge over the slowest link, doubled."""
-    return 2.0 * (float(rt.max(axis=1).sum()) + total_bytes / max(min_bw, MIN_BANDWIDTH)) + 1.0
-
-
 def build_saga_models(
-    dag: dict, cluster_state: dict, slots: Optional[Dict[str, int]] = None
+    dag: dict, cluster_state: dict
 ) -> Tuple[TaskGraph, Network, List[str], float]:
     """Convert the Wayline request into SAGA TaskGraph + Network.
 
-    With `slots`, node n becomes slots[n] identical processors (see the
-    module docstring). Returns (task_graph, network, node_names,
-    cost_model_rmse); node_names are the real nodes.
+    Returns (task_graph, network, node_names, cost_model_rmse).
     """
     tasks: List[dict] = dag["tasks"]
     nodes = [n for n in cluster_state["nodes"] if n.get("ready", True)]
@@ -340,8 +267,24 @@ def build_saga_models(
     rt = _runtime_matrix(tasks, node_names)
     costs, speeds, rmse = _rank1_fit(rt)
 
+    # Capacity in cores; classic model when node CPU is not reported.
+    capacity_known = all(float(n.get("cpuMillis") or 0) > 0 for n in nodes)
+    capacity = {n["name"]: (float(n["cpuMillis"]) / 1000.0 if capacity_known else 1.0) for n in nodes}
+
     # --- TaskGraph ---------------------------------------------------------
-    tg_tasks = [(t["name"], float(costs[i])) for i, t in enumerate(tasks)]
+    tg_nodes = []
+    for i, t in enumerate(tasks):
+        demand = float(t.get("cpuMillis") or 0) / 1000.0 if capacity_known else 1.0
+        if capacity_known and demand <= 0:
+            raise ValueError(f"task {t['name']!r} has no CPU request")
+        allowed = _allowed_nodes(t, node_names)
+        tg_nodes.append(TaskGraphNode(
+            name=t["name"],
+            cost=float(costs[i]),
+            demand=demand,
+            runtimes={n: float(rt[i, j]) for j, n in enumerate(node_names)},
+            allowed_nodes=set(allowed) if allowed is not None else None,
+        ))
     tg_edges = []
     task_index = {t["name"]: i for i, t in enumerate(tasks)}
     for t in tasks:
@@ -368,47 +311,25 @@ def build_saga_models(
                 else:
                     size = _parse_data_size(src.get("dataSize"))
             tg_edges.append((dep, t["name"], max(size, 0.0)))
-    task_graph = TaskGraph.create(tasks=tg_tasks, dependencies=tg_edges)
+    task_graph = TaskGraph.create(tasks=tg_nodes, dependencies=tg_edges)
 
     # --- Network -----------------------------------------------------------
     bw: Dict[Tuple[str, str], float] = {}
     for e in cluster_state.get("bandwidth", []) or []:
         bw[(e["from"], e["to"])] = float(e["bytesPerSec"])
 
-    def link(u: str, v: str) -> float:
-        fwd = bw.get((u, v))
-        rev = bw.get((v, u))
-        candidates = [x for x in (fwd, rev) if x is not None and x > 0]
-        speed = min(candidates) if candidates else MIN_BANDWIDTH
-        return max(speed, MIN_BANDWIDTH)
-
-    procs = [
-        (f"{n}{SLOT_SEP}{i}" if slots else n, n, float(speeds[j]))
-        for j, n in enumerate(node_names)
-        for i in range(slots[n] if slots else 1)
-    ]
-    net_nodes = [(p, sp) for p, _, sp in procs]
+    net_nodes = [NetworkNode(name=n, speed=float(speeds[j]), capacity=capacity[n])
+                 for j, n in enumerate(node_names)]
     net_edges = []
-    for a, (p, pn, _) in enumerate(procs):
-        net_edges.append((p, p, LOCAL_SPEED))  # explicit self-loop, finite
-        for q, qn, _ in procs[a + 1 :]:
-            net_edges.append((p, q, LOCAL_SPEED if pn == qn else link(pn, qn)))
+    for j, u in enumerate(node_names):
+        net_edges.append((u, u, LOCAL_SPEED))  # explicit self-loop, finite
+        for v in node_names[j + 1 :]:
+            fwd = bw.get((u, v))
+            rev = bw.get((v, u))
+            candidates = [x for x in (fwd, rev) if x is not None and x > 0]
+            speed = min(candidates) if candidates else MIN_BANDWIDTH
+            net_edges.append((u, v, max(speed, MIN_BANDWIDTH)))
     network = Network.create(nodes=net_nodes, edges=net_edges)
-
-    # Exact runtimes and constraints through task.cost / node.speed.
-    allowed = {t["name"]: set(_allowed_nodes(t, node_names) or node_names) for t in tasks}
-    total_bytes = sum(e[2] for e in tg_edges)
-    min_bw = min([e[2] for e in net_edges if e[0] != e[1]] or [LOCAL_SPEED])
-    big = forbidden_runtime(rt, total_bytes, min_bw)
-    table: Dict[Tuple[str, str], float] = {}
-    for i, t in enumerate(tasks):
-        for j, n in enumerate(node_names):
-            table[(t["name"], n)] = float(rt[i, j]) if n in allowed[t["name"]] else big
-    for i, t in enumerate(tasks):
-        node = task_graph.get_task(t["name"])
-        node.__dict__["cost"] = _Cost(float(costs[i]), t["name"], table)
-    for p, pn, sp in procs:
-        network.get_node(p).__dict__["speed"] = _Speed(sp, pn)
 
     return task_graph, network, node_names, rmse
 
@@ -438,25 +359,8 @@ def schedule_request(request: dict) -> dict:
         return {"assignments": [], "estimatedMakespan": 0.0, "algorithm": algorithm}
 
     scheduler = get_scheduler(algorithm, options)
-    slots = None
-    mode = request.get("slots") or ""
-    if mode == "auto":
-        ready = [n for n in cluster_state["nodes"] if n.get("ready", True)]
-        slots = slot_counts(tasks, ready)
-    elif mode not in ("", "none"):
-        raise ValueError(f"unknown slots mode {mode!r}; use 'auto'")
-    task_graph, network, node_names, rmse = build_saga_models(dag, cluster_state, slots)
-
-    import constrained
-    constrained.current.allowed = {
-        t["name"]: {nn.name for nn in network.nodes if real_node(nn.name) in allowed}
-        for t in tasks
-        if (allowed := _allowed_nodes(t, node_names)) is not None
-    }
-    try:
-        sched: Schedule = scheduler.schedule(network, task_graph)
-    finally:
-        constrained.current.allowed = None
+    task_graph, network, node_names, rmse = build_saga_models(dag, cluster_state)
+    sched: Schedule = scheduler.schedule(network, task_graph)
 
     # mapping: node -> [ScheduledTask]; invert, strip super nodes.
     placement: Dict[str, str] = {}
@@ -465,7 +369,7 @@ def schedule_request(request: dict) -> dict:
         for st in scheduled:
             if st.name in SUPER_NODES:
                 continue
-            placement[st.name] = real_node(node_name)
+            placement[st.name] = node_name
             times[st.name] = (float(st.start), float(st.end))
 
     missing = [t["name"] for t in tasks if t["name"] not in placement]
@@ -498,6 +402,6 @@ def schedule_request(request: dict) -> dict:
         "algorithm": algorithm,
         "costModelFitRMSE": rmse,
     }
-    if slots:
-        result["slots"] = slots
+    ready = [n for n in cluster_state["nodes"] if n.get("ready", True)]
+    result["capacityModel"] = "cpu" if all(float(n.get("cpuMillis") or 0) > 0 for n in ready) else "classic"
     return result

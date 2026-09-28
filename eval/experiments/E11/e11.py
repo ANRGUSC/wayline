@@ -36,11 +36,12 @@ NODES = ["anrg-1", "anrg-3", "anrg-4", "anrg-5", "anrg-6", "anrg-7", "anrg-8", "
 FULL = 3800000      # hardware ceiling (single-core turbo); restored afterwards
 MIN_FREQ = 800000   # hardware floor; restored afterwards
 # Three clock classes, locked (floor = ceiling), mixed across the old
-# edge/compute groups. 3.0 GHz is the highest clock that holds with four
-# busy cores (the slots per node); an unlocked 3.8 GHz ceiling let the power
-# limit slow each task by up to 1.46x under load.
-CAPS = {"anrg-1": 3000000, "anrg-6": 3000000, "anrg-7": 3000000,
-        "anrg-3": 1500000, "anrg-5": 1500000, "anrg-8": 1500000,
+# edge/compute groups. 2.4 GHz is the highest lock whose per-core rate stays
+# within 4% from one busy core to all eight, so a task's runtime does not
+# depend on how many others share its node; an unlocked 3.8 GHz ceiling let
+# the power limit slow each task by up to 1.46x under load.
+CAPS = {"anrg-1": 2400000, "anrg-6": 2400000, "anrg-7": 2400000,
+        "anrg-3": 1200000, "anrg-5": 1200000, "anrg-8": 1200000,
         "anrg-4": 800000, "anrg-9": 800000}
 
 
@@ -165,8 +166,8 @@ def ray_down():
     kubectl("delete pod -l app=e11-ray --grace-period=5")
 
 
-def ray_run(label, mode, cpus, plan_path=None):
-    a = f"--dag /tmp/dag.json --rates /tmp/rates.json --mode {mode} --cpus {cpus}"
+def ray_run(label, mode, cpus=None, plan_path=None):
+    a = f"--dag /tmp/dag.json --rates /tmp/rates.json --mode {mode}" + (f" --cpus {cpus}" if cpus else "")
     if plan_path:
         kubectl(f"cp {plan_path} e11-ray-head:/tmp/plan.json")
         a += " --plan /tmp/plan.json"
@@ -186,8 +187,10 @@ def main(argv=None):
     ap.add_argument("--reps", type=int, default=1)
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--frac", type=float, default=0.8)
-    ap.add_argument("--cpu", default="2")
-    ap.add_argument("--ray-cpus", default=None, help="Ray num_cpus per task (default: --cpu); Ray needs whole numbers above 1")
+    ap.add_argument("--cpu", default="mixed",
+                    help="CPU request per task: a number, or 'mixed' for a seeded 1, 2 or 3 per task")
+    ap.add_argument("--ray-cpus", default=None,
+                    help="override Ray num_cpus for every task (default: each task's own request)")
     ap.add_argument("--enact", default="order")
     ap.add_argument("--schedulers", nargs="*",
                     default=["saga/heft", "saga/cpop", "saga/peft", "saga/minmin", "random"])
@@ -195,7 +198,6 @@ def main(argv=None):
     ap.add_argument("--modes", nargs="+", default=["cold"], help="cold (a pod per task) and/or warm (runner)")
     ap.add_argument("--runner", default="e12", help="runner name for warm mode")
     ap.add_argument("--image", default=gen.REG)
-    ap.add_argument("--slots", default="", help="auto: SAGA models node CPU / task CPU processors per node")
     ap.add_argument("--no-caps", action="store_true", help="leave clocks uncapped (homogeneous control)")
     args = ap.parse_args(argv)
     if not args.no_caps and not os.environ.get("SUDO_PASS"):
@@ -220,7 +222,8 @@ def main(argv=None):
         print("caps", set_caps(caps) if not args.no_caps else "none", flush=True)
         rates = calibrate(NODES)
         print("rates (Mhash/s)", rates, flush=True)
-        d = gen.dag(seed=args.seed, nodes=NODES, frac=args.frac)
+        d = gen.dag(seed=args.seed, nodes=NODES, frac=args.frac,
+                    cpus=(1, 2, 3) if args.cpu == "mixed" else (float(args.cpu),))
         json.dump(d, open(os.path.join(out, "dag.json"), "w"), indent=1)
         json.dump({"caps": caps, "rates": rates, "args": vars(args)},
                   open(os.path.join(out, "setup.json"), "w"), indent=1)
@@ -238,9 +241,9 @@ def main(argv=None):
                 for mode in args.modes:
                     warm = mode == "warm"
                     tmpl = f"e11-{short}" + ("-warm" if warm else "")
-                    kubectl("apply -f -", stdin=gen.template(tmpl, sched, d, rates, args.cpu, args.enact,
+                    kubectl("apply -f -", stdin=gen.template(tmpl, sched, d, rates, None, args.enact,
                                                              runner=args.runner if warm else None,
-                                                             image=args.image, slots=args.slots))
+                                                             image=args.image))
                     w = wayline_run(tmpl, sched); w["rep"] = rep; w["mode"] = mode
                     w["arm"] = ("wayline-warm:" if warm else "wayline:") + sched
                     results.append(w); dump()
@@ -254,11 +257,11 @@ def main(argv=None):
                         continue
                     plan = os.path.join(out, f"plan-{short}-{rep}.json")
                     json.dump({"placement": w["placement"], "order": w["order"]}, open(plan, "w"))
-                    r = ray_run(f"ray-plan:{sched}", "plan", args.ray_cpus or args.cpu, plan); r["rep"] = rep
+                    r = ray_run(f"ray-plan:{sched}", "plan", args.ray_cpus, plan); r["rep"] = rep
                     results.append(r); dump()
                     print(f"[{rep}] ray-plan:{sched}: {r['phase']} makespan={r.get('makespan')}s", flush=True)
             for k in range(args.default_reps):
-                r = ray_run("ray-default", "default", args.ray_cpus or args.cpu); r["rep"] = rep; r["sample"] = k
+                r = ray_run("ray-default", "default", args.ray_cpus); r["rep"] = rep; r["sample"] = k
                 results.append(r); dump()
                 print(f"[{rep}] ray-default#{k}: {r['phase']} makespan={r.get('makespan')}s", flush=True)
     finally:

@@ -18,8 +18,9 @@ MB = 1_000_000
 
 
 def dag(seed=11, nodes=(), layers=(1, 5, 5, 5, 3, 1), frac=0.8,
-        work=(2.0, 10.0), size_mb=(1, 30), max_parents=3):
+        work=(2.0, 10.0), size_mb=(1, 30), max_parents=3, cpus=(2,)):
     rng = random.Random(seed)
+    crng = random.Random(seed * 7919 + 1)   # own stream: CPU draws leave the DAG unchanged
     k = max(1, round(frac * len(nodes)))
     names, by_layer = [], []
     for li, width in enumerate(layers):
@@ -32,6 +33,7 @@ def dag(seed=11, nodes=(), layers=(1, 5, 5, 5, 3, 1), frac=0.8,
                 prev = by_layer[li - 1]
                 parents = rng.sample(prev, rng.randint(1, min(max_parents, len(prev))))
             tasks[t] = {"work": round(rng.uniform(*work), 2),
+                        "cpu": crng.choice(cpus),
                         "allowed": sorted(rng.sample(list(nodes), k)),
                         "inputs": [[p, f"to-{t}"] for p in sorted(parents)],
                         "outputs": []}
@@ -48,8 +50,9 @@ def dag(seed=11, nodes=(), layers=(1, 5, 5, 5, 3, 1), frac=0.8,
     return {"seed": seed, "nodes": list(nodes), "frac": frac, "order": names, "tasks": tasks}
 
 
-def template(name, scheduler, d, rates, cpu="2", enact="order", runner=None, image=REG, slots=""):
-    """rates: {node: Mhash/s}; the full-clock reference rate is the max."""
+def template(name, scheduler, d, rates, cpu=None, enact="order", runner=None, image=REG):
+    """rates: {node: Mhash/s}; the full-clock reference rate is the max.
+    cpu: request for every task, or None for each task's own "cpu"."""
     ref = max(rates.values())
     out = [f"""apiVersion: wl.io/v1
 kind: ODAGTemplate
@@ -60,8 +63,7 @@ spec:
   description: 'E11: CPU-bound random DAG on frequency-capped nodes, 80% constraints.'
   scheduler: {scheduler}
   schedulerConfig:
-    enactOrder: {enact}{f"""
-    slots: {slots}""" if slots else ""}
+    enactOrder: {enact}
   profiling:
     enabled: false
     runtimeSource: manual
@@ -94,7 +96,7 @@ spec:
         L.append(f"    runtime: {max(1, round(s['work']))}")  # CRD: integer; runtimeProfile carries the real costs
         L.append("    runtimeProfile:")
         L += [f"      {n}: {round(iters / (rates[n] * 1e6), 3)}" for n in s["allowed"]]
-        L += ["    resources:", f"      cpu: \"{cpu}\"", "      memory: 512Mi",
+        L += ["    resources:", f"      cpu: \"{cpu if cpu is not None else s.get('cpu', 2)}\"", "      memory: 512Mi",
               "    constraints:", f"      nodeNames: [{', '.join(s['allowed'])}]",
               "    env:",
               "    - name: E11_ITERS", f"      value: \"{iters}\"",

@@ -119,6 +119,28 @@ func createRunFromTemplate(dynClient dynamic.Interface, db *sql.DB,
 	if err != nil {
 		return "", fmt.Errorf("extract template spec: %w", err)
 	}
+	// Stamp default resource requests onto tasks that omit them, so the
+	// run's pods request exactly what the scheduler plans with.
+	if defRes, ok, _ := unstructured.NestedStringMap(templateObj.Object, "spec", "defaults", "resources"); ok && len(defRes) > 0 {
+		if tasks, ok := spec["tasks"].([]interface{}); ok {
+			for _, raw := range tasks {
+				t, ok := raw.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				res, _ := t["resources"].(map[string]interface{})
+				if res == nil {
+					res = map[string]interface{}{}
+				}
+				for k, v := range defRes {
+					if _, has := res[k]; !has && v != "" {
+						res[k] = v
+					}
+				}
+				t["resources"] = res
+			}
+		}
+	}
 	delete(spec, "profiling")
 	delete(spec, "defaults")
 	delete(spec, "retention")
@@ -245,13 +267,6 @@ type schedulerConfig struct {
 	// 0 preserves strict EFT selection (with least-loaded exact-tie break).
 	SpreadEpsilon float64
 
-	// Slots, for SAGA schedulers: "auto" models each node as
-	// floor(allocatable CPU / task CPU request) identical processors, so a
-	// node can run several tasks at once in the scheduler's model. Exact
-	// only when all tasks request the same CPU; the sidecar rejects mixed
-	// requests rather than approximate them. "" keeps one task per node.
-	Slots string
-
 	// Options are passed verbatim to an external scheduler as constructor
 	// keyword arguments, so a parameterised scheduler is configurable from
 	// the ODAG spec without any code change here. Ignored by the built-ins.
@@ -288,15 +303,6 @@ func extractSchedulerConfig(templateObj *unstructured.Unstructured) schedulerCon
 			cfg.EnactOrder = v
 		default:
 			log.Printf("[template] unknown enactOrder %q; ignoring", v)
-		}
-	}
-	if v, ok := sc["slots"].(string); ok {
-		switch v {
-		case "", "none":
-		case "auto":
-			cfg.Slots = v
-		default:
-			log.Printf("[template] unknown slots %q; ignoring", v)
 		}
 	}
 	if v, ok := sc["spreadEpsilon"].(float64); ok {
