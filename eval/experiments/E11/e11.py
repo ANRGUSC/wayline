@@ -29,6 +29,8 @@ spec = importlib.util.spec_from_file_location("e10", os.path.join(HERE, "..", "E
 e10 = importlib.util.module_from_spec(spec); spec.loader.exec_module(e10)
 spec = importlib.util.spec_from_file_location("gen", os.path.join(HERE, "gen_e11.py"))
 gen = importlib.util.module_from_spec(spec); spec.loader.exec_module(gen)
+spec = importlib.util.spec_from_file_location("net", os.path.join(HERE, "..", "E13", "net.py"))
+net = importlib.util.module_from_spec(spec); spec.loader.exec_module(net)
 sh, kubectl, NS, WAYLINE = e10.sh, e10.kubectl, e10.NS, e10.WAYLINE
 
 RES = os.environ.get("RES", os.path.expanduser("~/E11-results"))
@@ -200,6 +202,11 @@ def main(argv=None):
     ap.add_argument("--runner", default="e12", help="runner name for warm mode")
     ap.add_argument("--image", default=gen.REG)
     ap.add_argument("--no-caps", action="store_true", help="leave clocks uncapped (homogeneous control)")
+    ap.add_argument("--cpu-classes", choices=["hetero", "uniform"], default="hetero",
+                    help="hetero: fast/medium/slow locks; uniform: every node locked at the fast clock")
+    ap.add_argument("--net", choices=["none", "classes"], default="none",
+                    help="classes: shape worker-to-worker links per E13/net.py (B, B/2, B/4, B/8)")
+    ap.add_argument("--size-scale", type=float, default=1.0, help="multiply every edge's size")
     args = ap.parse_args(argv)
     if not args.no_caps and not os.environ.get("SUDO_PASS"):
         raise SystemExit("SUDO_PASS is required to cap clocks")
@@ -219,17 +226,31 @@ def main(argv=None):
                             x.get("predicted_makespan"), x.get("wall")])
 
     try:
-        caps = {n: FULL for n in NODES} if args.no_caps else CAPS
+        caps = ({n: FULL for n in NODES} if args.no_caps else
+                CAPS if args.cpu_classes == "hetero" else {n: max(CAPS.values()) for n in NODES})
         print("caps", set_caps(caps) if not args.no_caps else "none", flush=True)
         rates = calibrate(NODES)
         print("rates (Mhash/s)", rates, flush=True)
         d = gen.dag(seed=args.seed, nodes=NODES, frac=args.frac,
                     cpus=(1, 2, 3) if args.cpu == "mixed" else (float(args.cpu),))
+        gen.scale_sizes(d, args.size_scale)
+        network = {"mode": args.net}
+        if args.net == "classes":
+            network["classes"] = net.apply()
+            probe = net.verify()
+            factor = sum(got / want for _, _, want, got in probe) / len(probe)
+            network.update(measured=probe, goodput_factor=round(factor, 4))
+            print("links", network["classes"], "goodput", round(factor, 3), probe, flush=True)
         json.dump(d, open(os.path.join(out, "dag.json"), "w"), indent=1)
-        json.dump({"caps": caps, "rates": rates, "args": vars(args)},
+        json.dump({"caps": caps, "rates": rates, "args": vars(args), "network": network},
                   open(os.path.join(out, "setup.json"), "w"), indent=1)
         json.dump(rates, open(os.path.join(out, "rates.json"), "w"))
-        kubectl("apply -f -", stdin=gen.bwconfig(NODES))     # clean network: uniform 942 Mbit/s
+        if args.net == "classes":
+            # Schedulers get each pair's shaped rate at the measured TCP goodput.
+            m = {k: b * network["goodput_factor"] for k, b in net.bw_matrix().items()}
+            kubectl("apply -f -", stdin=gen.bwmatrix(m, min(m.values())))
+        else:
+            kubectl("apply -f -", stdin=gen.bwconfig(NODES))     # clean network: uniform 942 Mbit/s
 
         ray_up(NODES)
         for f in ("dag.json", "rates.json"):
@@ -269,12 +290,19 @@ def main(argv=None):
                 results.append(r); dump()
                 print(f"[{rep}] ray-default#{k}: {r['phase']} makespan={r.get('makespan')}s", flush=True)
     finally:
-        try:
-            ray_down()
-        finally:
-            cm_restore(saved_cm)
-            if not args.no_caps:
-                print("restored", set_caps({n: FULL for n in NODES}, floor=MIN_FREQ), flush=True)
+        # Every step runs whatever the others do: no shaping, lock or
+        # profile may outlive the experiment.
+        steps = [("ray", ray_down), ("bandwidth profile", lambda: cm_restore(saved_cm))]
+        if args.net == "classes":
+            steps.append(("links", net.clear))
+        if not args.no_caps:
+            steps.append(("clocks", lambda: print("restored", set_caps({n: FULL for n in NODES}, floor=MIN_FREQ), flush=True)))
+        for label, step in steps:
+            try:
+                step()
+                print(f"cleanup {label}: ok", flush=True)
+            except Exception as e:
+                print(f"cleanup {label}: FAILED {e}", flush=True)
     print("results in", out)
 
 

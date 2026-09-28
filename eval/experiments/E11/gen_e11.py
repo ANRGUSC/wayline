@@ -111,6 +111,28 @@ spec:
     return "\n".join(out) + "\n"
 
 
+def scale_sizes(d, k):
+    """Multiply every edge's size by k; the DAG is otherwise unchanged."""
+    if k != 1:
+        for t in d["tasks"].values():
+            t["outputs"] = [[o, int(n * k)] for o, n in t["outputs"]]
+    return d
+
+
+def bwmatrix(matrix, default):
+    """wl-network-profile ConfigMap from {(u, v): bytes/s}."""
+    body = "\n".join(f"  {u}_to_{v}: \"{int(b)}\"" for (u, v), b in sorted(matrix.items()))
+    return f"""apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wl-network-profile
+  namespace: wl-system
+data:
+  defaultBandwidth: "{int(default)}"
+{body}
+"""
+
+
 def bwconfig(nodes, mbit=942.0):
     bps = int(mbit * 1e6 / 8)
     body = "\n".join(f"  {u}_to_{v}: \"{bps}\"" for u in nodes for v in nodes if u != v)
