@@ -123,6 +123,7 @@ func main() {
 	go watchODAGTemplates(dynClient)
 	go watchODAGs(dynClient, client)
 	go pollRunningODAGs(dynClient, client)
+	go sweepOrphanData(dynClient, client)
 	watchPods(client, dynClient)
 }
 
@@ -342,6 +343,7 @@ func watchODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
 				runningODAGs.Delete(key)
 				schedulePlanCache.Delete(key)
 				forgetWarm(key)
+				go gcDeletedRun(dynClient, client, obj)
 			}
 		}
 		log.Println("[odag-ctrl] ODAG watcher closed; reconnecting in 2s")
