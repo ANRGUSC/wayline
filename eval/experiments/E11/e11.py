@@ -233,6 +233,9 @@ def main(argv=None):
     ap.add_argument("--net", choices=["none", "classes"], default="none",
                     help="classes: shape worker-to-worker links per E13/net.py (B, B/2, B/4, B/8)")
     ap.add_argument("--size-scale", type=float, default=1.0, help="multiply every edge's size")
+    ap.add_argument("--rates-file", default=None,
+                    help="reuse a previous run's rates.json instead of calibrating, so every "
+                         "run gets identical runtimes (and a deterministic scheduler, the same placement)")
     args = ap.parse_args(argv)
     if not args.no_caps and not os.environ.get("SUDO_PASS"):
         raise SystemExit("SUDO_PASS is required to cap clocks")
@@ -255,7 +258,7 @@ def main(argv=None):
         caps = ({n: FULL for n in NODES} if args.no_caps else
                 CAPS if args.cpu_classes == "hetero" else {n: max(CAPS.values()) for n in NODES})
         print("caps", set_caps(caps) if not args.no_caps else "none", flush=True)
-        rates = calibrate(NODES)
+        rates = json.load(open(args.rates_file)) if args.rates_file else calibrate(NODES)
         print("rates (Mhash/s)", rates, flush=True)
         d = gen.dag(seed=args.seed, nodes=NODES, frac=args.frac,
                     cpus=(1, 2, 3) if args.cpu == "mixed" else (float(args.cpu),))
