@@ -259,14 +259,17 @@ def main(argv=None):
 
         for rep in range(args.reps):
             for sched in args.schedulers:
-                short = sched.split("/")[-1].lower()
+                # Kubernetes names allow [a-z0-9-] only (saga/contention_heft -> contention-heft).
+                short = sched.split("/")[-1].lower().replace("_", "-").replace(".", "-")
                 for mode in args.modes:
                     warm = mode in ("warm", "mixed")
                     tmpl = f"e11-{short}" + ("" if mode == "cold" else f"-{mode}")
                     warm_set = set(d["order"][1::2]) if mode == "mixed" else None
-                    kubectl("apply -f -", stdin=gen.template(tmpl, sched, d, rates, None, args.enact,
+                    applied = kubectl("apply -f -", stdin=gen.template(tmpl, sched, d, rates, None, args.enact,
                                                              runner=args.runner if warm else None,
                                                              image=args.image, warm_tasks=warm_set))
+                    if applied.returncode != 0:
+                        raise RuntimeError(f"template {tmpl} rejected: {applied.stderr.strip()}")
                     w = wayline_run(tmpl, sched); w["rep"] = rep; w["mode"] = mode
                     w["arm"] = {"cold": "wayline:", "warm": "wayline-warm:", "mixed": "wayline-mixed:"}[mode] + sched
                     if warm_set is not None:
