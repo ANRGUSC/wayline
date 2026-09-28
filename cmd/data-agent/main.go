@@ -110,6 +110,13 @@ var (
 	pushMinThroughputBs = int64(envInt("WL_PUSH_MIN_THROUGHPUT_KBS", 5*1024)) * 1024
 )
 
+func envOr(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
+}
+
 func envInt(name string, def int) int {
 	if v := os.Getenv(name); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -142,6 +149,24 @@ var maxConcurrentPushes int = 4
 // uncompressed bytes — compression is purely wire-level, transparent to
 // the idempotent dedupe path. Accepted values: "none", "gzip".
 var pushCompress = "none"
+
+// syncMode is the durability policy for what the agent writes:
+//   full  fsync every payload and every metadata file (state, ready markers,
+//         install records, transfer queue) and their directories. Crash-
+//         consistent: after a power loss everything reported is on disk.
+//   data  fsync payloads only; metadata is still written atomically (temp +
+//         rename) but not synced. A crash can lose recent state/queue
+//         entries, never a payload reported ready.
+//   none  no fsync. Writes stay atomic (rename), so readers never see a
+//         partial object, but a power loss can lose recently written objects,
+//         whose tasks must then rerun.
+// On eMMC/ext4 every fsync can wait for other files' dirty data, so with
+// several large transfers landing on a node, "full" serialises small metadata
+// syncs behind 100 MB flushes (E13: a 15.8 s stall on one task's handoff).
+var syncMode = "full"
+
+func syncPayload() bool  { return syncMode == "full" || syncMode == "data" }
+func syncMetadata() bool { return syncMode == "full" }
 
 // pushSem is the node-wide push concurrency semaphore. nil iff
 // maxConcurrentPushes is 0 (unbounded). Initialized in main().
@@ -589,10 +614,12 @@ func writeTextAtomic(path, value string) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
+	if syncMetadata() {
+		if err := f.Sync(); err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+			return err
+		}
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
@@ -602,7 +629,9 @@ func writeTextAtomic(path, value string) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	fsyncDir(dir)
+	if syncMetadata() {
+		fsyncDir(dir)
+	}
 	return nil
 }
 
@@ -648,7 +677,9 @@ func setReady(rel string) {
 		return
 	}
 	_ = f.Close()
-	fsyncDir(filepath.Dir(p))
+	if syncMetadata() {
+		fsyncDir(filepath.Dir(p))
+	}
 }
 
 // clearReady removes the .wl-ready marker. Used on controller-driven reset.
@@ -862,10 +893,12 @@ func installAtomically(destPath string, body io.Reader, expectedDigest string) (
 		_ = os.Remove(tmpPath)
 		return "", 0, err
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
-		return "", 0, err
+	if syncPayload() {
+		if err := f.Sync(); err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmpPath)
+			return "", 0, err
+		}
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmpPath)
@@ -882,7 +915,9 @@ func installAtomically(destPath string, body io.Reader, expectedDigest string) (
 		_ = os.Remove(tmpPath)
 		return "", 0, err
 	}
-	fsyncDir(dir)
+	if syncPayload() {
+		fsyncDir(dir)
+	}
 	return digest, n, nil
 }
 
@@ -997,7 +1032,16 @@ func main() {
 		"max parallel remote PUTs per producer task; 1 = sequential, 0 = unbounded")
 	flag.StringVar(&pushCompress, "push-compress", pushCompress,
 		"compressor applied to outgoing PUT bodies; one of: none, gzip")
+	syncMode = envOr("WL_AGENT_SYNC", syncMode)
+	flag.StringVar(&syncMode, "sync", syncMode,
+		"durability policy: full (fsync payloads and metadata), data (payloads only), none")
 	flag.Parse()
+	switch syncMode {
+	case "full", "data", "none":
+	default:
+		log.Fatalf("[data-agent] invalid --sync=%q (expected: full, data, none)", syncMode)
+	}
+	log.Printf("[data-agent] sync=%s", syncMode)
 	switch pushCompress {
 	case "none", "gzip":
 	default:
@@ -1274,7 +1318,9 @@ func main() {
 				})
 				setTransferState(rel, succ.Name, "Pending")
 			}
-			fsyncDir(transfersPath)
+			if syncMetadata() {
+				fsyncDir(transfersPath)
+			}
 		}
 
 		// Response is 202 Accepted, not 200 OK: the contract is "transfer has

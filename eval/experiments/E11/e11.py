@@ -126,7 +126,31 @@ def cm_restore(data):
 
 # ─── Wayline arm ─────────────────────────────────────────────────────────────
 
-def wayline_run(template, sched):
+def data_path(run, placement, d):
+    """Per-edge data-path records before the run (and its data) is deleted:
+    every agent's push flows, and when each consumed object finished
+    installing on its consumer's node."""
+    import urllib.request
+    ips = e10.agent_ips()
+    get = lambda url: json.loads(urllib.request.urlopen(url, timeout=10).read().decode())
+    flows, installs = [], {}
+    for node, ip in ips.items():
+        try:
+            flows += get(f"http://{ip}:8082/flows/{run}") or []
+        except Exception:
+            pass
+    for t, s in (d or {}).get("tasks", {}).items():
+        node = placement.get(t)
+        for prod, obj in s["inputs"]:
+            key = f"{prod}.{obj}"
+            try:
+                installs[f"{t}<-{key}"] = get(f"http://{ips[node]}:8082/installed/{run}/{key}")
+            except Exception:
+                pass
+    return {"flows": flows, "installs": installs}
+
+
+def wayline_run(template, sched, d=None):
     t0 = time.time()
     r = sh(f"{WAYLINE} run {template} -n {NS}")
     run = r.stdout.split("Created run ")[1].split()[0]
@@ -141,13 +165,15 @@ def wayline_run(template, sched):
     placement = {t["name"]: t.get("node") for t in st.get("tasks", [])}
     pred = sorted(st.get("predictedTasks", []) or [], key=lambda p: p["estStart"])
     tim = e10.task_timings(run, placement)
+    dp = data_path(run, placement, d)
     closes = [x["closeUnix"] for x in tim.values() if x]
     return {"arm": f"wayline:{sched}", "sched": sched, "run": run, "phase": phase,
             "wall": round(wall, 3), "makespan_status": st.get("makespan"),
             "makespan": round(max(closes) - t0, 3) if len(closes) == len(placement) else None,
             "placement": placement, "order": [p["name"] for p in pred],
             "predicted_makespan": round(max((p["estEnd"] for p in pred), default=0), 3) or None,
-            "timings": tim, "submitted": t0, "scheduling": st.get("scheduling")}
+            "timings": tim, "submitted": t0, "scheduling": st.get("scheduling"),
+            "data_path": dp}
 
 
 # ─── Ray arms ────────────────────────────────────────────────────────────────
@@ -270,7 +296,7 @@ def main(argv=None):
                                                              image=args.image, warm_tasks=warm_set))
                     if applied.returncode != 0:
                         raise RuntimeError(f"template {tmpl} rejected: {applied.stderr.strip()}")
-                    w = wayline_run(tmpl, sched); w["rep"] = rep; w["mode"] = mode
+                    w = wayline_run(tmpl, sched, d); w["rep"] = rep; w["mode"] = mode
                     w["arm"] = {"cold": "wayline:", "warm": "wayline-warm:", "mixed": "wayline-mixed:"}[mode] + sched
                     if warm_set is not None:
                         w["warm_tasks"] = sorted(warm_set)
