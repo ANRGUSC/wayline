@@ -140,3 +140,43 @@ CPU and network (`results/20260928T100033Z/`):
   63.6/65.0 warm for contention HEFT): moving data, not starting tasks, is
   Wayline's bottleneck here. Next: the agent's push path (serial per source,
   a cap on concurrent pushes per node) against Ray's parallel pulls.
+
+## Data path: where warm Wayline loses time to Ray (2026-09-28)
+
+Scenario 2 (CPU and network), `saga/contention_heft`. The harness now keeps
+each run's push flows and per-input install times; `datapath.py` splits the
+critical path into compute, output handoff (compute end to output installed
+locally), push queue, transfer (against pair rate at measured goodput), and
+dispatch (input installed on the consumer's node to consumer start).
+
+First measurement (`results/20260928T231938Z/`): warm 74.2 s, pods 64.2 s,
+Ray pinned 51.8 s. Warm spent 20.8 s in output handoff, 15.8 s of it one
+task's handoff on anrg-1; the agent log shows installs on that node completing
+in bursts (two, then four at the same second), all waiting on fsyncs. On
+eMMC/ext4 a small fsync can wait for other files' large dirty data.
+
+The agent gained `--sync` / `WL_AGENT_SYNC`: `full` (default: fsync payloads
+and metadata), `data` (payloads only), `none` (no fsync; writes stay atomic
+via rename). Same run under each mode, one frozen calibration (`--rates-file`)
+so every run gets the identical placement (verified):
+
+| on the critical path, warm | full | data | none |
+|---|---|---|---|
+| output handoff | 9.8 s | 13.4 s | 2.3 s |
+| transfers (plan 4.6 s) | 10.2 s | 11.3 s | 10.5 s |
+| dispatch after arrival | 3.0 s | 3.6 s | 1.0 s |
+| makespan, warm | 63.6 s | 69.6 s | 55.7 s |
+| makespan, pods | 65.4 s | 64.4 s | 61.5 s |
+| Ray pinned, same placement | 51.5 s | 51.1 s | 55.6 s |
+
+(`results/20260928T234253Z`, `...234709Z`, `...235131Z`.)
+
+- Payload fsyncs are the cost: 7 to 11 s of stalls on the critical path.
+  Dropping only metadata syncs (`data`) does not help.
+- With no fsync, warm Wayline matches Ray at the same placement (55.7 vs
+  55.6 s; Ray itself spans 51.1 to 55.6 s over the three identical runs).
+- Transfers run about 2.2x the per-edge plan in every mode: several flows
+  share the same slow links. That is the network, not the agent.
+- The durability default stays `full` pending a decision; durability could be
+  a per-object realization property (fsync what must survive a crash, not
+  every intermediate).
