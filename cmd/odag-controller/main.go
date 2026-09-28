@@ -1157,6 +1157,31 @@ func objectKey(producer, object string) string {
 // consumedKeys returns the object keys task t consumes from dependency
 // dep: the refined named objects when spec.inputs says so, else the
 // producer's default output.
+// edgeBytes is the data a consumer reads from a producer: the declared sizes
+// of the producer's named outputs it consumes, or, for the default output,
+// the producer's resolved data size (fallback). Sizing every edge by the
+// producer's task-level dataSize ignored named outputs, so a DAG declaring
+// 4-120 MB per edge was planned as 1 MB per edge.
+func edgeBytes(prod, cons *taskSpec, fallback func() int64) int64 {
+	var total int64
+	named := false
+	for _, in := range cons.Inputs {
+		if in.Producer != prod.Name || in.Object == "" {
+			continue
+		}
+		named = true
+		for _, o := range prod.Outputs {
+			if o.Name == in.Object {
+				total += parseDataSizeBytes(o.DataSize)
+			}
+		}
+	}
+	if named {
+		return total
+	}
+	return fallback()
+}
+
 func consumedKeys(t taskSpec, dep string) []string {
 	var keys []string
 	for _, in := range t.Inputs {

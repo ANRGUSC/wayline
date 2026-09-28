@@ -112,7 +112,7 @@ func computePredictedSchedule(tasks []taskSpec, assignMap map[string]nodeInfo, r
 				depNode := assignMap[dep].name
 				arrival := depFinish
 				if depNode != nodeName {
-					bytes := resolveDataSizeBytes(dep, depNode)
+					bytes := edgeBytes(taskByName[dep], taskByName[t.Name], func() int64 { return resolveDataSizeBytes(dep, depNode) })
 					bw := resolveBandwidth(depNode, nodeName)
 					var commCost float64
 					if bw > 0 {

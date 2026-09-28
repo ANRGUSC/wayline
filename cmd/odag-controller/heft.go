@@ -511,7 +511,11 @@ func heftAssignTasks(tasks []taskSpec, nodeMap map[string]nodeInfo, rtResolver r
 		}
 		maxSuccCost := 0.0
 		for _, s := range successors[name] {
-			cost := commCostEstimate(name) + computeRank(s)
+			comm := commCostEstimate(name)
+			if len(taskByName[name].Outputs) > 0 {
+				comm = float64(edgeBytes(taskByName[name], taskByName[s], func() int64 { return 0 })) / avgBandwidth
+			}
+			cost := comm + computeRank(s)
 			if cost > maxSuccCost {
 				maxSuccCost = cost
 			}
@@ -616,7 +620,7 @@ func heftAssignTasks(tasks []taskSpec, nodeMap map[string]nodeInfo, rtResolver r
 						depsReady = depFinish
 					}
 				} else {
-					bytes := resolveDataSizeBytes(dep, depNode)
+					bytes := edgeBytes(taskByName[dep], t, func() int64 { return resolveDataSizeBytes(dep, depNode) })
 					if bytes > 0 {
 						// Data-agent serializes pushes out of dep: this transfer
 						// can only start after dep's previous outgoing push finishes.
