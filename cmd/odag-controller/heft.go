@@ -557,11 +557,6 @@ func heftAssignTasks(tasks []taskSpec, nodeMap map[string]nodeInfo, rtResolver r
 	schedule := make(map[string]heftScheduleEntry, len(tasks))
 	flows := make([]heftFlowEntry, 0)
 
-	// sourceQueueEnd[dep] is the end time of dep's last outgoing cross-node
-	// transfer. The data-agent pushes to successors serially (one blocking
-	// HTTP POST at a time), so a new transfer from dep can't start before
-	// both dep has finished AND dep's prior outgoing transfer has completed.
-	sourceQueueEnd := make(map[string]float64, len(tasks))
 
 	for _, name := range sorted {
 		t := taskByName[name]
@@ -622,9 +617,9 @@ func heftAssignTasks(tasks []taskSpec, nodeMap map[string]nodeInfo, rtResolver r
 				} else {
 					bytes := edgeBytes(taskByName[dep], t, func() int64 { return resolveDataSizeBytes(dep, depNode) })
 					if bytes > 0 {
-						// Data-agent serializes pushes out of dep: this transfer
-						// can only start after dep's previous outgoing push finishes.
-						start := max(depFinish, sourceQueueEnd[dep])
+						// The agent pushes a producer's outputs concurrently;
+						// simulateTransfers shares bandwidth among them.
+						start := depFinish
 						pending = append(pending, pendingTransfer{
 							srcNode:  depNode,
 							dstNode:  nodeName,
@@ -687,11 +682,6 @@ func heftAssignTasks(tasks []taskSpec, nodeMap map[string]nodeInfo, rtResolver r
 		for _, tr := range bestTransfers {
 			if tr.end > tr.start {
 				netTimeline.commitFlow(tr.srcNode, tr.dstNode, tr.taskName, tr.start, tr.end)
-			}
-			// Extend the source task's outgoing queue so the next sibling's
-			// transfer waits for this one to finish.
-			if tr.end > sourceQueueEnd[tr.taskName] {
-				sourceQueueEnd[tr.taskName] = tr.end
 			}
 			flows = append(flows, heftFlowEntry{
 				FromTask: tr.taskName,

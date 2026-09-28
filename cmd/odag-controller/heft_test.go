@@ -196,12 +196,16 @@ func TestHeft_FanOut_Contention(t *testing.T) {
 	// DAG: A -> B, A -> C (fan-out from A).
 	// Each on a dedicated node. A produces 100 MB. BW = 100 MB/s.
 	//
-	// The data-agent pushes A's output to successors serially (one blocking
-	// HTTP POST at a time), so A's two outgoing transfers queue up:
+	// The data agent pushes A's outputs to its consumers concurrently, and
+	// transfers leaving n1 share its egress. HEFT prices them incrementally:
 	//   A finishes at 1.0.
-	//   first xfer (to B in spec order): [1, 2).
-	//   second xfer (to C):              [2, 3).
-	//   B runs [2,3]; C runs [3,4]. Makespan = 4.0.
+	//   B's transfer, placed first, is simulated alone:    [1, 2).
+	//   C's transfer shares n1's egress with it over [1, 2) (50 MB at
+	//   50 MB/s), then runs alone (50 MB at 100 MB/s):       [1, 2.5).
+	//   B runs [2,3]; C runs [2.5,3.5]. Makespan = 3.5.
+	// A committed flow is not slowed retroactively by later ones (with true
+	// fair sharing both would land at 3.0, makespan 4.0); an approximation of
+	// the incremental list scheduler, not of the agent.
 	tasks := []taskSpec{
 		{Name: "A", Runtime: 1.0, DataSize: "100MB", Constraints: []string{"n1"}},
 		{Name: "B", Runtime: 1.0, Dependencies: []string{"A"}, Constraints: []string{"n2"}},
@@ -210,8 +214,8 @@ func TestHeft_FanOut_Contention(t *testing.T) {
 	result := heftAssignTasks(tasks, makeNodes("n1", "n2", "n3"), nil, nil, constBW(100e6), heftOptions{})
 	ms := heftMakespan(result)
 
-	if !approxEqual(ms, 4.0, testEps) {
-		t.Errorf("fan-out makespan=%.3f, want 4.000", ms)
+	if !approxEqual(ms, 3.5, testEps) {
+		t.Errorf("fan-out makespan=%.3f, want 3.500", ms)
 	}
 }
 

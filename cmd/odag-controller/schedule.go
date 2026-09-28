@@ -75,11 +75,10 @@ func computePredictedSchedule(tasks []taskSpec, assignMap map[string]nodeInfo, r
 	result := make([]predictedTaskEntry, 0, len(tasks))
 	flows := make([]predictedFlowEntry, 0)
 
-	// sourceQueueEnd[dep] is the end time of dep's last outgoing cross-node
-	// transfer. The data-agent pushes to successors serially (one blocking
-	// HTTP POST at a time), so sibling transfers from the same source task
-	// are back-to-back, not parallel.
-	sourceQueueEnd := make(map[string]float64)
+	// Transfers run concurrently and share bandwidth (TCP fair share), as
+	// the data agent pushes a producer's outputs in parallel; the same
+	// network timeline as the built-in HEFT prices them.
+	netTimeline := &networkTimeline{}
 
 	// Topological order via repeated passes.
 	for len(result) < len(tasks) {
@@ -102,44 +101,40 @@ func computePredictedSchedule(tasks []taskSpec, assignMap map[string]nodeInfo, r
 			nodeName := assignMap[t.Name].name
 			tl := timelines[nodeName]
 
-			// Compute depsReady: when all deps finish + comm cost. Cross-node
-			// transfers from the same source task are serialized (the data-agent
-			// pushes to successors one at a time), so each new transfer starts
-			// at max(depFinish, end-of-dep's-previous-outgoing-transfer).
+			// depsReady: every input's arrival. Same-node inputs are ready when
+			// their producer finishes; cross-node ones when their transfer,
+			// simulated against every committed flow, completes.
 			depsReady := 0.0
+			var pending []pendingTransfer
 			for _, dep := range t.Dependencies {
 				depFinish := taskFinish[dep]
 				depNode := assignMap[dep].name
-				arrival := depFinish
 				if depNode != nodeName {
 					bytes := edgeBytes(taskByName[dep], taskByName[t.Name], func() int64 { return resolveDataSizeBytes(dep, depNode) })
-					bw := resolveBandwidth(depNode, nodeName)
-					var commCost float64
-					if bw > 0 {
-						commCost = float64(bytes) / bw
-					}
 					if bytes > 0 {
-						start := depFinish
-						if qe := sourceQueueEnd[dep]; qe > start {
-							start = qe
-						}
-						end := start + commCost
-						sourceQueueEnd[dep] = end
-						arrival = end
-						flows = append(flows, predictedFlowEntry{
-							FromTask: dep,
-							ToTask:   t.Name,
-							SrcNode:  depNode,
-							DstNode:  nodeName,
-							Start:    start,
-							End:      end,
-							DataSize: bytes,
+						pending = append(pending, pendingTransfer{
+							srcNode: depNode, dstNode: nodeName, start: depFinish,
+							dataSize: bytes, taskName: dep,
 						})
+						continue
 					}
 				}
-				if arrival > depsReady {
-					depsReady = arrival
+				if depFinish > depsReady {
+					depsReady = depFinish
 				}
+			}
+			for _, tr := range netTimeline.simulateTransfers(pending, resolveBandwidth) {
+				if tr.end > depsReady {
+					depsReady = tr.end
+				}
+				if tr.end > tr.start {
+					netTimeline.commitFlow(tr.srcNode, tr.dstNode, tr.taskName, tr.start, tr.end)
+				}
+				flows = append(flows, predictedFlowEntry{
+					FromTask: tr.taskName, ToTask: t.Name,
+					SrcNode: tr.srcNode, DstNode: tr.dstNode,
+					Start: tr.start, End: tr.end, DataSize: tr.dataSize,
+				})
 			}
 
 			// Find earliest start with available resources.
