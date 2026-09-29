@@ -1,0 +1,46 @@
+# GDTM's model stages (container stages): the repo's code and released
+# checkpoint on the stack it was built for. mmcv-full 1.x ships C++ ops
+# compiled per torch build, the repo's mmdetection/mmclassification forks pin
+# mmcv 1.x, and the repo was tested on torch 1.12.1; this cannot share an
+# image with a current-torch function runner. Build from the repo root:
+#   docker build -f examples/gdtm/Dockerfile.model -t <registry>/wl-gdtm-model:latest .
+# bookworm: torch 1.12's libtorch_cpu.so needs an executable stack, which
+# glibc 2.41 (trixie, the current slim default) refuses to enable.
+FROM python:3.10-slim-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends git curl unzip ca-certificates libgl1 libglib2.0-0 \
+ && rm -rf /var/lib/apt/lists/*
+# numpy stays 1.x for torch 1.12; the constraint holds it through later installs.
+RUN echo "numpy==1.24.3" > /etc/pip-constraints.txt
+ENV PIP_CONSTRAINT=/etc/pip-constraints.txt PIP_NO_CACHE_DIR=1
+RUN pip install numpy==1.24.3 torch==1.12.1+cpu torchvision==0.13.1+cpu torchaudio==0.12.1+cpu \
+      --extra-index-url https://download.pytorch.org/whl/cpu
+RUN pip install opencv-python==4.8.1.78 yapf==0.40.1 \
+ && pip install mmcv-full==1.7.1 -f https://download.openmmlab.com/mmcv/dist/cpu/torch1.12/index.html
+RUN pip install h5py==3.8.0 pyro-ppl==1.8.0 lap==0.5.12 scipy==1.10.1 matplotlib==3.7.1 seaborn==0.12.2 \
+      pycocotools terminaltables motmetrics==1.4.0 dotty_dict attributee tqdm six pandas requests pyyaml pyzmq
+# The repo (MIT) at the commit this port was made from, with its own forks.
+RUN git clone -q https://github.com/nesl/GDTM-tracking.git /opt/gdtm \
+ && git -C /opt/gdtm checkout -q 62860dea524a9526e6436a3ddb5a8776a84e22d4
+WORKDIR /opt/gdtm
+RUN pip install --no-deps --no-build-isolation -e src/mmdetection -e src/mmclassification -e src/cad -e src/TrackEval -e .
+# The Kalman filter and yolov7 are imported as top-level modules (their
+# editable installs used to put these directories on sys.path).
+ENV PYTHONPATH=/opt/gdtm/src/resource_constrained_tracking:/opt/gdtm/src/yolov7 \
+    GDTM_SRC=/opt/gdtm GDTM_WEIGHTS=/opt/gdtm-weights PYTHONWARNINGS=ignore MPLBACKEND=Agg
+# Released checkpoint (single view 3, good light, early fusion, all modalities),
+# split into per-stage weight files in the same layer that downloads it.
+ARG CKPT_ID=1oPoZO_8p5DqpiNWF9FqtBGxbW7f3rrNw
+COPY examples/gdtm/split_ckpt.py /opt/split_ckpt.py
+RUN curl -sfL -o /tmp/ck.zip "https://drive.usercontent.google.com/download?id=${CKPT_ID}&export=download&confirm=t" \
+ && unzip -q -j /tmp/ck.zip logs/early_fusion_zed_mmwave_audio_ucla/epoch_40.pth \
+      logs/early_fusion_zed_mmwave_audio_ucla/val/res.json -d /tmp/ck \
+ && python /opt/split_ckpt.py /tmp/ck/epoch_40.pth /opt/gdtm-weights \
+ && mv /tmp/ck/res.json /opt/gdtm-weights/val_res.json && rm -rf /tmp/ck /tmp/ck.zip
+WORKDIR /app
+COPY sdk/python/wl ./wl
+COPY examples/gdtm/gdtm_model.py examples/gdtm/gdtm_glue.py examples/gdtm/make_segment.py \
+     examples/gdtm/reference.py examples/gdtm/stage.py ./
+# Build every stage once, so a broken dependency or weight file fails here.
+RUN python -c "import gdtm_model as G; [G.load_embedder(*k) for k in G.ORDER]; G.load_fusion(); \
+print('gdtm model ok, calibration', G.calibration(G.WEIGHTS + '/val_res.json'))"
+CMD ["python", "stage.py"]

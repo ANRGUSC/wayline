@@ -1,0 +1,89 @@
+# Warm runners for the GDTM pipeline, one per anrg worker.
+#   gdtm        the glue image: numpy, OpenCV and torch loaded before the
+#               zygote forks (prep, track; sources in --mode warm)
+#   gdtm-model  the model image, every backbone, adapter and the fusion
+#               head built before the zygote forks (embed, fuse in --mode warm)
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: wl-runner-gdtm
+  namespace: wl-system
+  labels: {wl.io/runner: gdtm}
+spec:
+  selector:
+    matchLabels: {wl.io/runner: gdtm}
+  template:
+    metadata:
+      labels: {wl.io/runner: gdtm}
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values: [anrg-1, anrg-3, anrg-4, anrg-5, anrg-6, anrg-7, anrg-8, anrg-9]
+      containers:
+      - name: runner
+        image: 192.168.1.163:5000/wl-gdtm:latest
+        imagePullPolicy: Always
+        command: [python, -m, wl.runner, --script, /app/stage.py, --preload, "numpy,cv2,h5py,torch,gdtm_glue,tracker", --cpus, "7.4"]
+        env:
+        - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+        ports:
+        - {containerPort: 8090, name: invoke}
+        readinessProbe:
+          httpGet: {path: /healthz, port: 8090}
+          periodSeconds: 2
+        volumeMounts:
+        - {name: wl-outputs, mountPath: /data/wl-outputs}
+        - {name: wl-shared, mountPath: /shared/wl-outputs}
+      volumes:
+      - name: wl-outputs
+        hostPath: {path: /data/wl-outputs, type: DirectoryOrCreate}
+      - name: wl-shared
+        hostPath: {path: /shared/wl-outputs, type: DirectoryOrCreate}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: wl-runner-gdtm-model
+  namespace: wl-system
+  labels: {wl.io/runner: gdtm-model}
+spec:
+  selector:
+    matchLabels: {wl.io/runner: gdtm-model}
+  template:
+    metadata:
+      labels: {wl.io/runner: gdtm-model}
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values: [anrg-1, anrg-3, anrg-4, anrg-5, anrg-6, anrg-7, anrg-8, anrg-9]
+      containers:
+      - name: runner
+        image: 192.168.1.163:5000/wl-gdtm-model:latest
+        imagePullPolicy: Always
+        command: [python, -m, wl.runner, --script, /app/stage.py, --preload, "numpy,torch,gdtm_model", --cpus, "7.4"]
+        env:
+        - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+        - {name: GDTM_PRELOAD, value: "1"}
+        ports:
+        - {containerPort: 8090, name: invoke}
+        readinessProbe:
+          httpGet: {path: /healthz, port: 8090}
+          periodSeconds: 2
+        volumeMounts:
+        - {name: wl-outputs, mountPath: /data/wl-outputs}
+        - {name: wl-shared, mountPath: /shared/wl-outputs}
+      volumes:
+      - name: wl-outputs
+        hostPath: {path: /data/wl-outputs, type: DirectoryOrCreate}
+      - name: wl-shared
+        hostPath: {path: /shared/wl-outputs, type: DirectoryOrCreate}
