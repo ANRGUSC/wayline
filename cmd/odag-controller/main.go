@@ -342,6 +342,8 @@ func watchODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
 				// post-campaign idle CPU ~100x the pre-campaign baseline).
 				runningODAGs.Delete(key)
 				schedulePlanCache.Delete(key)
+				statusRunners.Delete(key)
+				completedRuns.Delete(obj.GetUID())
 				forgetWarm(key)
 				go gcDeletedRun(dynClient, client, obj)
 			}
@@ -641,35 +643,8 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 	tasks := extractTasks(odagObj)
 	realizationCache.Store(key, parseRealization(odagObj))
 
-	// Collect pods for this ODAG from the in-memory cache (no API call).
-	// Filter by OwnerReferences UID, not just the ODAG name label — when an
-	// ODAG is deleted and recreated with the same name (common during eval
-	// debugging cycles), pods from the previous incarnation can linger in
-	// the cache. Without the UID check, a stale Failed pod from a prior
-	// run would falsely trigger the failed-state aggregator on the new
-	// run. UID match is atomic per ODAG instance.
-	var podItems []corev1.Pod
-	podCache.Range(func(_, val interface{}) bool {
-		p := val.(*corev1.Pod)
-		if p.Namespace != namespace || p.Labels[labelODAGName] != odagName {
-			return true
-		}
-		ownedByThisODAG := false
-		for _, or := range p.OwnerReferences {
-			if or.UID == ownerUID {
-				ownedByThisODAG = true
-				break
-			}
-		}
-		if ownedByThisODAG {
-			podItems = append(podItems, *p)
-		}
-		return true
-	})
-
-	// Warm invocations have no pod; each is presented as an in-memory pod
-	// so dispatch gates, statuses, completion and makespan treat both alike.
-	podItems = append(podItems, warmPods(namespace, odagName, ownerUID, tasks)...)
+	// This run's pods and warm calls, from the in-memory caches (no API call).
+	podItems := runPods(namespace, odagName, ownerUID, tasks)
 
 	// Build a map of which tasks already have pods, and their current pod phase.
 	existingPods := make(map[string]bool)
@@ -686,14 +661,11 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 	succs := successorCounts(tasks)
 	vertex := make(map[string]bool, len(tasks))
 	cached := make(map[string]cacheEntry, 0)
-	podTaskCount := 0
 	for _, t := range tasks {
 		if isDataVertex(t, succs[t.Name]) {
 			vertex[t.Name] = true
 		} else if e, ok := cacheHitFor(namespace, odagName, t.Name); ok {
 			cached[t.Name] = e
-		} else {
-			podTaskCount++
 		}
 	}
 
@@ -865,13 +837,13 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		}
 	}
 
-	// Update per-task statuses and check overall completion. A data vertex
-	// has no pod, so completion counts pod tasks only: every sink is a pod
-	// (a data vertex must have successors), so all pods Succeeded implies
-	// every vertex on a path to a sink has executed.
-	updateTaskStatuses(dynClient, namespace, odagName, podItems, assignMap, tasks)
-	updateActualFlows(dynClient, namespace, odagName, assignMap, podItems)
-	checkODAGCompletion(dynClient, client, podItems, namespace, odagName, podTaskCount)
+	// Per-task statuses and overall completion, one pass at a time per run
+	// (statusworker.go). A data vertex has no pod, so completion counts pod
+	// tasks only: every sink is a pod (a data vertex must have successors),
+	// so all pods Succeeded implies every vertex on a path to a sink has
+	// executed.
+	requestStatus(statusArgs{dynClient: dynClient, client: client, namespace: namespace,
+		odagName: odagName, ownerUID: ownerUID, tasks: tasks})
 }
 
 // --------------------------------------------------------------------------
@@ -1789,103 +1761,23 @@ func updateTaskStatuses(dynClient dynamic.Interface,
 		}
 	}
 
-	taskStatuses := make([]map[string]interface{}, 0, len(pods))
-	for _, pod := range pods {
-		taskName := pod.Labels[labelTaskName]
-		ts := map[string]interface{}{
-			"name":    taskName,
-			"podName": pod.Name,
-			"node":    pod.Spec.NodeName,
-		}
-		if pod.Status.StartTime != nil {
-			ts["startTime"] = pod.Status.StartTime.UTC().Format(time.RFC3339Nano)
-		}
-		podPhase := "Pending"
-		taskState := "Pending" // default before the SDK has had a chance to mark Running
-		switch pod.Status.Phase {
-		case corev1.PodRunning:
-			podPhase = "Running"
-			ni := assignMap[taskName]
-			if ni.ip != "" {
-				if s := queryTaskState(ni.ip, odagName, taskName); s != "" {
-					taskState = s
-				} else {
-					taskState = "Running"
-				}
-				if querySending(ni.ip, odagName, taskName) {
-					ts["sending"] = true
-				}
-			} else {
-				taskState = "Running"
-			}
-		case corev1.PodSucceeded:
-			podPhase = "Succeeded"
-			taskState = "ComputeDone" // pod exited cleanly
-			for _, cs := range pod.Status.ContainerStatuses {
-				if cs.State.Terminated != nil {
-					ts["completionTime"] = cs.State.Terminated.FinishedAt.UTC().Format(time.RFC3339Nano)
-				}
-			}
-		case corev1.PodFailed:
-			podPhase = "Failed"
-			taskState = "Failed"
-			for _, cs := range pod.Status.ContainerStatuses {
-				if cs.State.Terminated != nil {
-					ts["completionTime"] = cs.State.Terminated.FinishedAt.UTC().Format(time.RFC3339Nano)
-				}
-			}
-		}
-		ts["phase"] = podPhase
-		ts["state"] = taskState
-		if ds := dataSizeMap[taskName]; ds != "" {
-			ts["dataSize"] = ds
-		}
-		// Instrumentation: pod creation is the controller's own clock, so
-		// startupSeconds isolates scheduling + image pull + sandbox +
-		// interpreter start from anything the task itself did.
-		if !pod.CreationTimestamp.IsZero() {
-			ts["createdTime"] = pod.CreationTimestamp.UTC().Format(time.RFC3339Nano)
-			if pod.Status.StartTime != nil {
-				ts["startupSeconds"] = pod.Status.StartTime.Sub(pod.CreationTimestamp.Time).Seconds()
-			}
-		}
-		// Task-internal phase boundaries, reported by the SDK at close().
-		// Absent for tasks whose image predates the instrumented SDK.
-		if podPhase == "Succeeded" || podPhase == "Failed" {
-			if ni := assignMap[taskName]; ni.ip != "" {
-				if tm := queryTimings(ni.ip, odagName, taskName); tm != nil {
-					// Task-code boundaries at sub-millisecond resolution.
-					// Kubernetes pod timestamps are second-granularity, so
-					// these are what make the wall-clock accounting add up:
-					// everything between podStart and taskStart is runtime
-					// bootstrap (interpreter, imports, SDK init), and
-					// everything after close is pod teardown.
-					if v, ok := tm["taskStartUnix"].(float64); ok && v > 0 {
-						ts["taskStartTime"] = unixToRFC3339(v)
-					}
-					if v, ok := tm["closeUnix"].(float64); ok && v > 0 {
-						ts["taskCloseTime"] = unixToRFC3339(v)
-					}
-					if v, ok := tm["computeSeconds"].(float64); ok {
-						ts["computeSeconds"] = v
-					}
-					if v, ok := tm["handoffSeconds"].(float64); ok {
-						ts["handoffSeconds"] = v
-					}
-					if v, ok := tm["inputReadSeconds"].(float64); ok {
-						ts["inputReadSeconds"] = v
-					}
-				}
-			}
-			// Data-availability gate: when the last dependency's output
-			// finished installing on this task's node. Source tasks have no
-			// gate and are left unset.
-			if rt := inputsReadyTime(taskName, tasks, assignMap, odagName); rt != "" {
-				ts["inputsReadyTime"] = rt
-			}
-		}
-		taskStatuses = append(taskStatuses, ts)
+	// One entry per pod, built concurrently: each may query its node's data
+	// agent (state, timings, input arrival), and one at a time a 29-task run
+	// took seconds per pass.
+	entries := make([]map[string]interface{}, len(pods))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, statusQueryConcurrency)
+	for i := range pods {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			entries[i] = podTaskStatus(pods[i], odagName, assignMap, tasks, dataSizeMap)
+		}(i)
 	}
+	wg.Wait()
+	taskStatuses := entries
 
 	// Completed cacheKey outputs become registry entries for future runs.
 	for _, pod := range pods {
@@ -1948,6 +1840,109 @@ func updateTaskStatuses(dynClient dynamic.Interface,
 		context.Background(), odagName, types.MergePatchType, data,
 		metav1.PatchOptions{}, "status",
 	)
+}
+
+// statusQueryConcurrency bounds the data-agent queries one status pass
+// makes at once.
+const statusQueryConcurrency = 16
+
+// podTaskStatus is one status.tasks entry for a task's pod (or warm call).
+func podTaskStatus(pod corev1.Pod, odagName string, assignMap map[string]nodeInfo, tasks []taskSpec,
+	dataSizeMap map[string]string) map[string]interface{} {
+	taskName := pod.Labels[labelTaskName]
+	ts := map[string]interface{}{
+		"name":    taskName,
+		"podName": pod.Name,
+		"node":    pod.Spec.NodeName,
+	}
+	if pod.Status.StartTime != nil {
+		ts["startTime"] = pod.Status.StartTime.UTC().Format(time.RFC3339Nano)
+	}
+	podPhase := "Pending"
+	taskState := "Pending" // default before the SDK has had a chance to mark Running
+	switch pod.Status.Phase {
+	case corev1.PodRunning:
+		podPhase = "Running"
+		ni := assignMap[taskName]
+		if ni.ip != "" {
+			if s := queryTaskState(ni.ip, odagName, taskName); s != "" {
+				taskState = s
+			} else {
+				taskState = "Running"
+			}
+			if querySending(ni.ip, odagName, taskName) {
+				ts["sending"] = true
+			}
+		} else {
+			taskState = "Running"
+		}
+	case corev1.PodSucceeded:
+		podPhase = "Succeeded"
+		taskState = "ComputeDone" // pod exited cleanly
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.State.Terminated != nil {
+				ts["completionTime"] = cs.State.Terminated.FinishedAt.UTC().Format(time.RFC3339Nano)
+			}
+		}
+	case corev1.PodFailed:
+		podPhase = "Failed"
+		taskState = "Failed"
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.State.Terminated != nil {
+				ts["completionTime"] = cs.State.Terminated.FinishedAt.UTC().Format(time.RFC3339Nano)
+			}
+		}
+	}
+	ts["phase"] = podPhase
+	ts["state"] = taskState
+	if ds := dataSizeMap[taskName]; ds != "" {
+		ts["dataSize"] = ds
+	}
+	// Instrumentation: pod creation is the controller's own clock, so
+	// startupSeconds isolates scheduling + image pull + sandbox +
+	// interpreter start from anything the task itself did.
+	if !pod.CreationTimestamp.IsZero() {
+		ts["createdTime"] = pod.CreationTimestamp.UTC().Format(time.RFC3339Nano)
+		if pod.Status.StartTime != nil {
+			ts["startupSeconds"] = pod.Status.StartTime.Sub(pod.CreationTimestamp.Time).Seconds()
+		}
+	}
+	// Task-internal phase boundaries, reported by the SDK at close().
+	// Absent for tasks whose image predates the instrumented SDK.
+	if podPhase == "Succeeded" || podPhase == "Failed" {
+		if ni := assignMap[taskName]; ni.ip != "" {
+			if tm := queryTimings(ni.ip, odagName, taskName); tm != nil {
+				// Task-code boundaries at sub-millisecond resolution.
+				// Kubernetes pod timestamps are second-granularity, so
+				// these are what make the wall-clock accounting add up:
+				// everything between podStart and taskStart is runtime
+				// bootstrap (interpreter, imports, SDK init), and
+				// everything after close is pod teardown.
+				if v, ok := tm["taskStartUnix"].(float64); ok && v > 0 {
+					ts["taskStartTime"] = unixToRFC3339(v)
+				}
+				if v, ok := tm["closeUnix"].(float64); ok && v > 0 {
+					ts["taskCloseTime"] = unixToRFC3339(v)
+				}
+				if v, ok := tm["computeSeconds"].(float64); ok {
+					ts["computeSeconds"] = v
+				}
+				if v, ok := tm["handoffSeconds"].(float64); ok {
+					ts["handoffSeconds"] = v
+				}
+				if v, ok := tm["inputReadSeconds"].(float64); ok {
+					ts["inputReadSeconds"] = v
+				}
+			}
+		}
+		// Data-availability gate: when the last dependency's output
+		// finished installing on this task's node. Source tasks have no
+		// gate and are left unset.
+		if rt := inputsReadyTime(taskName, tasks, assignMap, odagName); rt != "" {
+			ts["inputsReadyTime"] = rt
+		}
+	}
+	return ts
 }
 
 // updateActualFlows polls each node's data-agent /flows/<odag> endpoint, merges
@@ -2026,7 +2021,7 @@ func updateActualFlows(dynClient dynamic.Interface, namespace, odagName string, 
 	)
 }
 
-func checkODAGCompletion(dynClient dynamic.Interface, client *kubernetes.Clientset, pods []corev1.Pod, namespace, odagName string, totalTasks int) {
+func checkODAGCompletion(dynClient dynamic.Interface, client *kubernetes.Clientset, pods []corev1.Pod, namespace, odagName string, ownerUID types.UID, totalTasks int) {
 	// First pass: any Failed pod is terminal regardless of how many other
 	// pods exist. The previous version returned early when len(pods) <
 	// totalTasks, so a task that failed BEFORE its downstream pods were
@@ -2062,6 +2057,10 @@ func checkODAGCompletion(dynClient dynamic.Interface, client *kubernetes.Clients
 			return // still progressing
 		}
 	}
+	// Once per run: later status passes see the same finished pods.
+	if _, done := completedRuns.LoadOrStore(ownerUID, true); done {
+		return
+	}
 	makespan := computeMakespan(pods)
 	updateODAGCompletion(dynClient, namespace, odagName, makespan)
 	log.Printf("[odag-ctrl] ODAG %s/%s Succeeded (makespan: %.2fs)", namespace, odagName, makespan)
@@ -2069,6 +2068,9 @@ func checkODAGCompletion(dynClient dynamic.Interface, client *kubernetes.Clients
 	// Trigger profiling and data cleanup if this ODAG was created from a template.
 	go profileODAGIfTemplated(dynClient, client, namespace, odagName, pods, makespan)
 }
+
+// completedRuns: ODAG UID -> true once marked Succeeded (and profiled).
+var completedRuns sync.Map
 
 // profileODAGIfTemplated checks if a completed ODAG was created from a template
 // and records profiling data if so.
