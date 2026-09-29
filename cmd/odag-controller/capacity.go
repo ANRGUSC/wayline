@@ -52,24 +52,30 @@ func podCPUMillis(p *corev1.Pod) int64 {
 func nodeCPUInUse(node string) int64 {
 	var used int64
 	visible := map[string]bool{}
+	// A dispatched task is "visible" (its reservation can go) as soon as its
+	// pod or invocation exists, finished or not; its CPU counts only while
+	// it runs. (Marking only running ones visible left a fast warm call's
+	// reservation counted until the TTL: phantom load that held later tasks
+	// back for up to a minute.)
 	podCache.Range(func(_, v any) bool {
 		p := v.(*corev1.Pod)
-		if p.Spec.NodeName != node || p.Labels[labelODAGName] == "" || p.DeletionTimestamp != nil {
+		if p.Labels[labelODAGName] == "" {
 			return true
 		}
-		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+		visible[p.Namespace+"/"+p.Labels[labelODAGName]+"/"+p.Labels[labelTaskName]] = true
+		if p.Spec.NodeName != node || p.DeletionTimestamp != nil ||
+			p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 			return true
 		}
 		used += podCPUMillis(p)
-		visible[p.Namespace+"/"+p.Labels[labelODAGName]+"/"+p.Labels[labelTaskName]] = true
 		return true
 	})
 	warmInvocations.Range(func(k, v any) bool {
 		inv := v.(*warmInvocation)
 		inv.mu.Lock()
+		visible[inv.taskKey] = true
 		if inv.node == node && inv.finished.IsZero() {
 			used += inv.cpuMillis
-			visible[inv.taskKey] = true
 		}
 		inv.mu.Unlock()
 		return true

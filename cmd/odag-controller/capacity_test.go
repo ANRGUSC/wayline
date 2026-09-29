@@ -61,6 +61,15 @@ func TestPodsAndWarmCallsShareOneCPUAccount(t *testing.T) {
 	if !admitCPU("ns/run/big", "n3", 16000, 7400) {
 		t.Fatal("oversized task refused on an idle node")
 	}
+	// A warm call that finished before any check still clears its reservation.
+	if !admitCPU("ns/run/quick", "n5", 2000, 7400) {
+		t.Fatal("2-CPU task refused on an idle node")
+	}
+	warmInvocations.Store("ns/run/uid/quick", &warmInvocation{node: "n5", taskKey: "ns/run/quick",
+		cpuMillis: 2000, finished: time.Now()})
+	if got := nodeCPUInUse("n5"); got != 0 {
+		t.Fatalf("finished call still counted = %d, want 0 (reservation must clear)", got)
+	}
 	// The warm call finishing frees its CPU.
 	v, _ := warmInvocations.Load("ns/run/uid/w2")
 	v.(*warmInvocation).finished = time.Now()
