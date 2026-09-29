@@ -15,6 +15,7 @@ package main
 // never goes backwards.
 
 import (
+	"strings"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -135,4 +136,31 @@ func podTaskCount(namespace, odagName string, tasks []taskSpec) int {
 		n++
 	}
 	return n
+}
+
+// dispatchClaims: "ns/odag/uid/task" -> true while the task is dispatched
+// (or being dispatched) in this run. A task is dispatched at most once per
+// run; a failed dispatch releases its claim so a later pass retries.
+var dispatchClaims sync.Map
+
+func dispatchKey(namespace, odagName string, uid types.UID, task string) string {
+	return namespace + "/" + odagName + "/" + string(uid) + "/" + task
+}
+
+// claimDispatch reports whether this caller won the right to dispatch.
+func claimDispatch(key string) bool {
+	_, taken := dispatchClaims.LoadOrStore(key, true)
+	return !taken
+}
+
+func releaseDispatch(key string) { dispatchClaims.Delete(key) }
+
+// forgetDispatches drops a deleted run's claims.
+func forgetDispatches(odagKey string) {
+	dispatchClaims.Range(func(k, _ any) bool {
+		if strings.HasPrefix(k.(string), odagKey+"/") {
+			dispatchClaims.Delete(k)
+		}
+		return true
+	})
 }

@@ -344,6 +344,7 @@ func watchODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
 				schedulePlanCache.Delete(key)
 				statusRunners.Delete(key)
 				completedRuns.Delete(obj.GetUID())
+				forgetDispatches(key)
 				forgetWarm(key)
 				go gcDeletedRun(dynClient, client, obj)
 			}
@@ -810,10 +811,20 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		}
 
 		ni := assignMap[task.Name]
+		// Claim the dispatch before touching the task's agent state. Passes
+		// run concurrently, each from its own snapshot; without the claim a
+		// pass that raced the dispatching one reset the state (and ready
+		// marker) of a task that had already finished, so a fast warm call
+		// never reported ComputeDone and its run never completed.
+		claim := dispatchKey(namespace, odagName, ownerUID, task.Name)
+		if !claimDispatch(claim) {
+			continue
+		}
 		// One CPU account per node for pods and warm calls (capacity.go):
 		// wait for room instead of overbooking the node.
 		admitKey := namespace + "/" + odagName + "/" + task.Name
 		if !admitCPU(admitKey, ni.name, parseTaskCPUMillis(task.CPU), ni.cpuMillis) {
+			releaseDispatch(claim)
 			continue
 		}
 		if ni.ip != "" {
@@ -825,12 +836,14 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		if task.Runner != "" {
 			if err := invokeWarm(dynClient, client, namespace, odagName, ownerUID, task, ni, envVars); err != nil {
 				releaseCPU(admitKey)
+				releaseDispatch(claim)
 				log.Printf("[odag-ctrl] warm invoke %s/%s on %s: %v (will retry)", key, task.Name, ni.name, err)
 			}
 			continue
 		}
 		if err := ensurePod(client, namespace, odagName, task, ni.name, envVars, ownerUID); err != nil {
 			releaseCPU(admitKey)
+			releaseDispatch(claim)
 			log.Printf("[odag-ctrl] error creating pod for %s/%s: %v", key, task.Name, err)
 		} else {
 			log.Printf("[odag-ctrl] launched task %s on node %s", task.Name, ni.name)

@@ -74,3 +74,44 @@ func TestStatusPassesNeverOverlapAndCoalesce(t *testing.T) {
 		t.Fatal("no pass started after the runner went idle")
 	}
 }
+
+func TestTaskIsDispatchedOncePerRun(t *testing.T) {
+	forgetDispatches("ns/run")
+	defer forgetDispatches("ns/run")
+	key := dispatchKey("ns", "run", "uid-1", "track")
+	var wins int32
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if claimDispatch(key) {
+				atomic.AddInt32(&wins, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("%d concurrent passes won the dispatch, want 1", wins)
+	}
+	// A failed dispatch releases the claim; a later pass retries.
+	releaseDispatch(key)
+	if !claimDispatch(key) {
+		t.Fatal("claim not available after a failed dispatch released it")
+	}
+	// A recreated run (new UID) is a different claim; deleting the run
+	// forgets its claims but not another run's.
+	if !claimDispatch(dispatchKey("ns", "run", "uid-2", "track")) {
+		t.Fatal("recreated run blocked by the old run's claim")
+	}
+	other := dispatchKey("ns", "run-2", "uid-3", "track")
+	claimDispatch(other)
+	forgetDispatches("ns/run")
+	if !claimDispatch(key) {
+		t.Fatal("claims survived the run's deletion")
+	}
+	if claimDispatch(other) {
+		t.Fatal("deleting ns/run dropped ns/run-2's claim")
+	}
+	releaseDispatch(other)
+}
