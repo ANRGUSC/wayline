@@ -12,8 +12,16 @@ package main
 // dispatched only if its CPU request fits the node's free capacity (the
 // capacity the scheduler planned with); otherwise it waits for the next
 // dispatch pass. A task larger than the whole node still runs, alone.
+//
+// A pod's CPU ends when its task does, not when the kubelet reports the pod
+// Succeeded: on a busy node that report lags by seconds (about 20 s measured
+// on a node pulling a 1 GB image), and until then the finished pod held CPU
+// that the next task needed. When a task does not fit, the controller asks
+// the node's data agent which counted pods have already reported
+// ComputeDone and stops counting them.
 
 import (
+	"log"
 	"sync"
 	"time"
 
@@ -37,6 +45,22 @@ var reservations sync.Map
 
 const reservationTTL = 60 * time.Second
 
+// computeDone: pod UID -> true once the pod's task reported ComputeDone or
+// Failed to its node's data agent. Keyed by UID, so a retried task's new pod
+// counts again. computeQueried rate-limits the agent queries per pod.
+var computeDone, computeQueried sync.Map
+
+const computeQueryInterval = 250 * time.Millisecond
+
+// taskStateFn asks a node's data agent for a task's state (tests replace it).
+var taskStateFn = queryTaskState
+
+// deferLogged: task key -> last time a deferral was logged (one line per
+// task per deferLogInterval, so a waiting task does not flood the log).
+var deferLogged sync.Map
+
+const deferLogInterval = 5 * time.Second
+
 func podCPUMillis(p *corev1.Pod) int64 {
 	var total int64
 	for _, c := range p.Spec.Containers {
@@ -47,10 +71,17 @@ func podCPUMillis(p *corev1.Pod) int64 {
 	return total
 }
 
+// cpuUse is a node's CPU account, split by source for the deferral log.
+type cpuUse struct{ pods, warm, reserved int64 }
+
+func (u cpuUse) total() int64 { return u.pods + u.warm + u.reserved }
+
 // nodeCPUInUse sums the CPU requested on `node` by every Wayline task that is
 // dispatched and not finished, across all runs.
-func nodeCPUInUse(node string) int64 {
-	var used int64
+func nodeCPUInUse(node string) int64 { return nodeCPU(node).total() }
+
+func nodeCPU(node string) cpuUse {
+	var u cpuUse
 	visible := map[string]bool{}
 	// A dispatched task is "visible" (its reservation can go) as soon as its
 	// pod or invocation exists, finished or not; its CPU counts only while
@@ -67,7 +98,10 @@ func nodeCPUInUse(node string) int64 {
 			p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 			return true
 		}
-		used += podCPUMillis(p)
+		if _, done := computeDone.Load(p.UID); done {
+			return true
+		}
+		u.pods += podCPUMillis(p)
 		return true
 	})
 	warmInvocations.Range(func(k, v any) bool {
@@ -75,7 +109,7 @@ func nodeCPUInUse(node string) int64 {
 		inv.mu.Lock()
 		visible[inv.taskKey] = true
 		if inv.node == node && inv.finished.IsZero() {
-			used += inv.cpuMillis
+			u.warm += inv.cpuMillis
 		}
 		inv.mu.Unlock()
 		return true
@@ -87,11 +121,51 @@ func nodeCPUInUse(node string) int64 {
 		case visible[k.(string)] || now.Sub(r.at) > reservationTTL:
 			reservations.Delete(k)
 		case r.node == node:
-			used += r.cpu
+			u.reserved += r.cpu
 		}
 		return true
 	})
-	return used
+	return u
+}
+
+// refreshComputeDone asks the node's data agent about every running Wayline
+// pod on `node` not yet known to be done, and records those whose task has
+// ended. It also forgets pods that left the cache.
+func refreshComputeDone(node string) {
+	live := map[any]bool{}
+	var ask []*corev1.Pod
+	now := time.Now()
+	podCache.Range(func(_, v any) bool {
+		p := v.(*corev1.Pod)
+		live[p.UID] = true
+		if p.Labels[labelODAGName] == "" || p.Spec.NodeName != node || p.Status.HostIP == "" ||
+			p.DeletionTimestamp != nil || p.Status.Phase != corev1.PodRunning {
+			return true
+		}
+		if _, done := computeDone.Load(p.UID); done {
+			return true
+		}
+		if t, ok := computeQueried.Load(p.UID); ok && now.Sub(t.(time.Time)) < computeQueryInterval {
+			return true
+		}
+		ask = append(ask, p)
+		return true
+	})
+	for _, p := range ask {
+		computeQueried.Store(p.UID, now)
+		switch taskStateFn(p.Status.HostIP, p.Labels[labelODAGName], p.Labels[labelTaskName]) {
+		case "ComputeDone", "Failed":
+			computeDone.Store(p.UID, true)
+		}
+	}
+	for _, m := range []*sync.Map{&computeDone, &computeQueried} {
+		m.Range(func(k, _ any) bool {
+			if !live[k] {
+				m.Delete(k)
+			}
+			return true
+		})
+	}
 }
 
 // admitCPU reserves `cpu` millicores on `node` for task `key` if they fit
@@ -100,6 +174,26 @@ func admitCPU(key, node string, cpu, capacity int64) bool {
 	if capacity <= 0 || cpu <= 0 {
 		return true
 	}
+	if tryAdmit(key, node, cpu, capacity) {
+		return true
+	}
+	// Does not fit: free the CPU of pods whose task already ended (agent
+	// queries, outside the lock), then decide again.
+	refreshComputeDone(node)
+	if tryAdmit(key, node, cpu, capacity) {
+		return true
+	}
+	now := time.Now()
+	if t, ok := deferLogged.Load(key); !ok || now.Sub(t.(time.Time)) >= deferLogInterval {
+		deferLogged.Store(key, now)
+		u := nodeCPU(node)
+		log.Printf("[admit] %s waits on %s: needs %dm, in use %dm (pods %dm, warm %dm, reserved %dm) of %dm",
+			key, node, cpu, u.total(), u.pods, u.warm, u.reserved, capacity)
+	}
+	return false
+}
+
+func tryAdmit(key, node string, cpu, capacity int64) bool {
 	admitMu.Lock()
 	defer admitMu.Unlock()
 	if _, held := reservations.Load(key); held {
@@ -110,6 +204,7 @@ func admitCPU(key, node string, cpu, capacity int64) bool {
 		return false
 	}
 	reservations.Store(key, cpuReservation{node: node, cpu: cpu, at: time.Now()})
+	deferLogged.Delete(key)
 	return true
 }
 

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"sync"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func testPod(name, node, task string, cpu string, phase corev1.PodPhase) *corev1.Pod {
@@ -75,5 +77,54 @@ func TestPodsAndWarmCallsShareOneCPUAccount(t *testing.T) {
 	v.(*warmInvocation).finished = time.Now()
 	if got := nodeCPUInUse("n1"); got != 5000 {
 		t.Fatalf("after the warm call finished = %d, want 5000", got)
+	}
+}
+
+func TestFinishedTaskPodFreesCPUBeforeKubeletReports(t *testing.T) {
+	resetCapacityState()
+	defer resetCapacityState()
+	defer func() { taskStateFn = queryTaskState }()
+	for _, m := range []*sync.Map{&computeDone, &computeQueried} {
+		m.Range(func(k, _ any) bool { m.Delete(k); return true })
+	}
+	states := map[string]string{"src": "ComputeDone", "busy": "Running"}
+	asked := 0
+	taskStateFn = func(ip, odag, task string) string { asked++; return states[task] }
+	pod := func(name, task, cpu string) *corev1.Pod {
+		p := testPod(name, "n1", task, cpu, corev1.PodRunning)
+		p.UID = types.UID("uid-" + name)
+		p.Status.HostIP = "10.0.0.1"
+		return p
+	}
+	// The source finished computing but the kubelet still reports Running.
+	podCache.Store("ns/src", pod("src", "src", "1"))
+	podCache.Store("ns/busy", pod("busy", "busy", "4"))
+	// 5 of 6.9 counted: a 2-CPU task fits only once the source is known done.
+	if !admitCPU("ns/run/embed", "n1", 2000, 6900) {
+		t.Fatal("2-CPU task refused although the 1-CPU pod's task had ended")
+	}
+	if got := nodeCPUInUse("n1"); got != 6000 {
+		t.Fatalf("in use = %d, want 6000 (busy 4 + reserved 2, source freed)", got)
+	}
+	// A task that still does not fit waits, and the running pod keeps counting.
+	if admitCPU("ns/run/more", "n1", 2000, 6900) {
+		t.Fatal("2-CPU task admitted beside 6 CPUs on a 6.9-CPU node")
+	}
+	// A retried task gets a new pod (new UID): it counts again.
+	podCache.Delete("ns/src")
+	podCache.Store("ns/src2", pod("src2", "src", "1"))
+	states["src"] = "Running"
+	if got := nodeCPUInUse("n1"); got != 7000 {
+		t.Fatalf("after the retry = %d, want 7000 (new pod counted)", got)
+	}
+	if _, ok := computeDone.Load(types.UID("uid-src")); !ok {
+		t.Fatal("expected the old pod's entry until the next refresh")
+	}
+	refreshComputeDone("n1")
+	if _, ok := computeDone.Load(types.UID("uid-src")); ok {
+		t.Fatal("entry for a pod no longer cached was not dropped")
+	}
+	if asked == 0 {
+		t.Fatal("the data agent was never asked")
 	}
 }
