@@ -168,6 +168,58 @@ var syncMode = "full"
 func syncPayload() bool  { return syncMode == "full" || syncMode == "data" }
 func syncMetadata() bool { return syncMode == "full" }
 
+// Per-object durability. The controller decides which objects must survive
+// a crash (a run's final outputs and cacheable outputs by default, anything
+// a policy or the spec marks durable) and the SDK says so on install with
+// X-Wayline-Durable; the agent records it in a .wl-durable sidecar and
+// forwards it on every push, so every copy follows the object's rule. A
+// durable object's payload is fsynced before it is renamed into place, and
+// its metadata too when the node's --sync is full. Without the header the
+// node's --sync default applies. POST /sync/<odag>/<obj> makes an installed
+// object durable in place (a realization revision).
+const headerDurable = "X-Wayline-Durable"
+
+func durableFile(rel string) string { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-durable") }
+
+// requestDurable reads the install's durability from its header, falling
+// back to the node default.
+func requestDurable(r *http.Request) bool {
+	switch strings.ToLower(r.Header.Get(headerDurable)) {
+	case "1", "true", "yes":
+		return true
+	case "0", "false", "no":
+		return false
+	}
+	return syncPayload()
+}
+
+// objectDurable reports an installed object's durability (node default if
+// it was installed without one).
+func objectDurable(rel string) bool {
+	b, err := os.ReadFile(durableFile(rel))
+	if err != nil {
+		return syncPayload()
+	}
+	return strings.TrimSpace(string(b)) == "1"
+}
+
+func markDurable(rel string, durable, sync bool) {
+	v := "0"
+	if durable {
+		v = "1"
+	}
+	if err := writeTextAtomicSync(durableFile(rel), v, sync); err != nil {
+		log.Printf("[data-agent] markDurable %s: %v", rel, err)
+	}
+}
+
+func durableHeader(durable bool) string {
+	if durable {
+		return "1"
+	}
+	return "0"
+}
+
 // pushSem is the node-wide push concurrency semaphore. nil iff
 // maxConcurrentPushes is 0 (unbounded). Initialized in main().
 var pushSem chan struct{}
@@ -348,8 +400,10 @@ func readInstalledDigest(rel string) string {
 // writeInstalledDigest persists the SHA-256 of the just-installed output.
 // Durably written (temp + fsync + rename + fsync parent) so the idempotent
 // fast-path stays correct after a crash.
-func writeInstalledDigest(rel, hexDigest string) {
-	if err := writeTextAtomic(digestSidecarFile(rel), hexDigest); err != nil {
+func writeInstalledDigest(rel, hexDigest string) { writeInstalledDigestSync(rel, hexDigest, syncMetadata()) }
+
+func writeInstalledDigestSync(rel, hexDigest string, sync bool) {
+	if err := writeTextAtomicSync(digestSidecarFile(rel), hexDigest, sync); err != nil {
 		log.Printf("[data-agent] writeInstalledDigest %s: %v", rel, err)
 	}
 }
@@ -418,11 +472,15 @@ func transferCanceled(rel, consumer string) bool {
 // Durability matters here: the recovery path on agent restart relies on this
 // file being correct.
 func setTransferState(rel, consumer, state string) {
+	setTransferStateSync(rel, consumer, state, syncMetadata())
+}
+
+func setTransferStateSync(rel, consumer, state string, sync bool) {
 	if !validTransferStates[state] {
 		log.Printf("[data-agent] setTransferState %s/%s: rejected invalid value %q", rel, consumer, state)
 		return
 	}
-	if err := writeTextAtomic(transferStateFile(rel, consumer), state); err != nil {
+	if err := writeTextAtomicSync(transferStateFile(rel, consumer), state, sync); err != nil {
 		log.Printf("[data-agent] setTransferState %s/%s=%s: %v", rel, consumer, state, err)
 	}
 }
@@ -431,8 +489,12 @@ func setTransferState(rel, consumer, state string) {
 // Overwrites any prior entry. The recovery path (fix H) reads this back on
 // restart, so atomicity is part of the data-plane contract.
 func writeTransferEntry(rel, consumer string, e transferEntry) {
+	writeTransferEntrySync(rel, consumer, e, syncMetadata())
+}
+
+func writeTransferEntrySync(rel, consumer string, e transferEntry, sync bool) {
 	e.UpdatedAt = float64(time.Now().UnixNano()) / 1e9
-	if err := writeJSONAtomic(transferEntryFile(rel, consumer), e); err != nil {
+	if err := writeJSONAtomicSync(transferEntryFile(rel, consumer), e, sync); err != nil {
 		log.Printf("[data-agent] writeTransferEntry %s/%s: %v", rel, consumer, err)
 	}
 }
@@ -596,6 +658,12 @@ func writeFile(path, value string) error {
 // parent's dirent. Used for transfer-queue files where durability is part of
 // the data-plane contract.
 func writeTextAtomic(path, value string) error {
+	return writeTextAtomicSync(path, value, syncMetadata())
+}
+
+// writeTextAtomicSync is writeTextAtomic with the fsyncs decided by the
+// caller (per-object durability) instead of the node's --sync default.
+func writeTextAtomicSync(path, value string, sync bool) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -614,7 +682,7 @@ func writeTextAtomic(path, value string) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if syncMetadata() {
+	if sync {
 		if err := f.Sync(); err != nil {
 			_ = f.Close()
 			_ = os.Remove(tmp)
@@ -629,7 +697,7 @@ func writeTextAtomic(path, value string) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if syncMetadata() {
+	if sync {
 		fsyncDir(dir)
 	}
 	return nil
@@ -637,11 +705,15 @@ func writeTextAtomic(path, value string) error {
 
 // writeJSONAtomic marshals obj as JSON and writes it durably via writeTextAtomic.
 func writeJSONAtomic(path string, obj interface{}) error {
+	return writeJSONAtomicSync(path, obj, syncMetadata())
+}
+
+func writeJSONAtomicSync(path string, obj interface{}, sync bool) error {
 	b, err := json.Marshal(obj)
 	if err != nil {
 		return err
 	}
-	return writeTextAtomic(path, string(b))
+	return writeTextAtomicSync(path, string(b), sync)
 }
 
 // setTaskState writes a value from the locked task-state vocabulary to
@@ -665,7 +737,9 @@ func setTaskState(rel, state string) {
 // The marker is a zero-byte file. To survive a crash we fsync the parent
 // directory after creation so the dirent change is on disk before any
 // consumer observes it.
-func setReady(rel string) {
+func setReady(rel string) { setReadySync(rel, syncMetadata()) }
+
+func setReadySync(rel string, sync bool) {
 	p := readyFile(rel)
 	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
 		log.Printf("[data-agent] setReady mkdir %s: %v", p, err)
@@ -677,7 +751,7 @@ func setReady(rel string) {
 		return
 	}
 	_ = f.Close()
-	if syncMetadata() {
+	if sync {
 		fsyncDir(filepath.Dir(p))
 	}
 }
@@ -872,6 +946,13 @@ func fsyncDir(dir string) {
 // expectedDigest of "" disables the check (used by GET-fallback paths that
 // don't carry an X-Wayline-Content-SHA256 header).
 func installAtomically(destPath string, body io.Reader, expectedDigest string) (digest string, n int64, err error) {
+	return installAtomicallyDurable(destPath, body, expectedDigest, syncPayload())
+}
+
+// installAtomicallyDurable is installAtomically with the payload fsyncs
+// decided per object: durable objects are synced before the rename, others
+// are only renamed into place (still atomic for readers).
+func installAtomicallyDurable(destPath string, body io.Reader, expectedDigest string, durable bool) (digest string, n int64, err error) {
 	dir := filepath.Dir(destPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", 0, err
@@ -893,7 +974,7 @@ func installAtomically(destPath string, body io.Reader, expectedDigest string) (
 		_ = os.Remove(tmpPath)
 		return "", 0, err
 	}
-	if syncPayload() {
+	if durable {
 		if err := f.Sync(); err != nil {
 			_ = f.Close()
 			_ = os.Remove(tmpPath)
@@ -915,7 +996,7 @@ func installAtomically(destPath string, body io.Reader, expectedDigest string) (
 		_ = os.Remove(tmpPath)
 		return "", 0, err
 	}
-	if syncPayload() {
+	if durable {
 		fsyncDir(dir)
 	}
 	return digest, n, nil
@@ -995,6 +1076,7 @@ func pushToNode(ctx context.Context, odag, task, host, localFile, contentDigest 
 			req.Header.Set(headerContentSHA256, contentDigest)
 		}
 		req.Header.Set(headerSourceNode, localNodeName)
+		req.Header.Set(headerDurable, durableHeader(objectDurable(odag+"/"+task)))
 		resp, err := client.Do(req)
 		// File close: for the raw path, close here; for gzip, the goroutine
 		// closed it already.
@@ -1311,14 +1393,17 @@ func main() {
 		// transfer has been durably enqueued by the local agent" a true
 		// statement of the response we're about to send.
 		if len(body.Successors) > 0 {
+			// A non-durable object's queue need not survive a crash either:
+			// the object itself would not.
+			qsync := objectDurable(rel) && syncMetadata()
 			transfersPath := transfersDir(rel)
 			for _, succ := range body.Successors {
-				writeTransferEntry(rel, succ.Name, transferEntry{
+				writeTransferEntrySync(rel, succ.Name, transferEntry{
 					Consumer: succ.Name, Host: succ.Host, Node: succ.Node, Retries: 0,
-				})
-				setTransferState(rel, succ.Name, "Pending")
+				}, qsync)
+				setTransferStateSync(rel, succ.Name, "Pending", qsync)
 			}
-			if syncMetadata() {
+			if qsync {
 				fsyncDir(transfersPath)
 			}
 		}
@@ -1828,6 +1913,43 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	// POST /sync/<odag>/<obj> — make an installed object durable in place:
+	// fsync its payload and directory, then record it durable (synced) so
+	// every later push of it installs durably too. Idempotent; 404 if the
+	// object is not installed here. Used by realization revisions.
+	http.HandleFunc("/sync/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		parts, status, msg := parsePathComponents(r.URL.Path, "/sync/", 2)
+		if status != http.StatusOK {
+			http.Error(w, msg, status)
+			return
+		}
+		rel := parts[0] + "/" + parts[1]
+		if !isReady(rel) {
+			http.Error(w, "object not installed on this node", http.StatusNotFound)
+			return
+		}
+		f, err := os.Open(filepath.Join(dataDir, parts[0], parts[1], "output"))
+		if err != nil {
+			http.Error(w, "open payload: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		serr := f.Sync()
+		_ = f.Close()
+		if serr != nil {
+			http.Error(w, "fsync payload: "+serr.Error(), http.StatusInternalServerError)
+			return
+		}
+		fsyncDir(filepath.Join(dataDir, parts[0], parts[1]))
+		markDurable(rel, true, true)
+		setReadySync(rel, true)
+		log.Printf("[data-agent/%s] SYNC %s: durable", nodeName, rel)
+		w.WriteHeader(http.StatusOK)
+	})
+
 	// GET /flows/<odag>    — returns all per-push flow records on this node.
 	// DELETE /flows/<odag> — truncates the flow log (idempotent).
 	http.HandleFunc("/flows/", func(w http.ResponseWriter, r *http.Request) {
@@ -1938,7 +2060,9 @@ func main() {
 			// never touched (temp file is removed). The .wl-ready marker is
 			// only set AFTER the rename succeeds, so a consumer that gates on
 			// the marker can never observe a partial or stale payload.
-			computedDigest, n, err := installAtomically(fullPath, bodyReader, claimed)
+			durable := requestDurable(r)
+			meta := durable && syncMetadata()
+			computedDigest, n, err := installAtomicallyDurable(fullPath, bodyReader, claimed, durable)
 			if err != nil {
 				if errors.Is(err, errChecksumMismatch) {
 					metricPutMismatch.Add(1)
@@ -1957,7 +2081,8 @@ func main() {
 			// sidecar the next request can't fast-path, but without the
 			// marker no consumer reads stale bytes. Task lifecycle state
 			// belongs to the producer's own node and is not touched here.
-			writeInstalledDigest(rel, computedDigest)
+			writeInstalledDigestSync(rel, computedDigest, meta)
+			markDurable(rel, durable, meta)
 			// Data-availability timestamp: recorded immediately before the
 			// readiness marker, so it is never later than the moment a
 			// consumer could first observe the payload.
@@ -1971,8 +2096,8 @@ func main() {
 				Source:   src,
 				FromNode: fromNode,
 			})
-			setReady(rel)
-			log.Printf("[data-agent/%s] PUT %s (%d bytes, sha256=%s) → ReadyLocal", nodeName, r.URL.Path, n, computedDigest)
+			setReadySync(rel, meta)
+			log.Printf("[data-agent/%s] PUT %s (%d bytes, sha256=%s, durable=%v) → ReadyLocal", nodeName, r.URL.Path, n, computedDigest, durable)
 			w.WriteHeader(http.StatusOK)
 		case http.MethodGet:
 			// Default: require .wl-ready. Files may exist on disk before

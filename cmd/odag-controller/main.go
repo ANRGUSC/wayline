@@ -842,6 +842,7 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 			resetTaskState(ni.ip, odagName, task.Name)
 		}
 		envVars := buildEnvVars(odagName, task, assignMap, tasks)
+		envVars = append(envVars, durabilityEnv(runDurability(odagObj), task, tasks)...)
 		envVars = addTemplateEnvVars(envVars, odagObj.GetLabels())
 		if task.Runner != "" {
 			if err := invokeWarm(dynClient, client, namespace, odagName, ownerUID, task, ni, envVars); err != nil {
@@ -872,6 +873,7 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 type outputSpec struct {
 	Name     string
 	DataSize string
+	Durable  *bool // nil: decided by the run's durability policy (durability.go)
 }
 
 type inputSpec struct {
@@ -884,6 +886,7 @@ type taskSpec struct {
 	Type           string       // "" = compute (pod); "data" = data vertex (no pod)
 	CacheKey       string       // non-empty: eligible for cross-run reuse
 	Runner         string       // non-empty: execute on this warm runner instead of a fresh pod (warm.go)
+	Durable        *bool        // nil: decided by the run's durability policy (durability.go)
 	Function       string       // function to call on the runner; defaults to the task name
 	Outputs        []outputSpec // named outputs; empty = single default output
 	Inputs         []inputSpec  // which named object each dependency supplies
@@ -1035,6 +1038,10 @@ func extractTasks(obj *unstructured.Unstructured) []taskSpec {
 		typ, _ := t["type"].(string)
 		cacheKey, _ := t["cacheKey"].(string)
 		runner, _ := t["runner"].(string)
+		var durable *bool
+		if b, ok := t["durable"].(bool); ok {
+			durable = &b
+		}
 		function, _ := t["function"].(string)
 		var outputs []outputSpec
 		if rawOuts, ok := t["outputs"].([]interface{}); ok {
@@ -1043,7 +1050,11 @@ func extractTasks(obj *unstructured.Unstructured) []taskSpec {
 					n, _ := m["name"].(string)
 					ds, _ := m["dataSize"].(string)
 					if n != "" {
-						outputs = append(outputs, outputSpec{Name: n, DataSize: ds})
+						o := outputSpec{Name: n, DataSize: ds}
+						if b, ok := m["durable"].(bool); ok {
+							o.Durable = &b
+						}
+						outputs = append(outputs, o)
 					}
 				}
 			}
@@ -1120,6 +1131,7 @@ func extractTasks(obj *unstructured.Unstructured) []taskSpec {
 			Type:                     typ,
 			CacheKey:                 cacheKey,
 			Runner:                   runner,
+			Durable:                  durable,
 			Function:                 function,
 			Outputs:                  outputs,
 			Inputs:                   inputs,

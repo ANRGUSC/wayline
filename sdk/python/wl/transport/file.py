@@ -75,6 +75,7 @@ _INSTALL_TIMEOUT_S = 300
 # Wire-level headers — must match cmd/data-agent/main.go constants.
 _HDR_CONTENT_SHA256 = "X-Wayline-Content-SHA256"
 _HDR_UNCOMPRESSED_LENGTH = "X-Wayline-Uncompressed-Length"
+_HDR_DURABLE = "X-Wayline-Durable"
 
 
 class FileTransport:
@@ -124,6 +125,14 @@ class FileTransport:
         except Exception as e:
             print(f"[{self.task_name}] WARNING: failed to set task state={state}: {e}", flush=True)
 
+    def _durable(self, output: str | None):
+        """"1"/"0" if the controller set this object's durability, else None.
+        WL_OUT_<NAME>_DURABLE for a named output, WL_DURABLE for the default."""
+        if output and output != "output":
+            key = output.upper().replace("-", "_").replace(".", "_")
+            return os.environ.get(f"WL_OUT_{key}_DURABLE") or None
+        return os.environ.get("WL_DURABLE") or None
+
     def _object_key(self, output: str | None) -> str:
         """Data-plane identity of an output: task name for the default
         output, "task.name" for a named one."""
@@ -147,17 +156,19 @@ class FileTransport:
         digest = hashlib.sha256(payload).hexdigest()
         url = (f"http://{self.node_ip}:{_DATA_AGENT_PORT}/"
                f"{self.odag_name}/{self._object_key(output)}/output")
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            method="PUT",
-            headers={
-                _HDR_CONTENT_SHA256: digest,
-                _HDR_UNCOMPRESSED_LENGTH: str(len(payload)),
-                "Content-Length": str(len(payload)),
-                "Content-Type": "application/octet-stream",
-            },
-        )
+        headers = {
+            _HDR_CONTENT_SHA256: digest,
+            _HDR_UNCOMPRESSED_LENGTH: str(len(payload)),
+            "Content-Length": str(len(payload)),
+            "Content-Type": "application/octet-stream",
+        }
+        # Per-object durability, decided by the controller: fsync this object
+        # (it must survive a crash) or only rename it into place. Absent, the
+        # agent's node default applies.
+        durable = self._durable(output)
+        if durable is not None:
+            headers[_HDR_DURABLE] = durable
+        req = urllib.request.Request(url, data=payload, method="PUT", headers=headers)
         with urllib.request.urlopen(req, timeout=_INSTALL_TIMEOUT_S) as resp:
             if resp.status != 200:
                 raise RuntimeError(

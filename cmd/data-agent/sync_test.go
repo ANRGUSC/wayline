@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -42,4 +43,32 @@ func TestInstallAtomicallyAllSyncModes(t *testing.T) {
 		}
 	}
 	syncMode = "full"
+}
+
+func TestPerObjectDurability(t *testing.T) {
+	dataDir = t.TempDir()
+	defer func() { syncMode = "full" }()
+	for _, mode := range []string{"full", "none"} {
+		syncMode = mode
+		r, _ := http.NewRequest(http.MethodPut, "/x", nil)
+		if got, want := requestDurable(r), mode == "full"; got != want {
+			t.Errorf("%s: no header -> %v, want node default %v", mode, got, want)
+		}
+		r.Header.Set(headerDurable, "1")
+		if !requestDurable(r) {
+			t.Errorf("%s: header 1 not durable", mode)
+		}
+		r.Header.Set(headerDurable, "false")
+		if requestDurable(r) {
+			t.Errorf("%s: header false durable", mode)
+		}
+		rel := "run/" + mode + ".obj"
+		if got := objectDurable(rel); got != (mode == "full") {
+			t.Errorf("%s: unmarked object -> %v, want node default", mode, got)
+		}
+		markDurable(rel, mode == "none", false) // opposite of the default
+		if got := objectDurable(rel); got != (mode == "none") {
+			t.Errorf("%s: marked object -> %v", mode, got)
+		}
+	}
 }

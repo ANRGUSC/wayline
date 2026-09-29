@@ -42,6 +42,7 @@ type realizationEntry struct {
 	Copies      []string
 	ServingCopy string
 	Evict       []string
+	Durable     bool // make every installed copy durable (durability.go)
 }
 
 // reconcileGen dedupes concurrent reconciles per run: only the goroutine
@@ -92,6 +93,7 @@ func parseRealization(obj *unstructured.Unstructured) []realizationEntry {
 			continue
 		}
 		e.ServingCopy, _ = m["servingCopy"].(string)
+		e.Durable, _ = m["durable"].(bool)
 		for _, c := range asStringSlice(m["copies"]) {
 			e.Copies = append(e.Copies, c)
 		}
@@ -352,6 +354,24 @@ func reconcileOnce(key, odagName string, entries []realizationEntry,
 			} else {
 				posted[e.Object+"/"+n] = true
 				log.Printf("[realize] %s: %s: copy enqueued %s->%s", key, e.Object, source, n)
+			}
+		}
+
+		// Durability revision: sync every installed copy in place, once per
+		// node. Copies made later inherit it, because each push carries the
+		// source copy's durability.
+		if e.Durable {
+			for node, ni := range nodeMap {
+				if !ready(node) || posted["sync/"+e.Object+"/"+node] {
+					continue
+				}
+				if err := syncCopy(ni.ip, odagName, e.Object); err != nil {
+					log.Printf("[realize] %s: %s: sync on %s: %v", key, e.Object, node, err)
+					converged = false
+				} else {
+					posted["sync/"+e.Object+"/"+node] = true
+					log.Printf("[realize] %s: %s: copy on %s made durable", key, e.Object, node)
+				}
 			}
 		}
 

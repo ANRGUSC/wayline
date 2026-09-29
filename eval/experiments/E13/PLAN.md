@@ -180,3 +180,19 @@ so every run gets the identical placement (verified):
 - The durability default stays `full` pending a decision; durability could be
   a per-object realization property (fsync what must survive a crash, not
   every intermediate).
+
+### Per-object durability (2026-09-29)
+
+`spec.durability: auto` (the new default) syncs only a run's final outputs
+and cacheKey outputs; agents stay on `--sync full` as their node default.
+Same frozen placement as above (`results/20260929T001230Z/`, verified):
+
+| on the critical path, warm | full (before) | auto | none |
+|---|---|---|---|
+| output handoff | 9.8 s | 2.3 s | 2.3 s |
+| makespan, warm | 63.6 s | 55.9 s | 55.7 s |
+| Ray pinned | 51.5 s | 54.9 s | 55.6 s |
+
+The agents logged 104 non-durable installs and 2 durable ones (the sink's
+output in each Wayline run). `auto` costs the same as syncing nothing while
+the run's results stay crash-safe.

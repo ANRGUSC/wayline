@@ -429,6 +429,39 @@ replication on a health signal).
 
 ---
 
+
+### Durability
+
+Each object is either durable (fsynced to storage on every node that holds
+it, so it survives a crash) or not (written atomically, so no reader ever
+sees a partial object, but a power loss can lose it and its task reruns).
+Syncing every object is expensive on edge storage: on the testbed's eMMC,
+one sync can wait for other files' large writes, and E13 measured 7 to 11 s
+of stalls on a run's critical path.
+
+`spec.durability` sets the policy:
+
+| value | durable objects |
+|---|---|
+| `auto` (default) | a run's final outputs (objects nothing consumes) and outputs with a `cacheKey` |
+| `all` | every object |
+| `none` | none |
+| `node` | each data agent's `--sync` default decides |
+
+`tasks[].durable` and `tasks[].outputs[].durable` override the policy for
+one task or one output. A running policy can also make an object durable
+after the fact:
+
+```yaml
+spec:
+  realization:
+  - object: fuse.tracks
+    durable: true      # sync every installed copy now; later copies inherit it
+```
+
+The decision travels with the object: the SDK marks each install, and the
+agents forward the mark on every copy they push.
+
 ## Schedulers and policies
 
 `spec.scheduler` accepts four forms:
