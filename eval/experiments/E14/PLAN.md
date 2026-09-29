@@ -1,10 +1,13 @@
-# E14: A real mixed pipeline (FOCAL on MOD)
+# E14: FOCAL on MOD, the first ported IoBT pipeline
 
 The first IoBT pipeline from `slides/iobt-sensor-ml-pipelines.pdf` ported to
-Wayline: FOCAL (UIUC) on MOD, in `examples/focal-mod/`. Functions for the
-light stages (sources, FFTs, fusion head), containers for the PyTorch
-encoders. Seismic source pinned to anrg-4, audio source to anrg-9; built-in
-HEFT, batch of 64 two-second windows, uncapped clocks, clean network.
+Wayline: FOCAL (UIUC) on MOD, in `examples/focal-mod/`. Its real shape is
+all functions (one current PyTorch stack); the "mixed" variant below runs the
+encoders as pods only to exercise the mixed path. E15 (GDTM) is the pipeline
+whose real shape is mixed.
+
+Seismic source pinned to anrg-4, audio source to anrg-9; built-in HEFT,
+batch of 64 two-second windows, uncapped clocks, clean network.
 
 `focalrun.py <mode> <batch> <seed>` runs one variant, prints the stage
 timeline, and checks the pipeline's logits against the unsplit model run in

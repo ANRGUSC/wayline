@@ -1,4 +1,4 @@
-# FOCAL on MOD: a mixed function/container pipeline
+# FOCAL on MOD: an all-function pipeline
 
 Vehicle classification from seismic (100 Hz) and acoustic (8 kHz) sensing
 with FOCAL's SW_Transformer (Liu et al., github.com/tomoyoshki/focal, MIT),
@@ -10,12 +10,19 @@ source-seismic -> fft-seismic -> encoder-seismic --\
 source-audio   -> fft-audio   -> encoder-audio   --/
 ```
 
-| stage | work | per 64 two-second windows | kind (mixed) |
+| stage | work | per 64 two-second windows | kind in `--mode mixed` |
 |---|---|---|---|
 | source-* | read a window batch (pinned to its sensor node) | 0.05 / 4.1 MB out | function |
 | fft-* | FOCAL's `fft_preprocess` | ms | function |
 | encoder-* | patch embed, Swin layers, projection | 0.5-0.8 s on an i3-N305 | container |
 | fuse-head | modality fusion and classifier | ms | function |
+
+In its real shape FOCAL is all functions: every stage is plain PyTorch on
+one current stack, with nothing that needs its own image, device or
+isolation, so the whole pipeline fits one warm runner (`--mode warm`).
+`--mode mixed` runs the encoders as pods only to exercise the mixed path;
+it is not a claim about the pipeline. For a pipeline whose real shape is
+mixed, see `examples/gdtm`.
 
 `focal_stages.py` builds the model from FOCAL's MOD config and splits it; the
 stages compose exactly to the unsplit model. Weights are fixed random (seed
