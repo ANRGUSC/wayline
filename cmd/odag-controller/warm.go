@@ -53,12 +53,12 @@ type warmInvocation struct {
 	taskKey   string // "ns/odag/task", for CPU accounting (capacity.go)
 	cpuMillis int64  // the task's CPU request
 	node      string
-	nodeIP   string
-	endpoint string // runner pod ip:port
-	invoked  time.Time
-	finished time.Time
-	phase    corev1.PodPhase
-	reason   string
+	nodeIP    string
+	endpoint  string // runner pod ip:port
+	invoked   time.Time
+	finished  time.Time
+	phase     corev1.PodPhase
+	reason    string
 }
 
 // ns/odag/uid/task -> *warmInvocation. The ODAG UID keeps a recreated run

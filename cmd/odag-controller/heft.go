@@ -557,7 +557,6 @@ func heftAssignTasks(tasks []taskSpec, nodeMap map[string]nodeInfo, rtResolver r
 	schedule := make(map[string]heftScheduleEntry, len(tasks))
 	flows := make([]heftFlowEntry, 0)
 
-
 	for _, name := range sorted {
 		t := taskByName[name]
 
