@@ -173,3 +173,21 @@ budget), so neither sees the other's tasks. Nothing overbooked here because
 execution followed the plan closely, but a node could run more than its
 capacity when tasks drift from plan. A controller-side capacity gate over
 both kinds of task would close it.
+
+## One CPU account for pods and warm calls (2026-09-29)
+
+`overbook.py`: four 4-CPU tasks pinned to anrg-1 (7.4 free CPUs), two as
+pods and two as warm calls, released together (`enactOrder: none`). Peak CPU
+requested by tasks computing at the same instant:
+
+| controller | peak | |
+|---|---|---|
+| before | 8 | a pod and a warm call ran together: the kubelet counts only pods, the runner only its calls |
+| with shared admission (`capacity.go`) | 4 | tasks alternate; never above capacity |
+
+The controller now admits every dispatch, pod or warm, against one account
+per node: unfinished Wayline pods, unfinished warm calls, and reservations
+for dispatches not yet visible. After a pod finishes computing, the next
+task waits about 1.6 s because the pod's CPU stays counted until it exits
+(as the kubelet holds it); freeing it for warm calls at compute end would
+shorten that.

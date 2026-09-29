@@ -838,6 +838,12 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		}
 
 		ni := assignMap[task.Name]
+		// One CPU account per node for pods and warm calls (capacity.go):
+		// wait for room instead of overbooking the node.
+		admitKey := namespace + "/" + odagName + "/" + task.Name
+		if !admitCPU(admitKey, ni.name, parseTaskCPUMillis(task.CPU), ni.cpuMillis) {
+			continue
+		}
 		if ni.ip != "" {
 			resetTaskState(ni.ip, odagName, task.Name)
 		}
@@ -846,11 +852,13 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		envVars = addTemplateEnvVars(envVars, odagObj.GetLabels())
 		if task.Runner != "" {
 			if err := invokeWarm(dynClient, client, namespace, odagName, ownerUID, task, ni, envVars); err != nil {
+				releaseCPU(admitKey)
 				log.Printf("[odag-ctrl] warm invoke %s/%s on %s: %v (will retry)", key, task.Name, ni.name, err)
 			}
 			continue
 		}
 		if err := ensurePod(client, namespace, odagName, task, ni.name, envVars, ownerUID); err != nil {
+			releaseCPU(admitKey)
 			log.Printf("[odag-ctrl] error creating pod for %s/%s: %v", key, task.Name, err)
 		} else {
 			log.Printf("[odag-ctrl] launched task %s on node %s", task.Name, ni.name)

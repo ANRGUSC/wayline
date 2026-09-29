@@ -49,8 +49,10 @@ const (
 var warmHTTP = &http.Client{Timeout: 5 * time.Second}
 
 type warmInvocation struct {
-	mu       sync.Mutex
-	node     string
+	mu        sync.Mutex
+	taskKey   string // "ns/odag/task", for CPU accounting (capacity.go)
+	cpuMillis int64  // the task's CPU request
+	node      string
 	nodeIP   string
 	endpoint string // runner pod ip:port
 	invoked  time.Time
@@ -145,7 +147,8 @@ func invokeWarm(dynClient dynamic.Interface, client *kubernetes.Clientset, names
 	uid types.UID, task taskSpec, ni nodeInfo, env []corev1.EnvVar) error {
 
 	key := warmKey(namespace, odagName, uid, task.Name)
-	inv := &warmInvocation{node: ni.name, nodeIP: ni.ip, invoked: time.Now(), phase: corev1.PodPending}
+	inv := &warmInvocation{node: ni.name, nodeIP: ni.ip, invoked: time.Now(), phase: corev1.PodPending,
+		taskKey: namespace + "/" + odagName + "/" + task.Name, cpuMillis: parseTaskCPUMillis(task.CPU)}
 	if _, loaded := warmInvocations.LoadOrStore(key, inv); loaded {
 		return nil
 	}
