@@ -29,6 +29,14 @@ with the invocation's environment applied to os.environ. Children start
 in milliseconds with every import already done, run in parallel on
 separate cores (no GIL sharing), and a crash kills only that invocation.
 
+Threads: --preload imports run with one OpenMP/BLAS thread. OpenMP (torch's
+CPU kernels) is not fork-safe: a thread pool started while preloading
+(building a model runs parallel kernels) exists only in the parent, and a
+forked call's first parallel kernel waits for it forever. Each call then
+computes with as many threads as CPUs it was admitted with (WL_CPU_MILLIS,
+rounded up; an OMP_NUM_THREADS in the invocation wins). With serve() called
+from your own code, import torch with OMP_NUM_THREADS=1 for the same reason.
+
 Admission is by CPU, as the kubelet admits pods: an invocation declares its
 CPU request (WL_CPU_MILLIS, set by the controller from the task's request)
 and starts once it fits beside the running ones within `cpus`. Queued
@@ -47,6 +55,7 @@ import argparse
 import importlib
 import inspect
 import json
+import math
 import os
 import runpy
 import select
@@ -89,11 +98,35 @@ def _agent_state(env: dict, state: str | None = None) -> str:
         return ""
 
 
+_THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+
+
+def _threads_for(env: dict) -> int:
+    """Compute threads for a call: OMP_NUM_THREADS from the invocation, else
+    its CPU request rounded up. Applied to torch if loaded (the task may
+    still set its own) and to the environment for subprocesses."""
+    n = 0
+    try:
+        n = int(env.get("OMP_NUM_THREADS") or 0)
+        if n <= 0:
+            n = math.ceil(float(env.get("WL_CPU_MILLIS", "1000")) / 1000.0)
+    except (TypeError, ValueError):
+        pass
+    n = max(n, 1)
+    for v in _THREAD_VARS:
+        os.environ[v] = str(n)
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        torch.set_num_threads(n)
+    return n
+
+
 def _run_child(fname: str, env: dict) -> None:
     """Runs in the forked child; never returns."""
     code = 0
     try:
         os.environ.update(env)
+        _threads_for(env)
         fn = _FUNCTIONS.get(fname)
         if fn is None and _SCRIPT:
             sys.argv = [_SCRIPT]
@@ -295,6 +328,10 @@ def main(argv=None) -> None:
     ap.add_argument("--cpus", type=float, default=float(os.environ.get("WL_RUNNER_CPUS", "0")) or None,
                     help="CPU to admit calls into by their requests (default: all cores)")
     a = ap.parse_args(argv)
+    # Preload with one OpenMP/BLAS thread, so no thread pool exists to be
+    # lost across the forks (see "Threads" above).
+    for v in _THREAD_VARS:
+        os.environ[v] = "1"
     for m in [m for m in a.preload.split(",") if m] + a.module:
         importlib.import_module(m)
     import wl.api  # noqa: F401  (warm the SDK itself)

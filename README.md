@@ -288,6 +288,12 @@ fits beside the running ones within `--cpus`, and the rest queue. A
 DaemonSet is the usual way to run one per node; see
 `eval/experiments/E12/runner.yml`.
 
+`--preload` imports run with one OpenMP/BLAS thread: OpenMP (torch's CPU
+kernels) is not fork-safe, and a thread pool started while preloading
+(building a model runs parallel kernels) would leave every forked call
+waiting on it forever. Each call then computes with as many threads as CPUs
+it requested, unless it sets its own.
+
 Limits today: a task's `command` is ignored in warm mode.
 
 ---
@@ -298,7 +304,9 @@ Every task has a CPU request: its own `resources.cpu`, else the template's
 `defaults.resources.cpu`, else 1 CPU. The pod requests exactly that, and
 schedulers plan with it: a node's capacity is its free CPU (allocatable
 minus what non-Wayline pods request), and tasks share a node while their
-requests fit. Wayline's built-in `heft` and every SAGA scheduler plan this
+requests fit. The controller admits pods and warm calls against one account
+per node, and a task's CPU is released when the task reports it has
+finished, not when the kubelet later marks its pod Succeeded. Wayline's built-in `heft` and every SAGA scheduler plan this
 way, so a 1-CPU task and a 3-CPU task can run side by side on a 4-CPU node,
 and a schedule's times assume they do.
 
