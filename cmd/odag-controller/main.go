@@ -124,6 +124,7 @@ func main() {
 	go watchODAGs(dynClient, client)
 	go pollRunningODAGs(dynClient, client)
 	go sweepOrphanData(dynClient, client)
+	go watchNodeHealth(dynClient, client)
 	watchPods(client, dynClient)
 }
 
@@ -331,7 +332,10 @@ func watchODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
 				key := obj.GetNamespace() + "/" + obj.GetName()
 				processedODAGs.Delete(key)
 				assignmentCache.Delete(key)
-				reconcileGen.Delete(key)
+				forgetRealization(key)
+				runRecoveries.Delete(key)
+				linkWatches.Delete(key)
+				runFirstStart.Delete(key)
 				// A run deleted while still non-terminal (e.g. deleted mid-
 				// flight before it reaches Succeeded) never passes through
 				// updateODAGCompletion, so without this it leaks a
@@ -534,6 +538,14 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 
 	writePredictedSchedule(dynClient, namespace, odagName, predicted, flows, scheduling)
 
+	// Keep the plan's cost model for the run: the plan-aware copy policy
+	// and node-loss recovery decide with the numbers that placed it.
+	model := newPlanModel(tasks, assignMap, nodeMap, rtRes, dsRes, bwRes, predicted, flows)
+	model.deployed = time.Now()
+	model.policy = parseRealizationPolicy(obj)
+	planModels.Store(key, model)
+	applyPlanPolicy(dynClient, obj, model, policyContext{})
+
 	log.Printf("[odag-ctrl] task placement for %s:", key)
 	for task, ni := range assignMap {
 		log.Printf("[odag-ctrl]   %-20s -> %s (%s)", task, ni.name, ni.ip)
@@ -643,6 +655,11 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 	// Extract tasks from the passed ODAG object (no extra API call needed).
 	tasks := extractTasks(odagObj)
 	realizationCache.Store(key, parseRealization(odagObj))
+	// A copy waiting for its object follows the producer promptly: every
+	// dispatch pass (pod event, warm-call completion, sweep) wakes it.
+	if realizationPending(key) {
+		kickRealization(dynClient, client, odagObj, false)
+	}
 
 	// This run's pods and warm calls, from the in-memory caches (no API call).
 	podItems := runPods(namespace, odagName, ownerUID, tasks)
@@ -811,6 +828,15 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		}
 
 		ni := assignMap[task.Name]
+		// Node-loss recovery may have moved the task since this pass took
+		// its snapshot: never dispatch to a lost node, and leave a moved
+		// task to the next pass, which gates it on its new node.
+		if cur, ok := assignmentCache.Load(key); ok && cur.(map[string]nodeInfo)[task.Name].name != ni.name {
+			continue
+		}
+		if nodeLost(ni.name) {
+			continue
+		}
 		// Claim the dispatch before touching the task's agent state. Passes
 		// run concurrently, each from its own snapshot; without the claim a
 		// pass that raced the dispatching one reset the state (and ready
@@ -833,11 +859,16 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		envVars := buildEnvVars(odagName, task, assignMap, tasks)
 		envVars = append(envVars, durabilityEnv(runDurability(odagObj), task, tasks)...)
 		envVars = addTemplateEnvVars(envVars, odagObj.GetLabels())
-		if task.Runner != "" {
+		if task.Runner != "" && !runnerGivenUp(claim) {
 			if err := invokeWarm(dynClient, client, namespace, odagName, ownerUID, task, ni, envVars); err != nil {
 				releaseCPU(admitKey)
 				releaseDispatch(claim)
-				log.Printf("[odag-ctrl] warm invoke %s/%s on %s: %v (will retry)", key, task.Name, ni.name, err)
+				if noteRunnerFailure(claim) {
+					log.Printf("[odag-ctrl] warm invoke %s/%s on %s: %v; no runner for %s, running it as a pod",
+						key, task.Name, ni.name, err, runnerFallbackAfter)
+				} else {
+					log.Printf("[odag-ctrl] warm invoke %s/%s on %s: %v (will retry)", key, task.Name, ni.name, err)
+				}
 			}
 			continue
 		}
@@ -1260,6 +1291,11 @@ func getNodeInfoMap(client *kubernetes.Clientset) (map[string]nodeInfo, error) {
 		}
 		if ip != "" {
 			nodeIPCache.Store(n.Name, ip)
+		}
+		// A lost node (nodehealth.go) takes no new placements until it
+		// is back.
+		if nodeLost(n.Name) {
+			continue
 		}
 		// Read allocatable resources for resource-aware scheduling.
 		cpuMillis := int64(0)
@@ -1983,6 +2019,8 @@ func updateActualFlows(dynClient dynamic.Interface, namespace, odagName string, 
 	if len(all) == 0 {
 		return
 	}
+	// Completed transfers are evidence about their links (linkstate.go).
+	observeRunFlows(namespace+"/"+odagName, all)
 
 	// t0 = earliest pod startTime. Same origin as the execution Gantt
 	// (GanttChart.tsx also uses min(task.startTime)). Fall back to the
@@ -2045,6 +2083,11 @@ func checkODAGCompletion(dynClient dynamic.Interface, client *kubernetes.Clients
 		if pod.Status.Phase != corev1.PodFailed {
 			continue
 		}
+		// A task that failed with its node is node-loss recovery's to
+		// repair (recovery.go), not a failure of the run.
+		if nodeLost(pod.Spec.NodeName) {
+			continue
+		}
 		taskName := pod.Labels[labelTaskName]
 		reason := "pod failed"
 		if len(pod.Status.ContainerStatuses) > 0 {
@@ -2075,6 +2118,15 @@ func checkODAGCompletion(dynClient dynamic.Interface, client *kubernetes.Clients
 		return
 	}
 	makespan := computeMakespan(pods)
+	// A repaired run's first tasks may have run on a lost node whose pods
+	// recovery deleted: measure from the earliest start ever seen.
+	if v, ok := runFirstStart.Load(namespace + "/" + odagName); ok {
+		if first := v.(time.Time); !first.IsZero() {
+			if end := firstStartOf(pods).Add(time.Duration(makespan * float64(time.Second))); first.Before(firstStartOf(pods)) {
+				makespan = end.Sub(first).Seconds()
+			}
+		}
+	}
 	updateODAGCompletion(dynClient, namespace, odagName, makespan)
 	log.Printf("[odag-ctrl] ODAG %s/%s Succeeded (makespan: %.2fs)", namespace, odagName, makespan)
 
@@ -2279,6 +2331,31 @@ func computeMakespan(pods []corev1.Pod) float64 {
 		return 0
 	}
 	return latest.Sub(earliest).Seconds()
+}
+
+// runFirstStart: run key -> the earliest task start seen in any status pass.
+var runFirstStart sync.Map
+
+// noteFirstStart records the earliest start among a run's current pods.
+func noteFirstStart(key string, pods []corev1.Pod) {
+	first := firstStartOf(pods)
+	if first.IsZero() {
+		return
+	}
+	if v, ok := runFirstStart.Load(key); ok && !first.Before(v.(time.Time)) {
+		return
+	}
+	runFirstStart.Store(key, first)
+}
+
+func firstStartOf(pods []corev1.Pod) time.Time {
+	var earliest time.Time
+	for _, pod := range pods {
+		if pod.Status.StartTime != nil && (earliest.IsZero() || pod.Status.StartTime.Time.Before(earliest)) {
+			earliest = pod.Status.StartTime.Time
+		}
+	}
+	return earliest
 }
 
 func isAlreadyExists(err error) bool {

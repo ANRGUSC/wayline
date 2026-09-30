@@ -579,6 +579,12 @@ func heftAssignTasks(tasks []taskSpec, nodeMap map[string]nodeInfo, rtResolver r
 				candidates = append(candidates, n)
 			}
 		}
+		if len(t.Constraints) == 0 || len(candidates) == len(nodeMap) {
+			// Map iteration order is random: without sorting, candidates
+			// tied on EFT and load went to a different node on every run
+			// of the same template.
+			sort.Strings(candidates)
+		}
 
 		// Task resource requirements.
 		taskCPU := parseTaskCPUMillis(t.CPU)

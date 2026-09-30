@@ -185,7 +185,7 @@ func invokeWarm(dynClient dynamic.Interface, client *kubernetes.Clientset, names
 	inv.endpoint = ep
 	inv.phase = corev1.PodRunning
 	inv.mu.Unlock()
-	go watchWarm(dynClient, client, namespace, odagName, task.Name, inv)
+	go watchWarm(dynClient, client, namespace, odagName, task.Name, key, inv)
 	return nil
 }
 
@@ -193,7 +193,7 @@ func invokeWarm(dynClient dynamic.Interface, client *kubernetes.Clientset, names
 // immediately (and a few more times while its outputs finish installing
 // on consumer nodes), so successors are not held to the 500 ms sweep.
 func watchWarm(dynClient dynamic.Interface, client *kubernetes.Clientset,
-	namespace, odagName, taskName string, inv *warmInvocation) {
+	namespace, odagName, taskName, key string, inv *warmInvocation) {
 
 	kick := func() {
 		obj, err := dynClient.Resource(odagGVR).Namespace(namespace).Get(
@@ -203,8 +203,12 @@ func watchWarm(dynClient dynamic.Interface, client *kubernetes.Clientset,
 		}
 	}
 	lastLive := time.Now()
+	var unreachableSince time.Time
 	for {
 		time.Sleep(warmPollInterval)
+		if !current(key, inv) {
+			return // recovery replaced this invocation
+		}
 		state := queryTaskState(inv.nodeIP, odagName, taskName)
 		if state == "ComputeDone" || state == "Failed" {
 			fin := time.Now()
@@ -227,7 +231,25 @@ func watchWarm(dynClient dynamic.Interface, client *kubernetes.Clientset,
 		}
 		if time.Since(lastLive) >= warmLivenessTick {
 			lastLive = time.Now()
-			if lost := runnerLost(inv.endpoint, odagName, taskName); lost != "" {
+			lost := runnerLost(inv.endpoint, odagName, taskName)
+			if lost == "RunnerUnreachable" && nodeLossEnabled {
+				// An unreachable runner may be a lost node. Node-loss
+				// recovery (recovery.go) then moves the call and drops
+				// this invocation; fail it here only if its node is still
+				// judged alive well after the loss grace.
+				if nodeLost(inv.node) || !current(key, inv) {
+					return
+				}
+				if unreachableSince.IsZero() {
+					unreachableSince = time.Now()
+				}
+				if time.Since(unreachableSince) < nodeLossGrace+10*time.Second {
+					continue
+				}
+			} else if lost == "" {
+				unreachableSince = time.Time{}
+			}
+			if lost != "" {
 				inv.mu.Lock()
 				inv.finished = time.Now()
 				inv.phase = corev1.PodFailed
@@ -242,6 +264,35 @@ func watchWarm(dynClient dynamic.Interface, client *kubernetes.Clientset,
 		time.Sleep(d)
 		kick()
 	}
+}
+
+// current reports whether inv is still the run's invocation of the task
+// (recovery drops the invocation of a task it moves).
+func current(key string, inv *warmInvocation) bool {
+	v, ok := warmInvocations.Load(key)
+	return ok && v.(*warmInvocation) == inv
+}
+
+// A warm task whose node has had no reachable runner for runnerFallbackAfter
+// runs as a pod on that node instead (every task spec has an image and a
+// command). A runner can be missing for minutes: one that preloads a model
+// takes that long to become ready again after its node restarts, and until
+// the kubelet reports, its pod may still show the address it had before.
+var runnerFallbackAfter = envSeconds("WL_RUNNER_FALLBACK_S", 15)
+
+var runnerFailures sync.Map // dispatch key -> first failure time
+
+// noteRunnerFailure records a failed invocation and reports whether the task
+// has now waited long enough to run as a pod.
+func noteRunnerFailure(key string) bool {
+	v, _ := runnerFailures.LoadOrStore(key, time.Now())
+	return time.Since(v.(time.Time)) >= runnerFallbackAfter
+}
+
+// runnerGivenUp reports whether the task should now run as a pod.
+func runnerGivenUp(key string) bool {
+	v, ok := runnerFailures.Load(key)
+	return ok && time.Since(v.(time.Time)) >= runnerFallbackAfter
 }
 
 // runnerLost reports why an invocation can no longer finish ("" if it can):

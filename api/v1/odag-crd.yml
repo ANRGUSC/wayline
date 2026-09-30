@@ -128,6 +128,53 @@ spec:
                         description: Nodes whose copy must be removed.
                         items:
                           type: string
+                      origin:
+                        type: string
+                        enum: ["", plan, static, recovery]
+                        description: >-
+                          Who wrote the entry: empty for a user or external policy,
+                          "plan" for the plan-aware copy policy, "recovery" for
+                          node-loss recovery. The controller rewrites only its own.
+                realizationPolicy:
+                  type: object
+                  description: >-
+                    How the controller derives extra copies from the plan.
+                    planAware: for each consumer, consider losing its planned
+                    node; copy an input to the node the consumer would move to
+                    when the delay the copy avoids (beyond the consumer's slack)
+                    is at least threshold times the copy's transfer time.
+                  properties:
+                    mode:
+                      type: string
+                      enum: ["", none, planAware, static]
+                    replicas:
+                      type: integer
+                      minimum: 1
+                      description: static mode - total copies of every consumed object (default 2).
+                    revise:
+                      type: boolean
+                      description: >-
+                        Keep decisions true as the run changes: re-plan around degraded links and
+                        re-protect after a repair (default true). false keeps plan-time decisions.
+                    threshold:
+                      type: number
+                      minimum: 0
+                      description: Avoided delay per second of copy transfer required (default 2).
+                    minGainS:
+                      type: number
+                      minimum: 0
+                      description: Ignore copies that avoid less delay than this, in seconds (default 1).
+                    podStartupS:
+                      type: number
+                      minimum: 0
+                      description: Dispatch-to-start time of a pod task that runs again (default 3).
+                    warmStartupS:
+                      type: number
+                      minimum: 0
+                      description: The same for a warm call (default 0.1).
+                    maxCopyBytes:
+                      type: string
+                      description: Byte budget for the policy's copies per run, e.g. "500MB" (default none).
                 tasks:
                   type: array
                   minItems: 1
@@ -308,6 +355,22 @@ spec:
                 phase:
                   type: string
                   enum: [Pending, Scheduling, Running, Succeeded, Failed, Degraded]
+                realizationPolicy:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: >-
+                    What the plan-aware policy decided: mode, threshold, number
+                    and bytes of copies, and one decision per (object, consumer)
+                    with the delay, slack and copy time behind it.
+                recovery:
+                  type: array
+                  description: >-
+                    One record per node-loss repair: when, which nodes were lost,
+                    which tasks moved where, which ran again, and which inputs
+                    were copied from surviving copies.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
                 objects:
                   type: array
                   description: >
@@ -319,6 +382,8 @@ spec:
                     properties:
                       object:
                         type: string
+                      origin:
+                        type: string
                       copies:
                         type: array
                         items:
@@ -328,7 +393,7 @@ spec:
                               type: string
                             state:
                               type: string
-                              description: Installed / Transferring / Evicted.
+                              description: Installed / Transferring / Evicted / Lost.
                       servingCopy:
                         type: string
                 tasks:

@@ -43,8 +43,13 @@ type statusRunner struct {
 // statusRunners: "ns/odag" -> *statusRunner.
 var statusRunners sync.Map
 
-// statusPassFn runs one status pass (tests replace it).
-var statusPassFn = statusPass
+// statusPassFn runs one status pass (tests replace it). Assigned in init:
+// a status pass may re-plan the run (linkstate.go), whose dispatch pass
+// requests status again, and a variable initializer may not refer to
+// itself through that cycle.
+var statusPassFn func(statusArgs)
+
+func init() { statusPassFn = statusPass }
 
 // requestStatus asks for a status pass for the run, coalescing with one in
 // flight.
@@ -88,10 +93,12 @@ func statusPass(a statusArgs) {
 	}
 	assignMap := raw.(map[string]nodeInfo)
 	pods := runPods(a.namespace, a.odagName, a.ownerUID, a.tasks)
+	noteFirstStart(a.namespace+"/"+a.odagName, pods)
 	updateTaskStatuses(a.dynClient, a.namespace, a.odagName, pods, assignMap, a.tasks)
 	checkODAGCompletion(a.dynClient, a.client, pods, a.namespace, a.odagName, a.ownerUID,
 		podTaskCount(a.namespace, a.odagName, a.tasks))
 	updateActualFlows(a.dynClient, a.namespace, a.odagName, assignMap, pods)
+	checkRunLinks(a, pods, assignMap)
 }
 
 // runPods returns the run's pods from the in-memory cache, plus its warm
@@ -157,10 +164,12 @@ func releaseDispatch(key string) { dispatchClaims.Delete(key) }
 
 // forgetDispatches drops a deleted run's claims.
 func forgetDispatches(odagKey string) {
-	dispatchClaims.Range(func(k, _ any) bool {
-		if strings.HasPrefix(k.(string), odagKey+"/") {
-			dispatchClaims.Delete(k)
-		}
-		return true
-	})
+	for _, m := range []*sync.Map{&dispatchClaims, &runnerFailures} {
+		m.Range(func(k, _ any) bool {
+			if strings.HasPrefix(k.(string), odagKey+"/") {
+				m.Delete(k)
+			}
+			return true
+		})
+	}
 }
