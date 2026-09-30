@@ -86,7 +86,9 @@ def apply_node(u):
              "tc class add dev $IF parent 1: classid 1:99 htb rate 10gbit ceil 10gbit"]
     lines += [f"tc class add dev $IF parent 1: classid 1:{c} htb rate {r:.0f}mbit ceil {r:.0f}mbit"
               for r, c in cls.items()]
-    lines += [f"tc filter add dev $IF parent 1: protocol ip prio 1 u32 match ip dst {ip[v]}/32 "
+    # Priority 2: fault injection (eval/tools/fault.py link) adds priority-1
+    # filters that take precedence and can be removed without touching these.
+    lines += [f"tc filter add dev $IF parent 1: protocol ip prio 2 u32 match ip dst {ip[v]}/32 "
               f"flowid 1:{cls[pair_mbit(u, v)]}" for v in NODES if v != u]
     lines.append("echo FILTERS=$(tc filter show dev $IF | grep -c 'flowid 1:')")
     return root(u, "; ".join(lines))
