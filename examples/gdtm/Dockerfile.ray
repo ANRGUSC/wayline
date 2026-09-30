@@ -1,0 +1,15 @@
+# GDTM on Ray (the E16 Ray baseline): the model image plus the glue stages'
+# recorded segment, Ray, and the E16 GDTM driver. Ray needs one Python version
+# across a cluster, and GDTM's two images differ (3.12 glue, 3.10 model), so
+# every Ray node runs this one; the model image already has the glue code,
+# OpenCV, h5py and the repo's Kalman filter. Build from the repo root after
+# make_segment.py has written examples/gdtm/segment/:
+#   docker build -f examples/gdtm/Dockerfile.ray -t <registry>/wl-gdtm-ray:latest .
+ARG BASE=192.168.1.163:5000/wl-gdtm-model:latest
+FROM ${BASE}
+ARG RAY=2.58.0
+RUN pip install "ray[default]==${RAY}"
+ENV GDTM_SEGMENT=/opt/gdtm-segment
+COPY examples/gdtm/segment /opt/gdtm-segment
+COPY examples/gdtm/gen_gdtm.py eval/experiments/E16/ray/e16_ray_gdtm.py /app/
+RUN python -c "import ray, gdtm_glue, gdtm_model, gen_gdtm; print('ray', ray.__version__, 'gdtm ok')"

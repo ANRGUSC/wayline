@@ -1,0 +1,29 @@
+# A BuildKit daemon as a pod on a worker, for images too big to build on
+# anrg-2 (whose disk is nearly full). Use it from anrg-2 with
+#   docker buildx create --name e16bk --driver remote tcp://<pod-ip>:1234
+# and delete the pod afterwards (its build cache lives in the pod).
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: e16-buildkitd, namespace: wl-system}
+data:
+  buildkitd.toml: |
+    [registry."192.168.1.163:5000"]
+      http = true
+      insecure = true
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: e16-buildkit, namespace: wl-system, labels: {app: e16-buildkit}}
+spec:
+  nodeName: anrg-6
+  restartPolicy: Never
+  containers:
+  - name: buildkitd
+    image: docker.io/moby/buildkit:latest
+    args: ["--addr", "tcp://0.0.0.0:1234", "--config", "/etc/buildkit/buildkitd.toml"]
+    securityContext: {privileged: true}
+    ports: [{containerPort: 1234}]
+    volumeMounts: [{name: cfg, mountPath: /etc/buildkit}]
+  volumes:
+  - name: cfg
+    configMap: {name: e16-buildkitd}
