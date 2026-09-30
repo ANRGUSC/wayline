@@ -156,6 +156,15 @@ def cells(only, arms=None):
     if "focal" in only:
         out += [("cost", "focal", a, None) for a in (arms or ["W", "W-plan-only", "W-static"])]
         out += [("survival", "focal", a, ("crash",) + SENSOR_MID["focal"]) for a in ["W", "W-plan-only"]]
+    if "revision" in only:
+        # Live revision: a second loss after the first repair. W re-protects
+        # the repaired placement; W-frozen keeps its plan-time copies.
+        out += [("revision", "chain-warm", a, ("crash2", "anrg-7", "p", 3.0, "c", 3.0))
+                for a in ["W", "W-frozen", "W-plan-only"]]
+    if "window" in only:
+        # A copy protects once it lands (100 MB over B/8: about 7 s).
+        out += [("window", "chain-r12-s100", "W", ("crash", "anrg-7", "p", 3.0))]
+        out += [("window", "chain-r30-s100", a, ("crash", "anrg-7", "p", 10.0)) for a in ["W", "W-plan-only"]]
     if "sweep" in only:
         out += [("sweep", f"chain-r{r}-s{mb}", a, ("crash",) + CHAIN)
                 for r, mb in SWEEP for a in ["W", "W-plan-only"]]
@@ -398,8 +407,8 @@ def run_cell(claim, workload, arm, flt, tag):
         elif flt and flt[0] == "link-pair":
             fault.link_pair(flt[1], flt[2], flt[3])
             rec["faultAt"] = time.time()
-        elif flt and flt[0] == "crash":
-            _, victim, trigger, delay = flt
+        elif flt and flt[0] in ("crash", "crash2"):
+            victim, trigger, delay = flt[1:4]
             while ft.task_phase(ft.status(run), trigger) != "Succeeded" and time.time() - t0 < 300:
                 if ft.status(run).get("phase") in ("Succeeded", "Failed"):
                     break
@@ -408,14 +417,34 @@ def run_cell(claim, workload, arm, flt, tag):
             time.sleep(delay)
             fault.crash(victim)
             rec["faultAt"] = time.time()
+            if flt[0] == "crash2":
+                # A second loss: the node the consumer was moved to, once
+                # it runs there again.
+                consumer, delay2 = flt[4:6]
+                t1 = time.time()
+                while time.time() - t1 < 180:
+                    st = ft.status(run)
+                    if st.get("phase") in ("Succeeded", "Failed"):
+                        break
+                    moved = {m["task"]: m["to"] for r in st.get("recovery", []) for m in r.get("plan", {}).get("moved", [])}
+                    t = next((x for x in st.get("tasks", []) if x.get("name") == consumer), {})
+                    if moved.get(consumer) and t.get("node") == moved[consumer] and t.get("phase") == "Running":
+                        time.sleep(delay2)
+                        rec["victim2"] = moved[consumer]
+                        fault.crash(rec["victim2"])
+                        rec["fault2At"] = time.time()
+                        break
+                    time.sleep(0.2)
         st = ft.wait_done(run, timeout=900)
         rec["doneSeen"] = time.time()
     finally:
         if flt and flt[0] in ("link", "link-pair"):
             fault.unlink(flt[1])
             _last_unlink[0] = time.time()
-        elif flt and flt[0] == "crash":
+        elif flt and flt[0] in ("crash", "crash2"):
             fault.restore(flt[1])
+            if rec.get("victim2"):
+                fault.restore(rec["victim2"])
     rec["wall"] = rec["doneSeen"] - t0
     rec["status"] = st
     placement = {t["name"]: t.get("node") for t in st.get("tasks", []) if t.get("node")}

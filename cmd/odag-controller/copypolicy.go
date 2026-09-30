@@ -123,7 +123,8 @@ type copyDecision struct {
 	Recompute bool    `json:"recompute"` // no copy survives: the producer must run again
 	DelayS    float64 `json:"delayS"`    // input arrival on the fallback after the loss, no extra copy; -1: never
 	SlackS    float64 `json:"slackS"`
-	CopyS     float64 `json:"copyS"` // transfer time of the copy
+	CopyS     float64 `json:"copyS"`     // transfer time of the copy
+	Protected float64 `json:"protected"` // share of the consumer's exposure left once the copy lands
 	Source    string  `json:"source,omitempty"`
 	Copy      bool    `json:"copy"`
 	Reason    string  `json:"reason"`
@@ -216,6 +217,14 @@ func planAwareCopies(m *planModel, p realizationPolicy,
 		for _, n := range ctx.holders[obj] {
 			set[n] = true
 		}
+		// Only nodes the model still has: after a repair, the lost node is
+		// out of the model although a finished producer is still assigned
+		// to it, and its copy is gone.
+		for n := range set {
+			if _, ok := m.nodes[n]; !ok {
+				delete(set, n)
+			}
+		}
 		return sortedKeys(set)
 	}
 
@@ -259,6 +268,8 @@ func planAwareCopies(m *planModel, p realizationPolicy,
 		type cand struct {
 			obj, src     string
 			delay, xfer  float64
+			protected    float64 // share of the exposure the copy covers once landed
+			value        float64 // delay avoided in expectation: delay x protected
 			recompute    bool
 			alreadyThere bool
 		}
@@ -292,6 +303,15 @@ func planAwareCopies(m *planModel, p realizationPolicy,
 					k.src, k.xfer = h, t
 				}
 			}
+			// A copy protects only once it has landed. The loss of X costs
+			// the consumer from o's production until the consumer finishes;
+			// with the fault equally likely at any moment of that exposure,
+			// the copy is worth the share of it left after the copy lands.
+			k.protected = protectedShare(m.eft[c]-m.eft[producerOf(o)], k.xfer)
+			k.value = k.delay
+			if k.delay < unrecoverable {
+				k.value = k.delay * k.protected
+			}
 			cands = append(cands, k)
 		}
 		if len(cands) == 0 {
@@ -300,9 +320,9 @@ func planAwareCopies(m *planModel, p realizationPolicy,
 		// Choose the prefix of inputs, by decreasing delay, that avoids the
 		// most delay net of the copies' cost. The consumer waits for its
 		// slowest input, so copying one input helps only as far as the next.
-		sort.SliceStable(cands, func(i, j int) bool { return cands[i].delay > cands[j].delay })
+		sort.SliceStable(cands, func(i, j int) bool { return cands[i].value > cands[j].value })
 		impact := func(d float64) float64 { return math.Max(0, d-slack) }
-		full := impact(cands[0].delay)
+		full := impact(cands[0].value)
 		bestK, bestNet, cost := 0, 0.0, 0.0
 		for k := range cands {
 			if cands[k].alreadyThere {
@@ -311,7 +331,7 @@ func planAwareCopies(m *planModel, p realizationPolicy,
 			cost += cands[k].xfer
 			rest := 0.0
 			if k+1 < len(cands) {
-				rest = cands[k+1].delay
+				rest = cands[k+1].value
 			}
 			avoided := full - impact(rest)
 			if net := avoided - p.Threshold*cost; avoided >= p.MinGainS && avoided > 0 && net > bestNet+1e-9 {
@@ -321,7 +341,7 @@ func planAwareCopies(m *planModel, p realizationPolicy,
 		for i, k := range cands {
 			d := copyDecision{Object: k.obj, Consumer: c, Planned: x, Fallback: f,
 				Recompute: k.recompute, DelayS: round3(k.delay), SlackS: round3(slack),
-				Source: k.src}
+				Source: k.src, Protected: round3(k.protected)}
 			if !math.IsInf(k.xfer, 1) {
 				d.CopyS = round3(k.xfer)
 			}
@@ -330,7 +350,7 @@ func planAwareCopies(m *planModel, p realizationPolicy,
 				d.Reason = "the fallback already holds a planned copy"
 			case userGoverned[k.obj]:
 				d.Reason = "a user realization entry governs this object"
-			case i >= bestK && impact(k.delay) < p.MinGainS:
+			case i >= bestK && impact(k.value) < p.MinGainS:
 				d.Reason = fmt.Sprintf("avoids less than %.1fs of delay", p.MinGainS)
 			case i >= bestK:
 				d.Reason = fmt.Sprintf("avoided delay does not pay for %.1fx the copy time", p.Threshold)
@@ -389,6 +409,16 @@ func spreadFallback(ranked []nodeEFT, at float64, received map[string]int64) str
 }
 
 const fallbackTieS = 1.0
+
+// protectedShare is the part of an exposure of `exposure` seconds that a
+// copy landing `land` seconds into it still covers (1 when the exposure is
+// unknown).
+func protectedShare(exposure, land float64) float64 {
+	if exposure <= 0 || math.IsInf(land, 1) {
+		return 1
+	}
+	return math.Max(0, math.Min(1, (exposure-land)/exposure))
+}
 
 func round3(x float64) float64 {
 	if math.IsInf(x, 0) || math.IsNaN(x) || x >= unrecoverable {

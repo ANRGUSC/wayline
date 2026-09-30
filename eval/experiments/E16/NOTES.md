@@ -209,6 +209,38 @@ finishes. Restart: fault to the interrupted consumer's restart.
   output (100 MB, 0.85 s over the fast links of its new node): the policy
   re-decides for the new placement.
 
+## Live revision and the landing window (gaps, controller recover10, 1 run per cell)
+
+Two changes before these runs. (1) The policy weighs a copy's landing time:
+its avoided delay counts only for the share of the consumer's exposure
+(from the object's production to the consumer's finish) left once the copy
+lands, `protected` in the decisions. (2) Re-protection after a repair no
+longer counts the lost node: the repaired model dropped it from its nodes
+but re-added it through the finished producer's assignment, so its copy
+looked alive and it was offered as a fallback (`repairedModel`).
+
+Second loss, chain on warm runners: crash p's node 3 s after p finished,
+then the node c moved to, 3 s after c restarted there.
+
+| | W | W-frozen | W-plan-only |
+|---|---|---|---|
+| completion | 53.9 s | 66.1 s | 79.7 s |
+| second loss | c served from the re-protection copy (anrg-4), no re-run | plan-time copy used up by the first loss, p ran again | p ran again (third run) |
+
+The only cell so far where revision decides the result: W-frozen equals W
+until the plan changes.
+
+Window, 100 MB over p's B/8 link (about 7 s to land), exposure 20 s:
+
+| | fault 3 s after p | fault 10 s after p |
+|---|---|---|
+| r = 12 s, W | no copy now (66% protected, not worth it); 57.4 s, matches lineage | |
+| r = 30 s, W | copy lost before landing: 92.4 s (sweep, before weighting) | copy landed: 68.1 s |
+| r = 30 s, W-plan-only | 95.2 s (sweep) | 98.8 s |
+
+After each repair the policy re-decided for the new placement: the re-run
+producer's node has fast links, and its output was copied in under a second.
+
 ## Argo + S3 repository (argo1, 1 run per cell)
 
 Argo Workflows v3.5.5 with every artifact in a central S3 repository
@@ -250,3 +282,5 @@ traffic is not shaped by E13, which favors this arm.
 | duplicate copy on a reconcile race | fixed (recover7) |
 | re-protection overwrote the plan-time decisions in status.realizationPolicy | fixed: recorded under `reapplication` (recover8) |
 | a warm task waited without limit for a node's runner that was not reachable | fixed: runs as a pod after 15 s (recover9) |
+| re-protection counted the lost node's copy and offered it as a fallback | fixed: `repairedModel` drops lost nodes (recover10) |
+| the policy priced a copy's cost, not its window of vulnerability | fixed: benefit weighted by the protected share of the exposure (recover10) |

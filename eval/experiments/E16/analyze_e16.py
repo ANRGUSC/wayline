@@ -61,7 +61,7 @@ def main():
             if not os.path.basename(p).startswith("configmap") and ".recover" not in p]
     repeated(rows)
     base = {(r["workload"], r["arm"]): summarize(r) for r in rows if r["claim"] == "cost"}
-    for claim in ("cost", "survival", "recovery", "adaptation", "adaptation-copy", "sweep"):
+    for claim in ("cost", "survival", "recovery", "adaptation", "adaptation-copy", "sweep", "revision", "window"):
         sel = [r for r in rows if r["claim"] == claim]
         if not sel:
             continue

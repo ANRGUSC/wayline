@@ -662,18 +662,7 @@ func modelFor(key string, client *kubernetes.Clientset, tasks []taskSpec, assign
 func reprotect(dynClient dynamic.Interface, namespace, name string, tasks []taskSpec,
 	planned *planModel, next map[string]nodeInfo, in recoveryInput, lost map[string]bool) {
 
-	nodes := map[string]nodeInfo{}
-	for n, ni := range planned.nodes {
-		if !lost[n] {
-			nodes[n] = ni
-		}
-	}
-	// Price copies at what links deliver now: a copy over a link that just
-	// degraded costs what the link delivers, not what was planned.
-	bw := liveBandwidth(planned.bw)
-	predicted, flows := computePredictedSchedule(tasks, next, planned.runtime, planned.dataSize, bw)
-	m := newPlanModel(tasks, next, nodes, planned.runtime, planned.dataSize, bw, predicted, flows)
-	m.policy = planned.policy
+	m := repairedModel(tasks, planned, next, lost)
 	skip := map[string]bool{}
 	for t := range in.done {
 		skip[t] = in.done[t]
@@ -686,6 +675,28 @@ func reprotect(dynClient dynamic.Interface, namespace, name string, tasks []task
 		return
 	}
 	applyPlanPolicy(dynClient, obj, m, policyContext{holders: in.holders, skip: skip})
+}
+
+// repairedModel is the plan model of a repaired placement: predicted afresh
+// with the planned cost model, links priced at what they deliver now, and
+// the lost nodes gone (newPlanModel would otherwise re-add a lost node that
+// a finished task is still assigned to, and the policy would count its copy
+// and even offer it as a fallback).
+func repairedModel(tasks []taskSpec, planned *planModel, next map[string]nodeInfo, lost map[string]bool) *planModel {
+	nodes := map[string]nodeInfo{}
+	for n, ni := range planned.nodes {
+		if !lost[n] {
+			nodes[n] = ni
+		}
+	}
+	bw := liveBandwidth(planned.bw)
+	predicted, flows := computePredictedSchedule(tasks, next, planned.runtime, planned.dataSize, bw)
+	m := newPlanModel(tasks, next, nodes, planned.runtime, planned.dataSize, bw, predicted, flows)
+	for n := range lost {
+		delete(m.nodes, n)
+	}
+	m.policy = planned.policy
+	return m
 }
 
 // storeRecoveredModel keeps the plan model in step with the new placement

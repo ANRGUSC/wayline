@@ -295,3 +295,52 @@ func TestPlanAwareCopiesSpreadAcrossEqualFallbacks(t *testing.T) {
 		t.Fatalf("copies %v: want the two captures on different fallbacks", got)
 	}
 }
+
+// A copy protects only once it lands. 100 MB over a B/8 link takes about
+// 7 s of a 20 s exposure: a 12 s producer is not worth it, a 30 s one is.
+func TestPlanAwareCopiesWeighTheLandingWindow(t *testing.T) {
+	for _, tc := range []struct {
+		runtime float64
+		copy    bool
+	}{{12, false}, {30, true}} {
+		tasks := []taskSpec{
+			{Name: "p", Runtime: tc.runtime, RuntimeProfile: map[string]float64{"b": tc.runtime * 4 / 3, "x": tc.runtime * 4 / 3},
+				DataSize: "100MB", CPU: "1"},
+			{Name: "c", Runtime: 20, Dependencies: []string{"p"}, CPU: "1"},
+		}
+		nodes := testNodes("a", "b", "x")
+		m := testModel(tasks, map[string]string{"p": "a", "c": "a"}, nodes,
+			linkTable([2]string{"a", "b"}, [2]string{"a", "x"}))
+		_, ds := planAwareCopies(m, defaultRealizationPolicy(), nil, policyContext{})
+		d, _ := decisionFor(ds, "p", "c")
+		if d.Copy != tc.copy {
+			t.Fatalf("runtime %v: decision %+v, want copy=%v", tc.runtime, d, tc.copy)
+		}
+		if d.Protected < 0.6 || d.Protected > 0.7 {
+			t.Fatalf("runtime %v: protected share %v, want about (20-7.1)/20", tc.runtime, d.Protected)
+		}
+	}
+}
+
+// After a repair moved c next to the only surviving copy of p's output (p's
+// node lost), re-protection copies it again; the lost node is neither a
+// holder nor a fallback.
+func TestReprotectAfterRepairIgnoresTheLostNode(t *testing.T) {
+	tasks := []taskSpec{
+		{Name: "p", Runtime: 12, DataSize: "8MB", CPU: "1"},
+		{Name: "c", Runtime: 20, Dependencies: []string{"p"}, CPU: "1"},
+	}
+	nodes := testNodes("a", "f", "g")
+	planned := testModel(tasks, map[string]string{"p": "a", "c": "a"}, nodes, nil)
+	planned.policy = defaultRealizationPolicy()
+	next := map[string]nodeInfo{"p": nodes["a"], "c": nodes["f"]}
+	m := repairedModel(tasks, planned, next, map[string]bool{"a": true})
+	if _, ok := m.nodes["a"]; ok {
+		t.Fatal("the lost node is back in the repaired model")
+	}
+	entries, _ := planAwareCopies(m, defaultRealizationPolicy(), nil, policyContext{
+		holders: map[string][]string{"p": {"f"}}, skip: map[string]bool{"p": true}})
+	if len(entries) != 1 || len(entries[0].Copies) != 1 || entries[0].Copies[0] != "g" {
+		t.Fatalf("entries = %+v, want p re-copied to g", entries)
+	}
+}
