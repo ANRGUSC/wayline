@@ -49,14 +49,15 @@ The evaluation lives in [`eval/experiments`](eval/experiments/); see
 6. [Warm runners](#warm-runners)
 7. [ODAG reference](#odag-reference)
 8. [Revising a realization at runtime](#revising-a-realization-at-runtime)
-9. [Schedulers and policies](#schedulers-and-policies)
-10. [CLI reference](#cli-reference)
-11. [Web UI](#web-ui)
-12. [Build & deploy reference](#build--deploy-reference)
-13. [Cluster setup](#cluster-setup)
-14. [Reproducing the evaluation](#reproducing-the-evaluation)
-15. [Troubleshooting](#troubleshooting)
-16. [License](#license)
+9. [Plan-driven copies and recovery](#plan-driven-copies-and-recovery)
+10. [Schedulers and policies](#schedulers-and-policies)
+11. [CLI reference](#cli-reference)
+12. [Web UI](#web-ui)
+13. [Build & deploy reference](#build--deploy-reference)
+14. [Cluster setup](#cluster-setup)
+15. [Reproducing the evaluation](#reproducing-the-evaluation)
+16. [Troubleshooting](#troubleshooting)
+17. [License](#license)
 
 ---
 
@@ -128,6 +129,11 @@ wayline/
 ├── cmd/
 │   ├── odag-controller/          # controller: scheduling, dispatch, realization reconciler
 │   │   ├── realization.go        #   spec.realization → copies / servingCopy / evict
+│   │   ├── planmodel.go          #   the plan's cost model, kept per run
+│   │   ├── copypolicy.go         #   plan-aware copies (spec.realizationPolicy)
+│   │   ├── nodehealth.go         #   node-loss detection
+│   │   ├── recovery.go           #   re-planning after node loss or link degradation
+│   │   ├── linkstate.go          #   link evidence from transfers vs. the plan
 │   │   ├── datavertex.go         #   pod-less data vertices and serving-point rebinding
 │   │   ├── saga.go, heft.go      #   SAGA bridge and built-in HEFT
 │   │   └── profiler.go, cache.go #   EMA profiler, cross-run reuse (cacheKey)
@@ -142,6 +148,8 @@ wayline/
 ├── eval/
 │   ├── experiments/E0…E8/        # the paper's evaluation: scripts, policies, committed results
 │   ├── policies/                 # scheduling-policy comparison (HEFT, CPoP, MinMin, OLB, …)
+│   ├── tools/fault.py            # fault injection: crash, partition, link throttle
+│   ├── functional/               # functional checks for copies, recovery, links
 │   └── …                         # earlier microbenchmarks and baselines
 ├── docs/                         # architecture, getting started, SDK, bring-your-own-scheduler
 └── Makefile                      # build / image / deploy targets
@@ -412,14 +420,18 @@ kubectl -n wl-system patch odag my-dag-run-abc12 --type merge -p '{
 | `copies` | Nodes that must hold a valid copy. Additive: copies elsewhere are left alone unless named in `evict`. |
 | `servingCopy` | Node whose copy serves future consumer installs and data-vertex execution. Empty keeps the producer's copy. |
 | `evict` | Nodes whose copy must be removed. Refused for the last copy while consumers may need it. |
+| `origin` | Who wrote the entry: empty for a user or external policy, `plan` for the plan-aware policy, `recovery` for node-loss recovery. The controller rewrites only its own entries. |
 
 What the controller does with it:
 
 1. **Copies.** For each missing copy it picks a source (the serving copy if its
-   bytes are valid, else any valid desired copy, else wherever the object lives)
-   and asks that node's agent to push. A pending or active transfer is polled, not
-   re-posted; a failed one is retried on a later pass, which is how a copy lands
-   when a contact window reopens.
+   bytes are valid, else the valid copy with the fastest link to the target under
+   the run's bandwidth model, with degraded links priced at what they deliver
+   now) and asks that node's agent to push. A pending or active transfer is
+   polled, not re-posted; a failed one is retried on a later pass, which is how a
+   copy lands when a contact window reopens. Each run has one reconcile worker; a
+   dispatch pass wakes it, so a copy of an object starts as soon as its producer
+   finishes. Lost nodes are neither sources nor targets.
 2. **Serving point.** A data vertex whose input names a `servingCopy` executes
    from that node instead of its assigned one, and the old node's outbound
    transfers of the object are cancelled, so a revised path does not compete with
@@ -434,6 +446,89 @@ Python each, driven by measurements or signals) are in
 `eval/experiments/E1/policy.py` (serving-point rebinding on a degradation
 signal), `E2` (temporal relay across contacts), and `E3/policy.py` (risk-aware
 replication on a health signal).
+
+---
+
+## Plan-driven copies and recovery
+
+The plan that places a run's tasks prices every task on a node and every
+transfer on a link. The controller keeps that model for the whole run and uses
+it for three more decisions: which outputs get an extra copy and where, where a
+task goes when its node is lost, and what to do when a link turns out slower
+than planned.
+
+### Plan-aware copies
+
+```yaml
+spec:
+  scheduler: heft                      # any scheduler; the policy reads its plan
+  realizationPolicy:
+    mode: planAware
+    threshold: 2        # avoided delay per second of copy transfer required
+    minGainS: 1         # ignore copies that avoid less delay than this
+    podStartupS: 3      # dispatch-to-start of a pod task that must run again
+    warmStartupS: 0.1   # the same for a warm call
+    maxCopyBytes: 500MB # optional budget per run
+```
+
+For every consumer, the policy considers losing the consumer's planned node
+just before it starts. The consumer would move to the node where it finishes
+earliest (its fallback), and each input would arrive there from the nearest
+surviving copy or, if every planned copy was on the lost node, after its
+producer runs again. The delay this adds beyond the consumer's slack is what a
+copy on the fallback avoids. A copy is written into `spec.realization` (origin
+`plan`) when the avoided delay is at least `threshold` times the copy's transfer
+time. The copy starts once the producer's own pushes to its consumers are done.
+`status.realizationPolicy.decisions` records every (object, consumer) pair with
+the delay, slack, copy time, and the reason for the decision.
+
+With push delivery, a consumed object already has a copy on its producer's
+node and on each consumer's node. A lone copy remains where the plan
+co-located a producer with all its consumers, and those are the objects the
+policy protects. An input whose producer cannot run anywhere else (a sensor
+capture pinned to its node) is always copied: without the copy, losing the
+node ends the run.
+
+### Node-loss recovery
+
+The controller probes the data agents of nodes that active runs use, each
+second. A node is lost when its agent has not answered for
+`WL_NODE_LOSS_GRACE_S` seconds (default 5) or its Ready condition is not True.
+For each affected run:
+
+- every unfinished task on the lost node moves to the surviving node where it
+  would finish earliest, counting where its inputs already have copies (so a
+  plan copy draws the task to its node);
+- its pod or warm call on the lost node is removed and it runs again there;
+- each input it lacks comes from a surviving copy (a `recovery` entry in
+  `spec.realization`); only when no copy survives does the producer run again,
+  recursively;
+- a task that can run on no surviving node fails the run, with the root cause
+  in `status.message`.
+
+Every repair is appended to `status.recovery` (lost nodes, moved, restarted
+and re-run tasks, copies ordered). A returning node takes new placements again;
+repaired runs do not move back. `WL_NODE_LOSS=off` disables detection.
+
+### Degraded links
+
+A transfer that runs past twice its predicted time plus 2 s, or a completed
+one that took that long, marks its link degraded for 60 s. The prediction
+includes the contention the plan expected, so a fan-out that shares a link as
+planned is not evidence. While a consumer that has not started waits on a
+degraded link, the run is re-planned (at most every 5 s): the consumer moves
+where its input already is when that finishes clearly earlier, or takes the
+input from another copy over a healthy link.
+
+### Fault injection and functional checks
+
+`eval/tools/fault.py` crashes a node (`k3s-killall`), restores it, partitions
+it (processes keep running), heals it, and throttles or cuts its links.
+`eval/functional/` holds checks that each run once and assert behavior:
+`ft_recovery.py` (a two-task chain: plan copy, crash with and without the
+policy, partition), `ft_gdtm.py` (the GDTM tracker, losing a sensor node
+mid-run), and `ft_link.py` (a link throttled after planning). They need the
+testbed and a sudo password in `SUDO_PASS`.
 
 ---
 
