@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: wl-runner-e17
+  namespace: wl-system
+spec:
+  selector:
+    matchLabels:
+      app: wl-runner-e17
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 20
+  template:
+    metadata:
+      labels:
+        app: wl-runner-e17
+        wl.io/runner: e17
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: testbed.lab/class
+                operator: Exists
+      containers:
+      - name: runner
+        image: 10.10.0.1:5000/wl-runner-e17:milcom1
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8090
+        env:
+        - name: PYTHONUNBUFFERED
+          value: '1'
+        readinessProbe:
+          tcpSocket:
+            port: 8090
+          initialDelaySeconds: 2
+          periodSeconds: 5

@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: odag-controller
+  namespace: wl-system
+  labels:
+    app: odag-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: odag-controller
+  template:
+    metadata:
+      labels:
+        app: odag-controller
+      annotations:
+        kubectl.kubernetes.io/default-container: odag-controller
+    spec:
+      serviceAccountName: odag-controller
+      tolerations:
+      - key: node.kubernetes.io/unschedulable
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      nodeSelector:
+        kubernetes.io/hostname: eclipse
+      containers:
+      - name: odag-controller
+        image: 10.10.0.1:5000/wl-odag-controller:milcom9
+        imagePullPolicy: Always
+        resources:
+          requests:
+            cpu: '1'
+            memory: 512Mi
+          limits:
+            cpu: '16'
+            memory: 8Gi
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: WL_PROFILER_DB
+          value: /data/wl-profiler.db
+        - name: WL_NODE_LOSS
+          value: 'off'
+        - name: WL_POLL_INTERVAL_MS
+          value: '100'
+        - name: WL_STATUS_MIN_INTERVAL_MS
+          value: '250'
+        - name: WL_KUBE_QPS
+          value: '400'
+        - name: WL_KUBE_BURST
+          value: '800'
+        volumeMounts:
+        - name: profiler-data
+          mountPath: /data
+      - name: saga-sidecar
+        image: 10.10.0.1:5000/wl-saga-sidecar:latest
+        imagePullPolicy: Always
+        env:
+        - name: PYTHONHASHSEED
+          value: '0'
+        - name: WL_SAGA_PATH
+          value: /opt/wl-schedulers
+        - name: WL_SAGA_EXTRA_PACKAGES
+          value: ''
+        volumeMounts:
+        - name: user-schedulers
+          mountPath: /opt/wl-schedulers
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8090
+          initialDelaySeconds: 3
+          periodSeconds: 10
+      volumes:
+      - name: profiler-data
+        hostPath:
+          path: /var/lib/wayline
+          type: DirectoryOrCreate
+      - name: user-schedulers
+        configMap:
+          name: wl-user-schedulers
+          optional: true

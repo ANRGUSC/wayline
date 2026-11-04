@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: data-agent
+  namespace: wl-system
+spec:
+  selector:
+    matchLabels:
+      app: data-agent
+  template:
+    metadata:
+      labels:
+        app: data-agent
+    spec:
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: data-agent
+        image: 10.10.0.1:5000/wl-data-agent:milcom2
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8082
+          hostPort: 8082
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: WL_AGENT_SYNC
+          value: none
+        - name: WL_PUSH_RETRIES
+          value: '0'
+        - name: WL_PUSH_RETRY_DELAY_MS
+          value: '100'
+        volumeMounts:
+        - name: wl-outputs
+          mountPath: /data/wl-outputs
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8082
+          initialDelaySeconds: 5
+          periodSeconds: 30
+        args:
+        - --max-concurrent-pushes=0
+        - --sync=none
+      volumes:
+      - name: wl-outputs
+        hostPath:
+          path: /data/wl-outputs
+          type: DirectoryOrCreate
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 20
