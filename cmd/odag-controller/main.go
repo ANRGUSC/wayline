@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -271,9 +272,16 @@ func buildConfig(kubeconfig string) (*rest.Config, error) {
 		return nil, err
 	}
 	// Raise client-side rate limits (defaults: QPS=5, Burst=10) so that
-	// multi-ODAG workloads don't stall on client-side throttling.
+	// multi-ODAG workloads don't stall on client-side throttling
+	// (WL_KUBE_QPS, WL_KUBE_BURST: many concurrent runs need more).
 	cfg.QPS = 50
 	cfg.Burst = 100
+	if v, err := strconv.ParseFloat(os.Getenv("WL_KUBE_QPS"), 32); err == nil && v > 0 {
+		cfg.QPS = float32(v)
+	}
+	if v, err := strconv.Atoi(os.Getenv("WL_KUBE_BURST")); err == nil && v > 0 {
+		cfg.Burst = v
+	}
 	return cfg, nil
 }
 
@@ -283,8 +291,31 @@ func buildConfig(kubeconfig string) (*rest.Config, error) {
 
 // pollRunningODAGs periodically refreshes task statuses for all Running ODAGs
 // so that fast-changing fields like sending are captured between pod events.
+// pollInterval paces the sweep of running ODAGs (WL_POLL_INTERVAL_MS,
+// default 500). Data landing on a consumer's node is noticed by the next
+// sweep, so the interval bounds the dispatch delay after a cross-node
+// transfer.
+func pollInterval() time.Duration {
+	if ms, err := strconv.Atoi(os.Getenv("WL_POLL_INTERVAL_MS")); err == nil && ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+	return 500 * time.Millisecond
+}
+
+// latestODAG: "ns/odag" -> the newest object the watch delivered. The sweep
+// reads it instead of fetching the run every interval: at a 100 ms interval
+// with ten runs those fetches alone exceeded the client's rate limit, and
+// every other request (status writes, dispatch) queued behind them.
+var latestODAG sync.Map
+
+// sweepBusy: "ns/odag" -> true while that run's sweep pass is in flight. A
+// pass that outlasts the interval (a 100-task run whose agents answer
+// slowly) is not joined by another: passes used to pile up, one more per
+// tick, until the controller ran out of memory.
+var sweepBusy sync.Map
+
 func pollRunningODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(pollInterval())
 	defer ticker.Stop()
 	for range ticker.C {
 		runningODAGs.Range(func(k, _ any) bool {
@@ -292,14 +323,26 @@ func pollRunningODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset)
 			if len(parts) != 2 {
 				return true
 			}
-			ns, name := parts[0], parts[1]
-			odagObj, err := dynClient.Resource(odagGVR).Namespace(ns).Get(
-				context.Background(), name, metav1.GetOptions{},
-			)
-			if err != nil {
+			if _, busy := sweepBusy.LoadOrStore(k, true); busy {
 				return true
 			}
-			go processReadyTasks(dynClient, client, ns, name, odagObj)
+			ns, name := parts[0], parts[1]
+			go func() {
+				defer sweepBusy.Delete(k)
+				var odagObj *unstructured.Unstructured
+				if v, ok := latestODAG.Load(k); ok {
+					odagObj = v.(*unstructured.Unstructured)
+				} else {
+					o, err := dynClient.Resource(odagGVR).Namespace(ns).Get(
+						context.Background(), name, metav1.GetOptions{},
+					)
+					if err != nil {
+						return
+					}
+					odagObj = o
+				}
+				processReadyTasks(dynClient, client, ns, name, odagObj)
+			}()
 			return true
 		})
 	}
@@ -321,6 +364,9 @@ func watchODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
 			if !ok {
 				continue
 			}
+			if t := string(event.Type); t == "ADDED" || t == "MODIFIED" {
+				latestODAG.Store(obj.GetNamespace()+"/"+obj.GetName(), obj)
+			}
 			switch string(event.Type) {
 			case "ADDED":
 				go deployODAG(dynClient, client, obj)
@@ -328,8 +374,15 @@ func watchODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
 				// Runtime revision: a policy patched spec.realization on
 				// the live run. Converge the data plane toward it.
 				go reconcileRealization(dynClient, client, obj)
+				// An outside policy re-placed tasks (placement.go): enact
+				// it now rather than at the next sweep.
+				if parsePlacement(obj) != nil {
+					go processReadyTasks(dynClient, client, obj.GetNamespace(), obj.GetName(), obj)
+				}
 			case "DELETED":
 				key := obj.GetNamespace() + "/" + obj.GetName()
+				latestODAG.Delete(key)
+				forgetReadySince(key)
 				processedODAGs.Delete(key)
 				assignmentCache.Delete(key)
 				forgetRealization(key)
@@ -349,6 +402,8 @@ func watchODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
 				statusRunners.Delete(key)
 				completedRuns.Delete(obj.GetUID())
 				forgetDispatches(key)
+				forgetReservations(key)
+				forgetInputWaits(key)
 				forgetWarm(key)
 				go gcDeletedRun(dynClient, client, obj)
 			}
@@ -517,6 +572,24 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 		assignMap = assignTasks(tasks, nodeMap)
 		predicted, flows = computePredictedSchedule(tasks, assignMap, rtRes, dsRes, bwRes)
 	}
+	// Clear any stale DataReady states on child nodes left over from a
+	// previous run of the same ODAG (same name → same hostPath files).
+	// For every (dep → child) edge, reset dep's state on the child's node
+	// so the controller doesn't see stale DataReady and launch tasks early.
+	// This runs before the assignment is published: a dispatch pass (the
+	// sweep, a pod event) can start the run's tasks as soon as it is, and a
+	// reset arriving after a root task finished put its state back to
+	// Pending, so its warm call never completed and held its node's CPU
+	// for good (E17: a 60-task run hung behind a 0.2 s source task).
+	for _, task := range tasks {
+		childNi := assignMap[task.Name]
+		if childNi.ip == "" {
+			continue
+		}
+		for _, dep := range task.Dependencies {
+			resetTaskState(childNi.ip, odagName, dep)
+		}
+	}
 	assignmentCache.Store(key, assignMap)
 	// An explicitly declared order (frozen-schedule replay) takes the
 	// same path as an externally returned one.
@@ -549,20 +622,6 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 	log.Printf("[odag-ctrl] task placement for %s:", key)
 	for task, ni := range assignMap {
 		log.Printf("[odag-ctrl]   %-20s -> %s (%s)", task, ni.name, ni.ip)
-	}
-
-	// Clear any stale DataReady states on child nodes left over from a
-	// previous run of the same ODAG (same name → same hostPath files).
-	// For every (dep → child) edge, reset dep's state on the child's node
-	// so the controller doesn't see stale DataReady and launch tasks early.
-	for _, task := range tasks {
-		childNi := assignMap[task.Name]
-		if childNi.ip == "" {
-			continue
-		}
-		for _, dep := range task.Dependencies {
-			resetTaskState(childNi.ip, odagName, dep)
-		}
 	}
 
 	// Also clear the data-agent flow log on every involved node, so stale
@@ -645,6 +704,9 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 	key := namespace + "/" + odagName
 	ownerUID := odagObj.GetUID()
 
+	// An outside policy's placement for tasks not started yet (placement.go).
+	reconcilePlacement(dynClient, client, namespace, odagName, odagObj)
+
 	// Retrieve cached assignment.
 	raw, ok := assignmentCache.Load(key)
 	if !ok {
@@ -685,6 +747,12 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		} else if e, ok := cacheHitFor(namespace, odagName, t.Name); ok {
 			cached[t.Name] = e
 		}
+	}
+
+	byReadiness := executorOrder(odagObj) == "readiness"
+	var readyList []readyTask
+	dispatchReady := func(task taskSpec) {
+		dispatchTask(dynClient, client, namespace, odagName, key, ownerUID, odagObj, task, assignMap, tasks)
 	}
 
 	// For each task: if it has no pod yet AND all dependencies have DataReady on
@@ -805,6 +873,9 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 					}
 				}
 				if !ready {
+					if podPhases[dep] == corev1.PodSucceeded {
+						repairBlockedInputs(key, odagName, string(ownerUID), task, assignMap, childNi, podPhases, vertex, cached)
+					}
 					allDepsDone = false
 					break
 				}
@@ -826,16 +897,82 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 			}
 			continue
 		}
+		if byReadiness {
+			// Dispatched below, earliest-ready first.
+			rk := dispatchKey(namespace, odagName, ownerUID, task.Name)
+			at, _ := readySince.LoadOrStore(rk, time.Now())
+			readyList = append(readyList, readyTask{task: task, at: at.(time.Time), idx: len(readyList)})
+			continue
+		}
+		dispatchReady(task)
+	}
+	if byReadiness {
+		sort.SliceStable(readyList, func(i, j int) bool {
+			if !readyList[i].at.Equal(readyList[j].at) {
+				return readyList[i].at.Before(readyList[j].at)
+			}
+			return readyList[i].idx < readyList[j].idx
+		})
+		for _, rt := range readyList {
+			dispatchReady(rt.task)
+		}
+	}
 
+	// Per-task statuses and overall completion, one pass at a time per run
+	// (statusworker.go). A data vertex has no pod, so completion counts pod
+	// tasks only: every sink is a pod (a data vertex must have successors),
+	// so all pods Succeeded implies every vertex on a path to a sink has
+	// executed.
+	requestStatus(statusArgs{dynClient: dynClient, client: client, namespace: namespace,
+		odagName: odagName, ownerUID: ownerUID, tasks: tasks})
+}
+
+// readyTask is a task whose inputs are all on its node, waiting for dispatch
+// in readiness order (spec.executor.order: readiness).
+type readyTask struct {
+	task taskSpec
+	at   time.Time
+	idx  int
+}
+
+// readySince: dispatch key -> when the task was first seen with all its
+// inputs on its node. A move to another node starts the clock again there.
+var readySince sync.Map
+
+// forgetReadySince drops a deleted run's ("ns/odag") readiness times.
+func forgetReadySince(odagKey string) {
+	prefix := odagKey + "/"
+	readySince.Range(func(k, _ any) bool {
+		if strings.HasPrefix(k.(string), prefix) {
+			readySince.Delete(k)
+		}
+		return true
+	})
+}
+
+// executorOrder reads spec.executor.order ("" or "readiness").
+func executorOrder(obj *unstructured.Unstructured) string {
+	o, _, _ := unstructured.NestedString(obj.Object, "spec", "executor", "order")
+	return o
+}
+
+// dispatchTask claims, admits and starts one ready compute task (a pod or a
+// warm call). Factored out of processReadyTasks so ready tasks can be started
+// in readiness order.
+func dispatchTask(dynClient dynamic.Interface, client *kubernetes.Clientset, namespace, odagName, key string,
+	ownerUID types.UID, odagObj *unstructured.Unstructured, task taskSpec, assignMap map[string]nodeInfo,
+	tasks []taskSpec) {
+
+	{
 		ni := assignMap[task.Name]
 		// Node-loss recovery may have moved the task since this pass took
 		// its snapshot: never dispatch to a lost node, and leave a moved
 		// task to the next pass, which gates it on its new node.
 		if cur, ok := assignmentCache.Load(key); ok && cur.(map[string]nodeInfo)[task.Name].name != ni.name {
-			continue
+			return
 		}
 		if nodeLost(ni.name) {
-			continue
+			return
 		}
 		// Claim the dispatch before touching the task's agent state. Passes
 		// run concurrently, each from its own snapshot; without the claim a
@@ -844,17 +981,23 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		// never reported ComputeDone and its run never completed.
 		claim := dispatchKey(namespace, odagName, ownerUID, task.Name)
 		if !claimDispatch(claim) {
-			continue
+			return
 		}
 		// One CPU account per node for pods and warm calls (capacity.go):
 		// wait for room instead of overbooking the node.
 		admitKey := namespace + "/" + odagName + "/" + task.Name
 		if !admitCPU(admitKey, ni.name, parseTaskCPUMillis(task.CPU), ni.cpuMillis) {
 			releaseDispatch(claim)
-			continue
+			return
 		}
 		if ni.ip != "" {
 			resetTaskState(ni.ip, odagName, task.Name)
+		}
+		// Consumers' locations from the current assignment, not this pass's
+		// snapshot: an external placement may have moved a consumer since
+		// (placement.go orders copies only for producers claimed by then).
+		if cur, ok := assignmentCache.Load(key); ok {
+			assignMap = cur.(map[string]nodeInfo)
 		}
 		envVars := buildEnvVars(odagName, task, assignMap, tasks)
 		envVars = append(envVars, durabilityEnv(runDurability(odagObj), task, tasks)...)
@@ -870,7 +1013,7 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 					log.Printf("[odag-ctrl] warm invoke %s/%s on %s: %v (will retry)", key, task.Name, ni.name, err)
 				}
 			}
-			continue
+			return
 		}
 		if err := ensurePod(client, namespace, odagName, task, ni.name, envVars, ownerUID); err != nil {
 			releaseCPU(admitKey)
@@ -880,14 +1023,6 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 			log.Printf("[odag-ctrl] launched task %s on node %s", task.Name, ni.name)
 		}
 	}
-
-	// Per-task statuses and overall completion, one pass at a time per run
-	// (statusworker.go). A data vertex has no pod, so completion counts pod
-	// tasks only: every sink is a pod (a data vertex must have successors),
-	// so all pods Succeeded implies every vertex on a path to a sink has
-	// executed.
-	requestStatus(statusArgs{dynClient: dynClient, client: client, namespace: namespace,
-		odagName: odagName, ownerUID: ownerUID, tasks: tasks})
 }
 
 // --------------------------------------------------------------------------
@@ -1262,6 +1397,26 @@ func reservedByOthers(client *kubernetes.Clientset) map[string]nodeInfo {
 	return out
 }
 
+// nodeDataIP is the address data agents are reached at: where task outputs
+// are pushed and copies are made. On a cluster with a separate data network
+// that is not the node's InternalIP (the control address k3s registers with):
+// an explicit wl.io/data-ip annotation wins, then the address flannel runs the
+// pod network on (flannel-iface), then InternalIP. Agents answer on every
+// node address (hostPort), so any of these reaches the same agent.
+func nodeDataIP(n corev1.Node) string {
+	for _, a := range []string{"wl.io/data-ip", "flannel.alpha.coreos.com/public-ip"} {
+		if v := strings.TrimSpace(n.Annotations[a]); v != "" {
+			return v
+		}
+	}
+	for _, addr := range n.Status.Addresses {
+		if addr.Type == corev1.NodeInternalIP {
+			return addr.Address
+		}
+	}
+	return ""
+}
+
 func getNodeInfoMap(client *kubernetes.Clientset) (map[string]nodeInfo, error) {
 	nodeList, err := client.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{
 		FieldSelector: "spec.unschedulable!=true",
@@ -1282,13 +1437,7 @@ func getNodeInfoMap(client *kubernetes.Clientset) (map[string]nodeInfo, error) {
 		if noSchedule {
 			continue
 		}
-		ip := ""
-		for _, addr := range n.Status.Addresses {
-			if addr.Type == corev1.NodeInternalIP {
-				ip = addr.Address
-				break
-			}
-		}
+		ip := nodeDataIP(n)
 		if ip != "" {
 			nodeIPCache.Store(n.Name, ip)
 		}
@@ -1337,6 +1486,19 @@ func getNodeInfoMap(client *kubernetes.Clientset) (map[string]nodeInfo, error) {
 //	WL_SUCCESSORS            comma-separated successor task names
 //	WL_SUCC_<SUCC>_NODE      node name where that successor will run
 //	WL_SUCC_<SUCC>_HOST      internal IP of that node (for data-agent PUT)
+//
+// taskRuntimeOn is the WL_RUNTIME hint for a task placed on `node`: its
+// runtimeProfile entry for that node when it has one (so a task that only
+// sleeps its runtime takes the per-node time the scheduler planned with),
+// else the scalar runtime. Whole seconds print as before ("12"); a profile
+// entry may be fractional ("1.25").
+func taskRuntimeOn(task taskSpec, node string) string {
+	if v, ok := task.RuntimeProfile[node]; ok && node != "" {
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	return fmt.Sprintf("%d", int(task.Runtime))
+}
+
 func buildEnvVars(odagName string, task taskSpec, assignMap map[string]nodeInfo, allTasks []taskSpec) []corev1.EnvVar {
 	outputDir := fmt.Sprintf("%s/%s/%s", dataOutputPath, odagName, task.Name)
 
@@ -1373,7 +1535,7 @@ func buildEnvVars(odagName string, task taskSpec, assignMap map[string]nodeInfo,
 			},
 		},
 		// Spec hints: runtime (seconds) and output data size (bytes) for task awareness.
-		{Name: "WL_RUNTIME", Value: fmt.Sprintf("%d", int(task.Runtime))},
+		{Name: "WL_RUNTIME", Value: taskRuntimeOn(task, assignMap[task.Name].name)},
 		{Name: "WL_DATA_SIZE", Value: fmt.Sprintf("%d", parseDataSizeBytes(task.DataSize))},
 	}
 

@@ -15,8 +15,11 @@ package main
 // never goes backwards.
 
 import (
+	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -38,7 +41,17 @@ type statusRunner struct {
 	running bool
 	again   bool
 	latest  statusArgs
+	last    time.Time // when the latest pass started
 }
+
+// statusMinInterval spaces one run's status passes (WL_STATUS_MIN_INTERVAL_MS,
+// default 0: back to back).
+var statusMinInterval = func() time.Duration {
+	if ms, err := strconv.Atoi(os.Getenv("WL_STATUS_MIN_INTERVAL_MS")); err == nil && ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+	return 0
+}()
 
 // statusRunners: "ns/odag" -> *statusRunner.
 var statusRunners sync.Map
@@ -67,9 +80,16 @@ func requestStatus(a statusArgs) {
 	r.mu.Unlock()
 	go func() {
 		for {
+			// Back-to-back passes are spaced by statusMinInterval: each one
+			// queries every task's agent and rewrites the status, so an
+			// unpaced 100-task run kept its agents and the API server busy.
+			if wait := statusMinInterval - time.Since(r.last); statusMinInterval > 0 && wait > 0 {
+				time.Sleep(wait)
+			}
 			r.mu.Lock()
 			next := r.latest
 			r.again = false
+			r.last = time.Now()
 			r.mu.Unlock()
 			statusPassFn(next)
 			r.mu.Lock()

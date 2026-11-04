@@ -49,6 +49,7 @@ func (nt *nodeTimeline) earliestStart(cpuNeed, memNeed int64, duration, minStart
 	if cpuNeed <= 0 && memNeed <= 0 {
 		return minStart // no resource constraints
 	}
+	cpuNeed, memNeed = nt.clampNeed(cpuNeed, memNeed)
 
 	// Check if we can start at minStart.
 	t := minStart
@@ -58,11 +59,28 @@ func (nt *nodeTimeline) earliestStart(cpuNeed, memNeed int64, duration, minStart
 		}
 		// Advance to the next slot boundary after t.
 		nextBoundary := nt.nextBoundaryAfter(t)
-		if nextBoundary <= t {
+		if nextBoundary <= t || nextBoundary >= t+boundarySentinel {
 			return t // no more boundaries — must be free
 		}
 		t = nextBoundary
 	}
+}
+
+// boundarySentinel is what nextBoundaryAfter adds to t when no slot starts
+// or ends after it.
+const boundarySentinel = 1e9
+
+// clampNeed caps a request at the node's capacity: a task larger than the
+// whole node runs alone on it (capacity.go admits it that way), so it is
+// planned as taking the whole node rather than never fitting.
+func (nt *nodeTimeline) clampNeed(cpuNeed, memNeed int64) (int64, int64) {
+	if nt.totalCPU > 0 && cpuNeed > nt.totalCPU {
+		cpuNeed = nt.totalCPU
+	}
+	if nt.totalMem > 0 && memNeed > nt.totalMem {
+		memNeed = nt.totalMem
+	}
+	return cpuNeed, memNeed
 }
 
 // canFit checks if a task with given resource needs can fit in [start, end]
@@ -110,7 +128,7 @@ func (nt *nodeTimeline) memUsedAt(t float64) int64 {
 
 // nextBoundaryAfter returns the next slot start or end time strictly after t.
 func (nt *nodeTimeline) nextBoundaryAfter(t float64) float64 {
-	best := t + 1e9 // sentinel
+	best := t + boundarySentinel
 	for _, s := range nt.slots {
 		if s.start > t && s.start < best {
 			best = s.start
@@ -124,6 +142,7 @@ func (nt *nodeTimeline) nextBoundaryAfter(t float64) float64 {
 
 // commit adds a task to the timeline.
 func (nt *nodeTimeline) commit(taskName string, start, end float64, cpuMillis, memBytes int64) {
+	cpuMillis, memBytes = nt.clampNeed(cpuMillis, memBytes)
 	nt.slots = append(nt.slots, timeSlot{
 		start: start, end: end,
 		cpuMillis: cpuMillis, memBytes: memBytes,

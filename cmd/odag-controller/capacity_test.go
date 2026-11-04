@@ -23,7 +23,7 @@ func testPod(name, node, task string, cpu string, phase corev1.PodPhase) *corev1
 }
 
 func resetCapacityState() {
-	for _, m := range []interface{ Range(func(k, v any) bool) }{&podCache, &warmInvocations, &reservations} {
+	for _, m := range []interface{ Range(func(k, v any) bool) }{&podCache, &warmInvocations, &reservations, &assignmentCache} {
 		m.Range(func(k, _ any) bool {
 			switch mm := m.(type) {
 			case interface{ Delete(any) }:
@@ -40,6 +40,7 @@ func TestPodsAndWarmCallsShareOneCPUAccount(t *testing.T) {
 	podCache.Store("ns/p1", testPod("p1", "n1", "w1", "4", corev1.PodRunning))
 	podCache.Store("ns/p0", testPod("p0", "n1", "done", "4", corev1.PodSucceeded)) // finished: free
 	podCache.Store("ns/p9", testPod("p9", "n2", "other", "4", corev1.PodRunning))  // other node
+	assignmentCache.Store("ns/run", map[string]nodeInfo{})
 	warmInvocations.Store("ns/run/uid/w2", &warmInvocation{node: "n1", taskKey: "ns/run/w2", cpuMillis: 2000})
 	if got := nodeCPUInUse("n1"); got != 6000 {
 		t.Fatalf("in use on n1 = %d, want 6000 (4-CPU pod + 2-CPU warm call)", got)
@@ -126,5 +127,51 @@ func TestFinishedTaskPodFreesCPUBeforeKubeletReports(t *testing.T) {
 	}
 	if asked == 0 {
 		t.Fatal("the data agent was never asked")
+	}
+}
+
+// A run's last task admitted on a node, finished and the run deleted before
+// any other admission there: its reservation must go with the run, not hold
+// the node's next task until reservationTTL.
+func TestDeletedRunReleasesItsReservations(t *testing.T) {
+	resetCapacityState()
+	defer resetCapacityState()
+	if !admitCPU("ns/old/last", "n1", 64000, 4000) {
+		t.Fatal("first task on an idle node must be admitted")
+	}
+	if admitCPU("ns/next/first", "n1", 64000, 4000) {
+		t.Fatal("the reservation should hold the node while the run lives")
+	}
+	forgetReservations("ns/old")
+	if got := nodeCPU("n1").reserved; got != 0 {
+		t.Fatalf("reserved after the run is deleted = %dm, want 0", got)
+	}
+	if !admitCPU("ns/next/first", "n1", 64000, 4000) {
+		t.Fatal("the next run's task must be admitted once the old run is gone")
+	}
+	if _, held := reservations.Load("ns/oldx/t"); held {
+		t.Fatal("unexpected reservation")
+	}
+}
+
+// A dispatch that raced its run's deletion stored a warm invocation after
+// forgetWarm ran: no run is left to finish it, so it must not hold the node.
+func TestOrphanedWarmCallFreesItsNode(t *testing.T) {
+	resetCapacityState()
+	defer resetCapacityState()
+	assignmentCache.Store("ns/live", map[string]nodeInfo{})
+	warmInvocations.Store("ns/live/uid/a", &warmInvocation{node: "n1", taskKey: "ns/live/a", cpuMillis: 64000})
+	warmInvocations.Store("ns/gone/uid/b", &warmInvocation{node: "n2", taskKey: "ns/gone/b", cpuMillis: 64000})
+	if got := nodeCPU("n1").warm; got != 64000 {
+		t.Fatalf("live run's call on n1 = %dm, want 64000m", got)
+	}
+	if got := nodeCPU("n2").warm; got != 0 {
+		t.Fatalf("deleted run's call still holds n2: %dm", got)
+	}
+	if _, ok := warmInvocations.Load("ns/gone/uid/b"); ok {
+		t.Fatal("orphaned invocation kept")
+	}
+	if !admitCPU("ns/next/c", "n2", 64000, 4000) {
+		t.Fatal("next task refused on a node only an orphan held")
 	}
 }

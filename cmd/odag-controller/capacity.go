@@ -22,6 +22,7 @@ package main
 
 import (
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,6 +106,15 @@ func nodeCPU(node string) cpuUse {
 		return true
 	})
 	warmInvocations.Range(func(k, v any) bool {
+		// An invocation stored by a dispatch that raced its run's deletion
+		// (forgetWarm ran first) has no run to finish it: it would hold its
+		// node's CPU for good. A run that is gone has no assignment.
+		if parts := strings.SplitN(k.(string), "/", 3); len(parts) == 3 {
+			if _, live := assignmentCache.Load(parts[0] + "/" + parts[1]); !live {
+				warmInvocations.Delete(k)
+				return true
+			}
+		}
 		inv := v.(*warmInvocation)
 		inv.mu.Lock()
 		visible[inv.taskKey] = true
@@ -210,3 +220,20 @@ func tryAdmit(key, node string, cpu, capacity int64) bool {
 
 // releaseCPU drops a reservation whose dispatch failed.
 func releaseCPU(key string) { reservations.Delete(key) }
+
+// forgetReservations drops a deleted run's ("ns/odag") reservations. A
+// reservation is retired lazily, by the next account of its node once its
+// pod or invocation is visible; a run deleted before that (its last task
+// admitted, finished, and the run removed with no other admission on the
+// node in between) took the invocation with it, so the reservation stayed
+// counted until reservationTTL and held the node's next task back for up
+// to a minute.
+func forgetReservations(odagKey string) {
+	prefix := odagKey + "/"
+	reservations.Range(func(k, _ any) bool {
+		if strings.HasPrefix(k.(string), prefix) {
+			reservations.Delete(k)
+		}
+		return true
+	})
+}
