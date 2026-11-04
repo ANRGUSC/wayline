@@ -84,9 +84,7 @@ const (
 )
 
 const (
-	pushRetries    = 5
-	pushRetryDelay = 500 * time.Millisecond
-	dataAgentPort  = 8082
+	dataAgentPort = 8082
 
 	// pushTimeoutFor parameters. A fixed timeout of 120s used to live here,
 	// but for a 500 MB push on a 50 Mbps S-link the naive wire time is
@@ -104,6 +102,15 @@ const (
 //
 //	WL_PUSH_TIMEOUT_BASE_S, WL_PUSH_TIMEOUT_SAFETY_S,
 //	WL_PUSH_MIN_THROUGHPUT_KBS.
+//
+// Push retry policy: WL_PUSH_RETRIES attempts (0 = keep retrying until the
+// push succeeds or is canceled, e.g. across a link outage), WL_PUSH_RETRY_DELAY_MS
+// apart. Defaults keep the historical 5 attempts, 500 ms apart.
+var (
+	pushRetries    = envIntZero("WL_PUSH_RETRIES", 5)
+	pushRetryDelay = time.Duration(envInt("WL_PUSH_RETRY_DELAY_MS", 500)) * time.Millisecond
+)
+
 var (
 	pushTimeoutBase     = time.Duration(envInt("WL_PUSH_TIMEOUT_BASE_S", 60)) * time.Second
 	pushTimeoutSafety   = time.Duration(envInt("WL_PUSH_TIMEOUT_SAFETY_S", 30)) * time.Second
@@ -113,6 +120,16 @@ var (
 func envOr(name, def string) string {
 	if v := os.Getenv(name); v != "" {
 		return v
+	}
+	return def
+}
+
+// envIntZero is envInt that also accepts 0.
+func envIntZero(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
 	}
 	return def
 }
@@ -136,6 +153,32 @@ func pushTimeoutFor(size int64) time.Duration {
 	return pushTimeoutBase + pushTimeoutSafety + expected
 }
 
+// pushTimeoutMax caps the per-attempt deadline as it grows across retries.
+const pushTimeoutMax = 30 * time.Minute
+
+// pushAttemptTimeout is attempt n's deadline (n from 1): pushTimeoutFor(size),
+// doubled on every retry up to pushTimeoutMax. A fixed deadline assumes a
+// minimum throughput; when many pushes share a slow or degraded link none
+// meets it, and since a failed attempt restarts from zero, they all time out
+// together forever (E17: 28 pushes of 0.55 MB over two 2 Mbit/s radio links,
+// every attempt cut at 90 s for 15 minutes). A growing deadline lets them
+// finish.
+func pushAttemptTimeout(size int64, attempt int) time.Duration {
+	t := pushTimeoutFor(size)
+	for i := 1; i < attempt && t < pushTimeoutMax; i++ {
+		t *= 2
+	}
+	if t > pushTimeoutMax {
+		t = pushTimeoutMax
+	}
+	return t
+}
+
+// inflightPushes: "rel/consumer" -> true while a push of that object to that
+// consumer runs. A second request for the same pair (a revision ordering the
+// same copy twice) joins the one in flight instead of doubling the load.
+var inflightPushes sync.Map
+
 var dataDir string
 
 // maxConcurrentPushes caps how many remote successor PUTs run in parallel
@@ -151,15 +194,17 @@ var maxConcurrentPushes int = 4
 var pushCompress = "none"
 
 // syncMode is the durability policy for what the agent writes:
-//   full  fsync every payload and every metadata file (state, ready markers,
-//         install records, transfer queue) and their directories. Crash-
-//         consistent: after a power loss everything reported is on disk.
-//   data  fsync payloads only; metadata is still written atomically (temp +
-//         rename) but not synced. A crash can lose recent state/queue
-//         entries, never a payload reported ready.
-//   none  no fsync. Writes stay atomic (rename), so readers never see a
-//         partial object, but a power loss can lose recently written objects,
-//         whose tasks must then rerun.
+//
+//	full  fsync every payload and every metadata file (state, ready markers,
+//	      install records, transfer queue) and their directories. Crash-
+//	      consistent: after a power loss everything reported is on disk.
+//	data  fsync payloads only; metadata is still written atomically (temp +
+//	      rename) but not synced. A crash can lose recent state/queue
+//	      entries, never a payload reported ready.
+//	none  no fsync. Writes stay atomic (rename), so readers never see a
+//	      partial object, but a power loss can lose recently written objects,
+//	      whose tasks must then rerun.
+//
 // On eMMC/ext4 every fsync can wait for other files' dirty data, so with
 // several large transfers landing on a node, "full" serialises small metadata
 // syncs behind 100 MB flushes (E13: a 15.8 s stall on one task's handoff).
@@ -179,7 +224,9 @@ func syncMetadata() bool { return syncMode == "full" }
 // object durable in place (a realization revision).
 const headerDurable = "X-Wayline-Durable"
 
-func durableFile(rel string) string { return filepath.Join(dataDir, filepath.Clean(rel), ".wl-durable") }
+func durableFile(rel string) string {
+	return filepath.Join(dataDir, filepath.Clean(rel), ".wl-durable")
+}
 
 // requestDurable reads the install's durability from its header, falling
 // back to the node default.
@@ -400,7 +447,9 @@ func readInstalledDigest(rel string) string {
 // writeInstalledDigest persists the SHA-256 of the just-installed output.
 // Durably written (temp + fsync + rename + fsync parent) so the idempotent
 // fast-path stays correct after a crash.
-func writeInstalledDigest(rel, hexDigest string) { writeInstalledDigestSync(rel, hexDigest, syncMetadata()) }
+func writeInstalledDigest(rel, hexDigest string) {
+	writeInstalledDigestSync(rel, hexDigest, syncMetadata())
+}
 
 func writeInstalledDigestSync(rel, hexDigest string, sync bool) {
 	if err := writeTextAtomicSync(digestSidecarFile(rel), hexDigest, sync); err != nil {
@@ -1027,8 +1076,8 @@ func sha256OfFile(path string) (string, int64, error) {
 func pushToNode(ctx context.Context, odag, task, host, localFile, contentDigest string, size int64) error {
 	metricPushAttempts.Add(1)
 	url := fmt.Sprintf("http://%s:%d/%s/%s/output", host, dataAgentPort, odag, task)
-	client := &http.Client{Timeout: pushTimeoutFor(size)}
-	for attempt := 1; attempt <= pushRetries; attempt++ {
+	for attempt := 1; pushRetries == 0 || attempt <= pushRetries; attempt++ {
+		client := &http.Client{Timeout: pushAttemptTimeout(size, attempt)}
 		f, err := os.Open(localFile)
 		if err != nil {
 			log.Printf("[data-agent] push to %s attempt %d/%d: open %s: %v", host, attempt, pushRetries, localFile, err)
@@ -1098,8 +1147,12 @@ func pushToNode(ctx context.Context, odag, task, host, localFile, contentDigest 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if attempt < pushRetries {
-			time.Sleep(pushRetryDelay)
+		if pushRetries == 0 || attempt < pushRetries {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(pushRetryDelay):
+			}
 		}
 	}
 	metricPushFailed.Add(1)
@@ -1464,6 +1517,11 @@ func main() {
 					Node string `json:"node"`
 				}) {
 					defer wg.Done()
+					if _, busy := inflightPushes.LoadOrStore(rel+"/"+succ.Name, true); busy {
+						log.Printf("[data-agent/%s] PUSH %s/%s -> %s already in flight; joined", nodeName, odag, task, succ.Name)
+						return
+					}
+					defer inflightPushes.Delete(rel + "/" + succ.Name)
 					acquirePushSlot()
 					defer releasePushSlot()
 					if transferCanceled(rel, succ.Name) {
@@ -1534,6 +1592,24 @@ func main() {
 		}
 		odag, task := parts[0], parts[1]
 		rel := odag + "/" + task
+		// ?consumer=<name>: revoke only that consumer's transfer, and
+		// remember it even if the push has not been queued yet (a producer
+		// still running when its consumer moved pushes later).
+		if only := r.URL.Query().Get("consumer"); only != "" {
+			canceledTransfers.Store(rel+"/"+only, true)
+			if c, ok := inflightCancels.Load(rel + "/" + only); ok {
+				c.(context.CancelFunc)()
+			}
+			if b, err := os.ReadFile(transferStateFile(rel, only)); err == nil {
+				if st := strings.TrimSpace(string(b)); st == "Pending" || st == "Transferring" {
+					setTransferState(rel, only, "Canceled")
+				}
+			}
+			log.Printf("[data-agent/%s] CANCEL %s -> %s", nodeName, rel, only)
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "{\"canceled\": 1}")
+			return
+		}
 		n := 0
 		transfersPath := transfersDir(rel)
 		if entries, err := os.ReadDir(transfersPath); err == nil {
