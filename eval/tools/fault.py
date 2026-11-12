@@ -145,10 +145,20 @@ def _shape(u, peers_ip, mbit):
     return ssh(u, "; ".join(lines), sudo=True)
 
 
-def link(node, mbit):
+def link(node, mbit, repo=None):
+    """repo: also throttle `node`'s pod traffic (VXLAN) to that node, where
+    a central repository serves (Argo's S3 on anrg-2), so a repository-based
+    system sees the same degraded link."""
     ips = {n: node_ip(n) for n in WORKERS}
     others = {n: ip for n, ip in ips.items() if n != node}
     _shape(node, others, mbit)
+    if repo:
+        rip = node_ip(repo)
+        action = "flowid 1:77" if mbit > 0 else "action drop"
+        peer = next(iter(others.values()))
+        ssh(node, f"IF=$(ip route get {peer} | grep -o 'dev [^ ]*' | awk '{{print $2}}'); "
+                  f"tc filter add dev $IF parent 1: protocol ip prio 1 u32 match ip dst {rip}/32 "
+                  f"match ip protocol 17 0xff match ip dport 8472 0xffff {action}", sudo=True)
     for n in others:
         _shape(n, {node: ips[node]}, mbit)
     stamp(f"link {node} <-> workers at {mbit} Mbit/s" if mbit else f"link {node} cut")

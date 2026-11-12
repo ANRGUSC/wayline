@@ -287,10 +287,13 @@ class Runner:
                 spec["dependencies"] = [sc.tn[p] for p in sc.parents[t]]
                 spec["inputs"] = [{"producer": sc.tn[p], "object": f"to-{sc.tn[t]}"} for p in sc.parents[t]]
             tasks.append(spec)
+        spec = {"scheduler": "random", "executor": {"order": "readiness"},
+                "realizationPolicy": {"mode": "none", "revise": False}, "tasks": tasks}
+        if getattr(self, "data_plane", None):   # E19's push/pull ablation (spec.dataPlane)
+            spec["dataPlane"] = self.data_plane
         return {"apiVersion": "wl.io/v1", "kind": "ODAG",
                 "metadata": {"name": name, "namespace": NS, "labels": {"wl.io/experiment": "e17"}},
-                "spec": {"scheduler": "random", "executor": {"order": "readiness"},
-                         "realizationPolicy": {"mode": "none", "revise": False}, "tasks": tasks}}
+                "spec": spec}
 
     # ------------------------------------------------------- live state
     def task_states(self, sc, obj, t0, sigma, sim_now, plan0):

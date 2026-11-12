@@ -126,9 +126,15 @@ def iot_tasks(base):
     return out
 
 
-def chain_tasks():
-    return [{"name": "p", "role": "hash", "runtime": 12.0, "size": 8_000_000, "cpu": 2, "deps": [], "pinned": False},
-            {"name": "c", "role": "hash", "runtime": 20.0, "size": 0, "cpu": 2, "deps": ["p"], "pinned": False}]
+def chain_tasks(workload="chain"):
+    """The chain (8 MB), chain-link (30 MB), and fan (chain-link plus a short
+    second consumer d), as in e16.py's templates."""
+    mb = 8 if workload == "chain" else 30
+    out = [{"name": "p", "role": "hash", "runtime": 12.0, "size": mb * 1_000_000, "cpu": 2, "deps": [], "pinned": False},
+           {"name": "c", "role": "hash", "runtime": 20.0, "size": 0, "cpu": 2, "deps": ["p"], "pinned": False}]
+    if workload == "fan":
+        out.append({"name": "d", "role": "hash", "runtime": 1.0, "size": 0, "cpu": 1, "deps": ["p"], "pinned": False})
+    return out
 
 
 def parse_size(s):
@@ -146,13 +152,13 @@ def parse_cpu(s):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--workload", choices=["iot", "chain"], required=True)
+    ap.add_argument("--workload", choices=["iot", "chain", "chain-link", "fan"], required=True)
     ap.add_argument("--plan", required=True, help="{task: node}")
     ap.add_argument("--copies", help="{object: [node]}: application-level copies")
     ap.add_argument("--iot-base", default="/tmp/iot-base.json")
     a = ap.parse_args()
 
-    tasks = iot_tasks(json.load(open(a.iot_base))) if a.workload == "iot" else chain_tasks()
+    tasks = iot_tasks(json.load(open(a.iot_base))) if a.workload == "iot" else chain_tasks(a.workload)
     plan = json.load(open(a.plan))
     copies = json.load(open(a.copies)) if a.copies else {}
     ray.init(address="auto", log_to_driver=False)
@@ -162,7 +168,7 @@ def main():
     t0 = time.time()
     for t in tasks:
         name = t["name"]
-        opts = {"num_returns": 2, "num_cpus": t["cpu"],
+        opts = {"num_returns": 2, "num_cpus": t["cpu"], "name": name,
                 "scheduling_strategy": NodeAffinitySchedulingStrategy(node_id[plan[name]], soft=not t["pinned"])}
         if name in copies:
             opts["max_retries"] = 0  # APP-COPIES: a lost object must raise, not be reconstructed
@@ -189,8 +195,7 @@ def main():
         except ray.exceptions.RayError as e:
             errors[name] = f"{type(e).__name__}: {str(e).splitlines()[0][:200]}"
             print(f"FAILED {name} {errors[name]}", flush=True)
-    sink = tasks[-1]["name"]
-    ok = sink in done and not errors.get(sink)
+    ok = len(done) == len(tasks) and not errors
     print("RESULT " + json.dumps({"phase": "Succeeded" if ok else "Failed", "completion": time.time() - t0,
                                   "tasks": done, "errors": errors}), flush=True)
 

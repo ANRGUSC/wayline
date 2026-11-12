@@ -1,0 +1,77 @@
+# BuildKit daemons for E18's multi-arch images (build.sh): arm64 natively on a
+# Pi 4 (so eclipse needs no QEMU/binfmt) and amd64 on eclipse (whose Docker
+# cannot start buildx's docker-container driver: its default runtime, nvidia,
+# has no binary). Caches are emptyDirs: they live as long as the pods. The
+# arm64 one is not on rpi4-1/rpi4-2 (the Repair Lab demo).
+#   k3s kubectl apply -f eval/experiments/E18/deploy/buildkit.yml
+#   k3s kubectl -n default scale deploy/e18-buildkit deploy/e18-buildkit-amd64 --replicas=0   # when done
+# build.sh finds each pod by its label and connects a buildx "remote" builder
+# to tcp://<pod IP>:1234 (eclipse is a k3s node, so pod IPs route from it).
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: e18-buildkitd, namespace: default}
+data:
+  buildkitd.toml: |
+    [registry."10.10.0.1:5000"]
+      http = true
+      insecure = true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: e18-buildkit, namespace: default, labels: {app: e18-buildkit}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: e18-buildkit}}
+  template:
+    metadata: {labels: {app: e18-buildkit}}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: rpi4-3}
+      containers:
+      - name: buildkitd
+        image: docker.io/moby/buildkit:v0.34.2
+        args: ["--addr", "tcp://0.0.0.0:1234", "--config", "/etc/buildkit/buildkitd.toml"]
+        securityContext: {privileged: true}
+        ports: [{containerPort: 1234, name: buildkitd}]
+        readinessProbe:
+          exec: {command: ["buildctl", "--addr", "tcp://127.0.0.1:1234", "debug", "workers"]}
+          periodSeconds: 10
+        volumeMounts:
+        - {name: cfg, mountPath: /etc/buildkit}
+        - {name: cache, mountPath: /var/lib/buildkit}
+      volumes:
+      - name: cfg
+        configMap: {name: e18-buildkitd}
+      - name: cache
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: e18-buildkit-amd64, namespace: default, labels: {app: e18-buildkit-amd64}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: e18-buildkit-amd64}}
+  template:
+    metadata: {labels: {app: e18-buildkit-amd64}}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: eclipse}
+      tolerations:
+      - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+      containers:
+      - name: buildkitd
+        image: docker.io/moby/buildkit:v0.34.2
+        args: ["--addr", "tcp://0.0.0.0:1234", "--config", "/etc/buildkit/buildkitd.toml"]
+        securityContext: {privileged: true}
+        ports: [{containerPort: 1234, name: buildkitd}]
+        readinessProbe:
+          exec: {command: ["buildctl", "--addr", "tcp://127.0.0.1:1234", "debug", "workers"]}
+          periodSeconds: 10
+        volumeMounts:
+        - {name: cfg, mountPath: /etc/buildkit}
+        - {name: cache, mountPath: /var/lib/buildkit}
+      volumes:
+      - name: cfg
+        configMap: {name: e18-buildkitd}
+      - name: cache
+        emptyDir: {}

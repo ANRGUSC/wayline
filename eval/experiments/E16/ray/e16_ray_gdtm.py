@@ -153,7 +153,7 @@ def main():
         pinned = role == "source"
         target = SENSORS[node] if pinned else plan[task]
         names = [f"{task}.{o}" for o in outputs]
-        opts = {"num_returns": 1 + len(names), "num_cpus": float(cpu),
+        opts = {"num_returns": 1 + len(names), "num_cpus": float(cpu), "name": task,
                 "scheduling_strategy": NodeAffinitySchedulingStrategy(node_id[target], soft=not pinned)}
         if any(n in copies for n in names):
             opts["max_retries"] = 0  # APP-COPIES: a lost copied object must raise, not be reconstructed

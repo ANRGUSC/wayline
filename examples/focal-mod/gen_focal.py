@@ -26,10 +26,9 @@ def sizes(batch):
             "fuse-head": batch * 7 * 4 + NPY}
 
 
-def template(name, mode="mixed", batch=64, seed=0, scheduler="heft", seismic_node="anrg-4", audio_node="anrg-9"):
-    size = sizes(batch)
-    # (task, role, mod, inputs [(producer, object)], output, runtime s, cpu)
-    stages = [
+def stages():
+    """(task, role, mod, inputs [(producer, object)], output, runtime s, cpu)"""
+    return [
         ("source-seismic", "source", "seismic", [], "samples", 0.3, "1"),
         ("source-audio", "source", "audio", [], "samples", 0.5, "1"),
         ("fft-seismic", "fft", "seismic", [("source-seismic", "samples")], "spectrum", 0.3, "1"),
@@ -38,6 +37,14 @@ def template(name, mode="mixed", batch=64, seed=0, scheduler="heft", seismic_nod
         ("encoder-audio", "encode", "audio", [("fft-audio", "spectrum")], "features", 2.5, "2"),
         ("fuse-head", "fuse_head", "", [("encoder-seismic", "features"), ("encoder-audio", "features")], "logits", 0.3, "1"),
     ]
+
+
+PINS = {"source-seismic": "anrg-4", "source-audio": "anrg-9"}  # template's default pins
+
+
+def template(name, mode="mixed", batch=64, seed=0, scheduler="heft", seismic_node="anrg-4", audio_node="anrg-9"):
+    size = sizes(batch)
+    stages_ = stages()
     warm = {"mixed": lambda r: r != "encode", "pods": lambda r: False, "warm": lambda r: True}[mode]
     pins = {"source-seismic": seismic_node, "source-audio": audio_node}
     out = [f"""apiVersion: wl.io/v1
@@ -63,7 +70,7 @@ spec:
     runtime: 1
     dataSize: 1MB
   tasks:"""]
-    for task, role, mod, inputs, output, rt, cpu in stages:
+    for task, role, mod, inputs, output, rt, cpu in stages_:
         deps = sorted({p for p, _ in inputs})
         L = [f"  - name: {task}", f"    image: {IMAGE}", "    command: [python, stage.py]",
              f"    dependencies: [{', '.join(deps)}]"]

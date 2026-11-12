@@ -97,13 +97,39 @@ def down():
     kubectl(["delete", "pod", "-l", "app=e16-ray", "--wait=false", "--grace-period=0", "--force"])
 
 
-def run(workload, plan, copies, iot_base, fault_fn=None, trigger=None, delay=0.0):
+def running_on(task):
+    """The host IP a Ray task named `task` is running on ("" if none), from
+    Ray's state API on the head."""
+    code = ("from ray.util.state import list_tasks, list_nodes; import ray; "
+            "ray.init(address='auto', log_to_driver=False); "
+            "ips = {n.node_id: n.node_ip for n in list_nodes()}; "
+            f"ts = list_tasks(filters=[('name', '=', '{task}'), ('state', '=', 'RUNNING')]); "
+            "print(' '.join(ips.get(t.node_id, '') for t in ts))")
+    r = kubectl(["exec", "e16-ray-head", "--", "python", "-c", code], timeout=60)
+    ips = r.stdout.strip().split()
+    return ips[-1] if ips else ""
+
+
+def node_of_ip(ip):
+    out = subprocess.run(["kubectl", "get", "nodes", "-o",
+                          "jsonpath={range .items[*]}{.metadata.name} {.status.addresses[?(@.type=='InternalIP')].address}{\"\\n\"}{end}"],
+                         capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        name, _, addr = line.partition(" ")
+        if addr.strip() == ip:
+            return name
+    return ""
+
+
+def run(workload, plan, copies, iot_base, fault_fn=None, trigger=None, delay=0.0, second=None):
+    """second: (consumer, delay2, crash, first_victim) for a second loss:
+    the node Ray re-runs the consumer on, once it runs there."""
     """One Ray run. fault_fn fires `delay` s after task `trigger` finishes
     (immediately after submission when trigger is None). Returns the
     driver's RESULT plus the fault time. GDTM uses the driver built into its
     image (e16_ray_gdtm.py); iot and chain the generic one."""
-    if workload == "gdtm":
-        driver, args = "/app/e16_ray_gdtm.py", ["--plan", "/tmp/plan.json"]
+    if workload in ("gdtm", "focal"):
+        driver, args = f"/app/e16_ray_{workload}.py", ["--plan", "/tmp/plan.json"]
     else:
         for local, remote in ((os.path.join(HERE, "e16_ray.py"), "/tmp/e16_ray.py"), (iot_base, "/tmp/iot-base.json")):
             kubectl(["cp", local, f"e16-ray-head:{remote}"])
@@ -121,6 +147,20 @@ def run(workload, plan, copies, iot_base, fault_fn=None, trigger=None, delay=0.0
     def fire():
         out["faultAt"] = time.time()
         fault_fn()
+        if second:
+            threading.Thread(target=fire_second, daemon=True).start()
+
+    def fire_second():
+        consumer, delay2, crash, first_victim = second
+        t1 = time.time()
+        while time.time() - t1 < 180 and p.poll() is None:
+            node = node_of_ip(running_on(consumer))
+            if node and node != first_victim:
+                time.sleep(delay2)
+                out["victim2"], out["fault2At"] = node, time.time()
+                crash(node)
+                return
+            time.sleep(0.5)
 
     if fault_fn and trigger is None:
         fired.set()

@@ -73,20 +73,62 @@ def minio_clear(prefix):
     kubectl(["exec", "deploy/e16-minio", "--", "sh", "-c", f"rm -rf /data/e16/{prefix}"])
 
 
+GDTM_SENSORS = {"n1": "anrg-4", "n2": "anrg-5", "n3": "anrg-9"}  # gen_gdtm.template's default pins
+IMAGES = {"glue": f"{REG}/wl-gdtm-argo:latest", "model": f"{REG}/wl-gdtm-model-argo:latest",
+          "focal": f"{REG}/wl-focal-argo:latest"}
+
+
+def _size(s):
+    s = str(s).upper()
+    for k, v in (("GB", 10**9), ("MB", 10**6), ("KB", 10**3)):
+        if s.endswith(k):
+            return int(float(s[:-2]) * v)
+    return int(float(s))
+
+
+def _generic(name, role, runtime, size, cpu, deps, pinned=False):
+    """A task of the generic bodies (task.py): one output, "out"."""
+    return {"name": name, "image": TASK_IMAGE, "command": None,
+            "args": [name, role, str(runtime), str(size)], "cpu": str(cpu), "mem": "512Mi",
+            "inputs": [(d, "out") for d in deps], "outputs": ["out"], "pinned": pinned}
+
+
 def tasks_of(workload, iot_base):
-    if workload == "chain":
-        return [{"name": "p", "role": "hash", "runtime": 12.0, "size": 8_000_000, "cpu": "2", "deps": [], "pinned": False},
-                {"name": "c", "role": "hash", "runtime": 20.0, "size": 0, "cpu": "2", "deps": ["p"], "pinned": False}]
-    out = []
-    for t in json.load(open(iot_base))["tasks"]:
-        size = t.get("dataSize", "1MB").upper()
-        mul = {"GB": 10**9, "MB": 10**6, "KB": 10**3}
-        b = next((int(float(size[:-2]) * v) for k, v in mul.items() if size.endswith(k)), None) or int(size)
-        out.append({"name": t["name"], "role": t["name"].split("-")[0].replace("generate", "report"),
-                    "runtime": float(t.get("runtime", 1)), "size": b,
-                    "cpu": t.get("resources", {}).get("cpu", "1"), "deps": t.get("dependencies", []),
-                    "pinned": bool((t.get("constraints") or {}).get("nodeNames"))})
-    return out
+    """Argo tasks: name, image, command/args, resources, inputs as
+    (producer, object), named outputs, and whether pinned."""
+    if workload in ("chain", "chain-link", "fan"):
+        mb = 8 if workload == "chain" else 30
+        out = [_generic("p", "hash", 12.0, mb * 1_000_000, 2, []), _generic("c", "hash", 20.0, 0, 2, ["p"])]
+        if workload == "fan":
+            out.append(_generic("d", "hash", 1.0, 0, 1, ["p"]))
+        return out
+    if workload == "iot":
+        out = []
+        for t in json.load(open(iot_base))["tasks"]:
+            out.append(_generic(t["name"], t["name"].split("-")[0].replace("generate", "report"),
+                                float(t.get("runtime", 1)), _size(t.get("dataSize", "1MB")),
+                                t.get("resources", {}).get("cpu", "1"), t.get("dependencies", []),
+                                bool((t.get("constraints") or {}).get("nodeNames"))))
+        return out
+    if workload == "gdtm":
+        import gen_gdtm
+        out = []
+        for task, role, mod, node, kind, inputs, outputs, rt, cpu in gen_gdtm.stages(30):
+            out.append({"name": task, "image": IMAGES[kind], "command": ["python", "/app/argo_stage.py"],
+                        "args": ["gdtm", role, mod or "-", node or "-", str(cpu), "0", "30"], "cpu": str(cpu),
+                        "mem": "2Gi" if kind == "model" else "1Gi", "inputs": list(inputs),
+                        "outputs": list(outputs), "pinned": role == "source", "pin": GDTM_SENSORS.get(node)})
+        return out
+    if workload == "focal":
+        import gen_focal
+        out = []
+        for task, role, mod, inputs, output, rt, cpu in gen_focal.stages():
+            out.append({"name": task, "image": IMAGES["focal"], "command": ["python", "/app/argo_stage.py"],
+                        "args": ["focal", role, mod or "-", "64", "0", str(cpu)], "cpu": str(cpu), "mem": "1Gi",
+                        "inputs": list(inputs), "outputs": [output], "pinned": task in gen_focal.PINS,
+                        "pin": gen_focal.PINS.get(task)})
+        return out
+    raise ValueError(workload)
 
 
 def workflow(workload, plan, iot_base):
@@ -95,24 +137,31 @@ def workflow(workload, plan, iot_base):
            for k in ("node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable")]
     templates, dag = [], []
     for t in tasks:
-        term = {"matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": [plan[t["name"]]]}]}
+        node = t.get("pin") if t["pinned"] and t.get("pin") else plan[t["name"]]
+        term = {"matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": [node]}]}
         affinity = ({"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [term]}} if t["pinned"]
                     else {"preferredDuringSchedulingIgnoredDuringExecution": [{"weight": 100, "preference": term}]})
+        generic = t["command"] is None
+        container = {"image": t["image"], "imagePullPolicy": "Always", "args": t["args"],
+                     "env": [{"name": "NODE_NAME", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}}],
+                     "resources": {"requests": {"cpu": t["cpu"], "memory": t["mem"]}}}
+        if not generic:
+            container["command"] = t["command"]
         templates.append({
             "name": t["name"],
-            "inputs": {"artifacts": [{"name": f"in{i}", "path": f"/in/{i:02d}-{d}"} for i, d in enumerate(t["deps"])]},
-            "outputs": {"artifacts": [{"name": "out", "path": "/out/data", "archive": {"none": {}}}]},
-            "container": {"image": TASK_IMAGE, "imagePullPolicy": "Always",
-                          "args": [t["name"], t["role"], str(t["runtime"]), str(t["size"])],
-                          "env": [{"name": "NODE_NAME", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}}],
-                          "resources": {"requests": {"cpu": t["cpu"], "memory": "512Mi"}}},
+            "inputs": {"artifacts": [{"name": f"in{i}", "path": f"/in/{i:02d}-{p}.{o}"}
+                                     for i, (p, o) in enumerate(t["inputs"])]},
+            "outputs": {"artifacts": [{"name": o, "path": "/out/data" if generic else f"/out/{o}",
+                                       "archive": {"none": {}}} for o in t["outputs"]]},
+            "container": container,
             "affinity": {"nodeAffinity": affinity},
             "tolerations": tol,
             "retryStrategy": {"limit": 3, "retryPolicy": "Always", "affinity": {"nodeAntiAffinity": {}}},
         })
-        dag.append({"name": t["name"], "template": t["name"], "dependencies": t["deps"],
-                    "arguments": {"artifacts": [{"name": f"in{i}", "from": f"{{{{tasks.{d}.outputs.artifacts.out}}}}"}
-                                                for i, d in enumerate(t["deps"])]}})
+        deps = sorted({p for p, _ in t["inputs"]})
+        dag.append({"name": t["name"], "template": t["name"], "dependencies": deps,
+                    "arguments": {"artifacts": [{"name": f"in{i}", "from": f"{{{{tasks.{p}.outputs.artifacts.{o}}}}}"}
+                                                for i, (p, o) in enumerate(t["inputs"])]}})
     return {"apiVersion": "argoproj.io/v1alpha1", "kind": "Workflow",
             "metadata": {"generateName": f"e16-{workload}-", "namespace": NS},
             "spec": {"entrypoint": "dag", "serviceAccountName": "argo",
@@ -164,8 +213,20 @@ def clear_out_of_service(node):
                    capture_output=True, text=True)
 
 
+def running_on(st, task):
+    """The node a task's latest attempt is running on, or ""."""
+    best = None
+    for n in (st.get("nodes") or {}).values():
+        if n.get("type") == "Pod" and n.get("displayName", "").split("(")[0] == task and n.get("phase") == "Running":
+            if best is None or (n.get("startedAt") or "") > (best.get("startedAt") or ""):
+                best = n
+    return (best or {}).get("hostNodeName", "")
+
+
 def run(workload, plan, iot_base, fault_fn=None, trigger=None, delay=0.0, timeout=900,
-        out_of_service=None):
+        out_of_service=None, second=None):
+    """second: (consumer, delay2, crash, first_victim) for a second loss:
+    the node the consumer's retry runs on, once it runs there."""
     wf = workflow(workload, plan, iot_base)
     r = kubectl(["create", "-f", "-", "-o", "jsonpath={.metadata.name}"], stdin=json.dumps(wf))
     assert r.returncode == 0, r.stderr
@@ -186,6 +247,15 @@ def run(workload, plan, iot_base, fault_fn=None, trigger=None, delay=0.0, timeou
             fault_fn()
             if out_of_service:
                 marked = mark_out_of_service(out_of_service, stop)
+        if second and fired and "fault2At" not in out and out.get("faultAt"):
+            consumer, delay2, crash, first_victim = second
+            node = running_on(st, consumer)
+            if node and node != first_victim:
+                time.sleep(delay2)
+                out["victim2"], out["fault2At"] = node, time.time()
+                crash(node)
+                if out_of_service:
+                    mark_out_of_service(node, stop)
         if st.get("phase") in ("Succeeded", "Failed", "Error"):
             break
         time.sleep(0.5)

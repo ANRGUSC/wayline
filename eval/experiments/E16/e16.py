@@ -156,6 +156,25 @@ def cells(only, arms=None):
     if "focal" in only:
         out += [("cost", "focal", a, None) for a in (arms or ["W", "W-plan-only", "W-static"])]
         out += [("survival", "focal", a, ("crash",) + SENSOR_MID["focal"]) for a in ["W", "W-plan-only"]]
+    if "fill-iot-cost" in only:
+        out += [("cost", "iot-warm", "W-static", None)]
+    if "fill-wl" in only:
+        # The Wayline gaps of the headline matrix: static and frozen on the
+        # warm rows and FOCAL, static under a second loss. (Frozen without a
+        # fault is W; replan without a degraded link is plan-only.)
+        out += [("cost", "gdtm-warm", "W-static", None)]
+        out += [("survival", w, a, ("crash",) + SENSOR_MID[w]) for w in ("gdtm-warm", "iot-warm", "focal")
+                for a in ("W-static", "W-frozen")]
+        out += [("recovery", "chain-warm", a, ("crash",) + CHAIN) for a in ("W-static", "W-frozen")]
+        out += [("revision", "chain-warm", "W-static", ("crash2", "anrg-7", "p", 3.0, "c", 3.0))]
+        # FOCAL on warm runners, the dispatch Ray uses (the mixed rows run its
+        # encoders as pods).
+        out += [("cost", "focal-warm", a, None) for a in ("W", "W-plan-only", "W-static")]
+        out += [("survival", "focal-warm", a, ("crash",) + SENSOR_MID["focal-warm"])
+                for a in ("W", "W-plan-only", "W-static", "W-frozen")]
+        # Static under a degraded link: its copies add traffic on the slow links.
+        out += [("adaptation", "chain-link", "W-static", ("link", "anrg-7", 4.0)),
+                ("adaptation-copy", "fan", "W-static", ("link-pair", "anrg-7", "anrg-6", 4.0))]
     if "revision" in only:
         # Live revision: a second loss after the first repair. W re-protects
         # the repaired placement; W-frozen keeps its plan-time copies.
@@ -174,8 +193,8 @@ def cells(only, arms=None):
     return out
 
 
-def focal(name, arm):
-    return with_policy(gen_focal.template(name, "mixed", 64, 0, "heft"), arm)
+def focal(name, arm, mode="mixed"):
+    return with_policy(gen_focal.template(name, mode, 64, 0, "heft"), arm)
 
 
 def chain_param(name, arm, runtime, mb):
@@ -200,6 +219,8 @@ SENSOR_MID["iot-warm"] = SENSOR_MID["iot"]
 GEN["gdtm-warm"] = lambda n, a: gdtm(n, a, mode="warm")  # every stage on the gdtm / gdtm-model runners
 SENSOR_MID["gdtm-warm"] = SENSOR_MID["gdtm"]
 SENSOR_MID["focal"] = ("anrg-9", "fft-audio", 0.3)  # gen_focal pins source-audio to anrg-9
+SENSOR_MID["focal-warm"] = SENSOR_MID["focal"]
+GEN["focal-warm"] = lambda n, a: focal(n, a, mode="warm")  # every stage on the focal runner
 for _r, _mb in SWEEP:
     GEN[f"chain-r{_r}-s{_mb}"] = (lambda r, mb: lambda n, a: chain_param(n, a, r, mb))(_r, _mb)
 
@@ -230,6 +251,33 @@ ARGO_ARMS = ["Argo", "Argo+oos"]  # oos: the crashed node is tainted out-of-serv
 
 
 GDTM_RAY_IMAGE = "192.168.1.163:5000/wl-gdtm-ray:latest"
+FOCAL_RAY_IMAGE = "192.168.1.163:5000/wl-focal-ray:latest"
+
+
+GAP_CRASH2 = ("crash2", "anrg-7", "p", 3.0, "c", 3.0)
+
+
+def ray_gap_cells(image):
+    """The Ray gaps of the headline matrix. With the plain image: the second
+    loss and the degraded links (W made no copies there, so Ray + copies would
+    equal Ray); with FOCAL's image: FOCAL."""
+    if image == "focal":
+        return ([("cost", "focal", a, None) for a in RAY_ARMS] +
+                [("survival", "focal", a, ("crash",) + SENSOR_MID["focal"]) for a in RAY_ARMS])
+    return ([("revision", "chain", a, GAP_CRASH2) for a in RAY_ARMS] +
+            [("adaptation", "chain-link", "Ray", ("link", "anrg-7", 4.0)),
+             ("adaptation-copy", "fan", "Ray", ("link-pair", "anrg-7", "anrg-6", 4.0))])
+
+
+def argo_gap_cells():
+    """The Argo gaps: second loss, degraded links, GDTM and FOCAL. Plain
+    Argo is expected to hang on a crash (its run is cut at 300 s)."""
+    out = [("revision", "chain", a, GAP_CRASH2) for a in ARGO_ARMS]
+    out += [("adaptation", "chain-link", "Argo", ("link", "anrg-7", 4.0)),
+            ("adaptation-copy", "fan", "Argo", ("link-pair", "anrg-7", "anrg-6", 4.0))]
+    for w in ("gdtm", "focal"):
+        out += [("cost", w, "Argo", None)] + [("survival", w, a, ("crash",) + SENSOR_MID[w]) for a in ARGO_ARMS]
+    return out
 
 
 def ray_cells(only, arms=RAY_ARMS, gdtm=False):
@@ -254,18 +302,32 @@ def run_argo_cell(claim, workload, arm, flt, tag):
     plan = ray_plan(workload)
     rec = {"claim": claim, "workload": workload, "arm": arm, "fault": flt, "tag": tag, "plan": plan}
     print(f"[e16] {claim} {workload} {arm}: Argo + S3 repository", flush=True)
-    fn = trigger = None
+    fn = trigger = second = None
     delay = 0.0
-    if flt and flt[0] == "crash":
-        _, victim, trigger, delay = flt
+    crashed = flt and flt[0] in ("crash", "crash2")
+    if crashed:
+        victim, trigger, delay = flt[1:4]
         fn = lambda: fault.crash(victim)
+        if flt[0] == "crash2":
+            second = (flt[4], flt[5], fault.crash, victim)
+    elif flt and flt[0] == "link":
+        fn = lambda: fault.link(flt[1], flt[2], repo="anrg-2")
+    elif flt and flt[0] == "link-pair":
+        fn = lambda: fault.link_pair(flt[1], flt[2], flt[3])
+    res = {}
     try:
         res = argorun.run(workload, plan, os.path.join(HERE, "iot-base.json"), fn, trigger, delay,
-                          out_of_service=(flt[1] if arm == "Argo+oos" and flt and flt[0] == "crash" else None))
+                          timeout=300 if (crashed and arm == "Argo") else 900,
+                          out_of_service=(flt[1] if arm == "Argo+oos" and crashed else None), second=second)
     finally:
-        if flt and flt[0] == "crash":
+        if crashed:
             argorun.clear_out_of_service(flt[1])
             fault.restore(flt[1])
+            if res.get("victim2"):
+                argorun.clear_out_of_service(res["victim2"])
+                fault.restore(res["victim2"])
+        elif flt and flt[0] in ("link", "link-pair"):
+            fault.unlink(flt[1])
     rec.update(res)
     rec["status"] = {"phase": res.get("phase") or "Failed", "message": res.get("message", "")}
     print(f"[e16]   {rec['status']['phase']} wall {res['wall']:.1f}s retries {res.get('retries')}", flush=True)
@@ -278,8 +340,8 @@ def wayline_result(workload, arm):
     import glob
     import re
     exact = re.compile(rf"-{re.escape(workload)}-{re.escape(arm)}(-r\d+)?\.json$")
-    paths = [p for tag in ("round2", "headline") for p in sorted(glob.glob(os.path.join(RES, tag, "*.json")))
-             if exact.search(p)]
+    paths = [p for tag in ("round2", "headline", "round3", "warm1", "focal-sweep", "gaps")
+             for p in sorted(glob.glob(os.path.join(RES, tag, "*.json"))) if exact.search(p)]
     if not paths:
         raise RuntimeError(f"no Wayline {arm} result for {workload}")
     return json.load(open(paths[0]))
@@ -299,12 +361,10 @@ def ray_copies(workload):
     for o in st.get("objects") or []:
         if o.get("origin") != "plan":
             continue
-        nodes = out.setdefault(o["object"] if workload == "gdtm" else o["object"].split(".")[0], [])
+        nodes = out.setdefault(o["object"] if workload in ("gdtm", "focal") else o["object"].split(".")[0], [])
         for c in o.get("copies", []):
             if c["node"] not in nodes:
                 nodes.append(c["node"])
-    if not out:
-        raise RuntimeError(f"no plan copies recorded for {workload}")
     return out
 
 
@@ -314,16 +374,27 @@ def run_ray_cell(claim, workload, arm, flt, tag):
     rec = {"claim": claim, "workload": workload, "arm": arm, "fault": flt, "tag": tag,
            "plan": plan, "copies": copies}
     print(f"[e16] {claim} {workload} {arm}: Ray, copies {copies}", flush=True)
-    fn = trigger = None
+    fn = trigger = second = None
     delay = 0.0
-    if flt and flt[0] == "crash":
-        _, victim, trigger, delay = flt
+    if flt and flt[0] in ("crash", "crash2"):
+        victim, trigger, delay = flt[1:4]
         fn = lambda: fault.crash(victim)
+        if flt[0] == "crash2":
+            second = (flt[4], flt[5], fault.crash, victim)
+    elif flt and flt[0] == "link":
+        fn = lambda: fault.link(flt[1], flt[2])
+    elif flt and flt[0] == "link-pair":
+        fn = lambda: fault.link_pair(flt[1], flt[2], flt[3])
+    res = {}
     try:
-        res = rayrun.run(workload, plan, copies, os.path.join(HERE, "iot-base.json"), fn, trigger, delay)
+        res = rayrun.run(workload, plan, copies, os.path.join(HERE, "iot-base.json"), fn, trigger, delay, second)
     finally:
-        if flt and flt[0] == "crash":
+        if flt and flt[0] in ("crash", "crash2"):
             fault.restore(flt[1])
+            if res.get("victim2"):
+                fault.restore(res["victim2"])
+        elif flt and flt[0] in ("link", "link-pair"):
+            fault.unlink(flt[1])
     rec.update(res)
     ok = res.get("phase") == "Succeeded"
     rec["wall"] = res.get("completion") if ok else res.get("wall")
@@ -466,6 +537,8 @@ def main():
     ap.add_argument("--argo", action="store_true", help="run the Argo + MinIO arm instead of the Wayline ones")
     ap.add_argument("--warm", action="store_true", help="iot and chain on Wayline's warm runners")
     ap.add_argument("--gdtm", action="store_true", help="with --ray: GDTM on its Ray image (head on anrg-8)")
+    ap.add_argument("--gaps", action="store_true", help="with --ray or --argo: the headline matrix's gap cells")
+    ap.add_argument("--focal", action="store_true", help="with --ray --gaps: FOCAL on its Ray image (head on anrg-8)")
     a = ap.parse_args()
     out = os.path.join(RES, a.tag)
     os.makedirs(out, exist_ok=True)
@@ -483,7 +556,11 @@ def main():
             argorun.minio_up()
         if a.ray and a.gdtm:
             rayrun.configure(GDTM_RAY_IMAGE, head_node="anrg-8")
-        pick = (ray_cells(a.only.split(","), gdtm=a.gdtm) if a.ray else ray_cells(a.only.split(","), arms or ["Argo"]) if a.argo
+        if a.ray and a.focal:
+            rayrun.configure(FOCAL_RAY_IMAGE, head_node="anrg-8")
+        pick = (ray_gap_cells("focal" if a.focal else "plain") if (a.ray and a.gaps) else
+                argo_gap_cells() if (a.argo and a.gaps) else
+                ray_cells(a.only.split(","), gdtm=a.gdtm) if a.ray else ray_cells(a.only.split(","), arms or ["Argo"]) if a.argo
                 else warm_cells(a.only.split(","), arms, gdtm_only=a.gdtm) if a.warm else cells(a.only.split(","), arms))
         todo = [(r, c) for r in range(1, a.reps + 1) for c in pick]
         for rep, (claim, workload, arm, flt) in todo:
