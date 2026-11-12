@@ -2,30 +2,29 @@ package main
 
 // Node-loss recovery: re-planning compute together with its data.
 //
-// When a node is lost (nodehealth.go), every task of an active run that has
-// not finished and was placed there moves to the surviving node where it
-// would finish earliest, under the run's plan model (planmodel.go). The
-// search counts where each input already has a copy: an input on a node
-// arrives there now, one elsewhere after its transfer, one whose producer
-// must run again after that run. A copy the plan-aware policy placed on the
-// fallback node therefore draws the task there and lets it start at once.
+// This is the repair policy's decision, a pure function of a run's state
+// (planRecovery). The policy process (policy.go) gathers that state from what
+// the controller publishes and writes the decision to the run's spec; the
+// controller enacts it (placement.go). Nothing here runs in the controller.
+//
+// When a node is lost, every task of an active run that has not finished and
+// was placed there moves to the surviving node where it would finish
+// earliest, under the run's plan model (planmodel.go). The search counts
+// where each input already has a copy: an input on a node arrives there now,
+// one elsewhere after its transfer, one whose producer must run again after
+// that run. A copy the plan-aware policy placed on the fallback node
+// therefore draws the task there and lets it start at once.
 //
 // Data follows the new placement. Each input of a task that will run is
-// delivered from a surviving copy, by a realization entry with origin
-// "recovery" that the ordinary reconciler converges. Only when no copy of
-// an input survives anywhere does its producer run again (lineage), which
-// may in turn need its own inputs, recursively.
-//
-// Tasks on nodes that survive stay where they are. The decision (which
-// tasks move where, which run again, which copies are made) is a pure
-// function of the run's state, planRecovery; recoverRun gathers that state
-// and applies the decision. Every repair is appended to status.recovery.
+// delivered from a surviving copy (a realization entry with origin
+// "recovery"). Only when no copy of an input survives anywhere does its
+// producer run again (lineage), which may in turn need its own inputs,
+// recursively. Tasks on nodes that survive stay where they are, unless a
+// degraded link makes another node finish clearly earlier (link
+// re-planning, the same function with movable tasks).
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"log"
 	"math"
 	"sort"
 	"sync"
@@ -33,9 +32,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -293,9 +290,11 @@ type recoveryRecord struct {
 
 // runRecovery serializes recovery per run and remembers what it has done.
 type runRecovery struct {
-	mu      sync.Mutex
-	history []recoveryRecord
-	handled map[string]string // task -> incarnation already cleaned up
+	mu       sync.Mutex
+	history  []recoveryRecord
+	handled  map[string]string // task -> incarnation already cleaned up
+	rerunGen map[string]int64  // task -> spec.rerun generation already enacted
+	rejected map[string]string // placement entries rejected, last reported
 }
 
 var runRecoveries sync.Map // run key -> *runRecovery
@@ -305,231 +304,6 @@ var podDeleteFn = func(client *kubernetes.Clientset, namespace, name string) err
 	zero := int64(0)
 	return client.CoreV1().Pods(namespace).Delete(context.Background(), name,
 		metav1.DeleteOptions{GracePeriodSeconds: &zero})
-}
-
-// recoverRun repairs one run against the currently lost nodes. Idempotent:
-// a run with nothing on a lost node, or already repaired, is left alone.
-func recoverRun(dynClient dynamic.Interface, client *kubernetes.Clientset, namespace, name string) {
-	repairRun(dynClient, client, namespace, name, false)
-}
-
-// repairRun re-plans a run's unfinished work against lost nodes and, when
-// linkTriggered, against degraded links: consumers waiting on a slow link
-// may move, or take their input from a faster copy.
-func repairRun(dynClient dynamic.Interface, client *kubernetes.Clientset, namespace, name string,
-	linkTriggered bool) {
-
-	key := namespace + "/" + name
-	v, _ := runRecoveries.LoadOrStore(key, &runRecovery{handled: map[string]string{}})
-	rr := v.(*runRecovery)
-	rr.mu.Lock()
-	defer rr.mu.Unlock()
-
-	lost := lostNodeSet()
-	if len(lost) == 0 && !linkTriggered {
-		return
-	}
-	obj, err := dynClient.Resource(odagGVR).Namespace(namespace).Get(context.Background(), name, metav1.GetOptions{})
-	if err != nil {
-		return
-	}
-	if ph, _, _ := unstructured.NestedString(obj.Object, "status", "phase"); ph != "Running" && ph != "Pending" && ph != "Scheduling" {
-		return
-	}
-	raw, ok := assignmentCache.Load(key)
-	if !ok {
-		return
-	}
-	assignMap := raw.(map[string]nodeInfo)
-	// A run with no task placed on a lost node is unaffected: its inputs
-	// come from its producers' nodes, and every producer survived.
-	affected := linkTriggered
-	for _, ni := range assignMap {
-		if lost[ni.name] {
-			affected = true
-			break
-		}
-	}
-	if !affected {
-		return
-	}
-	tasks := extractTasks(obj)
-	pol := parseRealizationPolicy(obj)
-	planned := modelFor(key, client, tasks, assignMap, pol)
-	// Price transfers with what links deliver now, not what they did at
-	// planning time (a copy: the planned model is shared).
-	live := *planned
-	live.bw = liveBandwidth(planned.bw)
-	m := &live
-	uid := obj.GetUID()
-	nowT := time.Now()
-
-	// State: which tasks finished, which run on surviving nodes, where each
-	// object still has a valid copy.
-	pods := runPods(namespace, name, uid, tasks)
-	podOf := map[string]corev1.Pod{}
-	for _, p := range pods {
-		podOf[p.Labels[labelTaskName]] = p
-	}
-	succs := successorCounts(tasks)
-	in := recoveryInput{m: m, lost: lost, assign: map[string]string{}, done: map[string]bool{},
-		running: map[string]bool{}, onLost: map[string]bool{}, now: time.Since(m.deployed).Seconds(),
-		startup: func(t string) float64 { return defaultRealizationPolicy().startup(m.byName[t]) }}
-	if pol := parseRealizationPolicy(obj); pol.Mode != "" {
-		in.startup = func(t string) float64 { return pol.startup(m.byName[t]) }
-	}
-	for t, ni := range assignMap {
-		in.assign[t] = ni.name
-	}
-	for _, t := range tasks {
-		ni := assignMap[t.Name]
-		switch {
-		case isDataVertex(t, succs[t.Name]):
-			vn := vertexNode(namespace, name, t, assignMap)
-			in.done[t.Name] = !lost[vn.name] && dataVertexExecuted(vn, namespace, name, t.Name)
-		case cacheHitIs(namespace, name, t.Name):
-			in.done[t.Name] = true
-		default:
-			p, has := podOf[t.Name]
-			if !has {
-				continue
-			}
-			node := p.Spec.NodeName
-			if node == "" {
-				node = ni.name
-			}
-			switch {
-			case p.Status.Phase == corev1.PodSucceeded:
-				in.done[t.Name] = true
-			case lost[node]:
-				in.onLost[t.Name] = true
-			case p.Status.Phase == corev1.PodPending || p.Status.Phase == corev1.PodRunning:
-				in.running[t.Name] = true
-			}
-		}
-	}
-	in.holders = objectHolders(name, m, lost)
-	if linkTriggered {
-		// Consumers not yet dispatched whose input would cross a degraded
-		// link may move; inputs on such links may come from other copies.
-		in.slow = func(src, dst string) bool { return linkDegraded(src, dst, nowT) }
-		in.movable = map[string]bool{}
-		for _, t := range m.order {
-			if in.done[t] || in.running[t] || in.onLost[t] || lost[in.assign[t]] {
-				continue
-			}
-			if _, has := podOf[t]; has {
-				continue
-			}
-			for _, o := range m.inputObjects(t) {
-				if pn := in.assign[producerOf(o)]; !contains(in.holders[o], in.assign[t]) && in.slow(pn, in.assign[t]) {
-					in.movable[t] = true
-				}
-			}
-		}
-	}
-
-	plan := planRecovery(in)
-	// Restart only what has not been cleaned up for this incarnation yet.
-	var restart []string
-	for _, t := range append(append([]string{}, plan.Restart...), plan.Rerun...) {
-		inc := incarnation(namespace, name, uid, t, podOf)
-		if inc != "" && rr.handled[t] == inc {
-			continue
-		}
-		restart = append(restart, t)
-	}
-	newCopies := filterNewCopies(parseRealization(obj), plan.Copies)
-	if len(plan.Moves) == 0 && len(restart) == 0 && len(newCopies) == 0 && len(plan.Stuck)+len(plan.Blocked) == 0 {
-		return
-	}
-
-	// 1. New placement first, so no dispatch pass sends a task to a lost node.
-	next := make(map[string]nodeInfo, len(assignMap))
-	for t, ni := range assignMap {
-		next[t] = ni
-	}
-	for _, mv := range plan.Moves {
-		runnerFailures.Delete(dispatchKey(namespace, name, uid, mv.Task))
-		ip, _ := nodeIPCache.Load(mv.To)
-		ni := m.nodes[mv.To]
-		ni.name = mv.To
-		if s, ok := ip.(string); ok {
-			ni.ip = s
-		}
-		next[mv.Task] = ni
-	}
-	assignmentCache.Store(key, next)
-	storeRecoveredModel(key, planned, next)
-	dropFromOrder(key, plan.Moves, lost)
-
-	// 2. Clean up tasks that run again: their pods or warm calls, dispatch
-	// claims and CPU reservations.
-	for _, t := range restart {
-		if p, ok := podOf[t]; ok && p.Labels[labelRunner] == "" {
-			if err := podDeleteFn(client, namespace, p.Name); err != nil {
-				log.Printf("[recover] %s: delete pod %s: %v", key, p.Name, err)
-			}
-			podCache.Delete(namespace + "/" + p.Name)
-		}
-		rr.handled[t] = incarnation(namespace, name, uid, t, podOf)
-		warmInvocations.Delete(warmKey(namespace, name, uid, t))
-		releaseDispatch(dispatchKey(namespace, name, uid, t))
-		runnerFailures.Delete(dispatchKey(namespace, name, uid, t)) // a new node, a new chance at its runner
-		releaseCPU(namespace + "/" + name + "/" + t)
-		if ni := next[t]; ni.ip != "" {
-			resetTaskState(ni.ip, name, t)
-		}
-	}
-
-	// 3. Inputs from surviving copies.
-	if len(newCopies) > 0 {
-		var entries []realizationEntry
-		byObj := map[string][]string{}
-		for _, c := range newCopies {
-			byObj[c.Object] = append(byObj[c.Object], c.To)
-		}
-		for _, o := range sortedStringKeys(byObj) {
-			entries = append(entries, realizationEntry{Object: o, Copies: byObj[o], Origin: originRecovery})
-		}
-		patchRealization(dynClient, namespace, name, mergeRealization(parseRealization(obj), entries, originRecovery))
-	}
-
-	// 4. Record, and fail the run only if some task has nowhere to go.
-	reason := "node loss"
-	if linkTriggered {
-		reason = "degraded link"
-		if len(lost) > 0 {
-			reason = "node loss and degraded link"
-		}
-	}
-	rec := recoveryRecord{At: time.Now().UTC().Format(time.RFC3339Nano), AtS: round3(in.now),
-		Reason: reason, Lost: sortedKeys(lost), Plan: plan}
-	rec.Plan.Restart, rec.Plan.Copies = restartSubset(plan.Restart, restart), newCopies
-	rec.Plan.Rerun = restartSubset(plan.Rerun, restart)
-	rr.history = append(rr.history, rec)
-	st, _ := json.Marshal(map[string]any{"status": map[string]any{"recovery": rr.history}})
-	_, _ = dynClient.Resource(odagGVR).Namespace(namespace).Patch(context.Background(), name,
-		types.MergePatchType, st, metav1.PatchOptions{}, "status")
-	log.Printf("[recover] %s: %s, lost %v -> moved %d, restarted %d, rerun %d, copies %d, stuck %d, blocked %d",
-		key, reason, rec.Lost, len(plan.Moves), len(rec.Plan.Restart), len(rec.Plan.Rerun), len(newCopies),
-		len(plan.Stuck), len(plan.Blocked))
-	for _, mv := range plan.Moves {
-		log.Printf("[recover] %s:   %s %s -> %s (est. finish %.1fs)", key, mv.Task, mv.From, mv.To, mv.EFT)
-	}
-	if len(plan.Stuck)+len(plan.Blocked) > 0 {
-		updateODAGPhase(dynClient, namespace, name, "Failed",
-			fmt.Sprintf("node loss: no surviving node may run %v (%d task(s) wait on it)",
-				plan.Stuck, len(plan.Blocked)))
-		return
-	}
-	// The repair changed the plan: re-protect it. Objects that now sit
-	// alone on one node (a task moved next to its producer, a copy lost
-	// with its node) get the copies the policy would give them.
-	if len(plan.Moves) > 0 && pol.Mode == policyPlanAware && pol.Revise {
-		reprotect(dynClient, namespace, name, tasks, planned, next, in, lost)
-	}
-	go processReadyTasks(dynClient, client, namespace, name, obj)
 }
 
 // incarnation identifies the execution of a task that recovery would clean
@@ -545,20 +319,6 @@ func incarnation(namespace, name string, uid types.UID, task string, podOf map[s
 		return string(p.UID)
 	}
 	return ""
-}
-
-func restartSubset(all, did []string) []string {
-	set := map[string]bool{}
-	for _, t := range did {
-		set[t] = true
-	}
-	var out []string
-	for _, t := range all {
-		if set[t] {
-			out = append(out, t)
-		}
-	}
-	return out
 }
 
 // filterNewCopies drops copies an entry already asks for.
@@ -592,49 +352,6 @@ func cacheHitIs(namespace, name, task string) bool {
 	return ok
 }
 
-// objectHolders finds, for every object of the run, the surviving nodes
-// holding a valid copy.
-func objectHolders(odagName string, m *planModel, lost map[string]bool) map[string][]string {
-	type q struct{ obj, node, ip string }
-	var qs []q
-	for _, o := range m.objects() {
-		for n := range m.nodes {
-			if lost[n] {
-				continue
-			}
-			ip := m.nodes[n].ip
-			if v, ok := nodeIPCache.Load(n); ok {
-				ip = v.(string)
-			}
-			if ip != "" {
-				qs = append(qs, q{o, n, ip})
-			}
-		}
-	}
-	out := map[string][]string{}
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, statusQueryConcurrency)
-	for _, x := range qs {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(x q) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			if isDataReady(x.ip, odagName, x.obj) {
-				mu.Lock()
-				out[x.obj] = append(out[x.obj], x.node)
-				mu.Unlock()
-			}
-		}(x)
-	}
-	wg.Wait()
-	for o := range out {
-		sort.Strings(out[o])
-	}
-	return out
-}
-
 // modelFor returns the run's plan model, or, for a run this controller did
 // not place (it restarted since), a model built from the spec's runtimes and
 // the cluster's configured bandwidths.
@@ -653,28 +370,6 @@ func modelFor(key string, client *kubernetes.Clientset, tasks []taskSpec, assign
 	m.policy = pol
 	planModels.Store(key, m)
 	return m
-}
-
-// reprotect re-applies the plan-aware policy to a repaired run: a model of
-// the new placement (predicted afresh with the planned cost model, minus
-// lost nodes), the surviving copies as known holders, and only the
-// consumers that have not started.
-func reprotect(dynClient dynamic.Interface, namespace, name string, tasks []taskSpec,
-	planned *planModel, next map[string]nodeInfo, in recoveryInput, lost map[string]bool) {
-
-	m := repairedModel(tasks, planned, next, lost)
-	skip := map[string]bool{}
-	for t := range in.done {
-		skip[t] = in.done[t]
-	}
-	for t := range in.running {
-		skip[t] = skip[t] || in.running[t]
-	}
-	obj, err := dynClient.Resource(odagGVR).Namespace(namespace).Get(context.Background(), name, metav1.GetOptions{})
-	if err != nil {
-		return
-	}
-	applyPlanPolicy(dynClient, obj, m, policyContext{holders: in.holders, skip: skip})
 }
 
 // repairedModel is the plan model of a repaired placement: predicted afresh

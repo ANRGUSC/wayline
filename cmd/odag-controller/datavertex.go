@@ -119,7 +119,7 @@ func executeDataVertex(namespace, odagName string, task taskSpec,
 		ckey := runKey + "/" + task.Name
 		gen, _ := lastSpecGen.Load(runKey)
 		if prev, ok := vertexCancelGen.Load(ckey); (!ok || prev != gen) &&
-			assigned.ip != "" {
+			assigned.ip != "" && !ablated(runKey, "no-cancel") {
 			// The serving point moved: revoke the old node's outbound
 			// transfers of this object so the revised realization does
 			// not compete with the flows it replaces. Once per

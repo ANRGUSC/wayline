@@ -363,6 +363,7 @@ func (w *realizeWorker) loop(key string) {
 
 // pass runs one reconcile pass with the latest run object.
 func (w *realizeWorker) pass(key string, dyn dynamic.Interface, obj *unstructured.Unstructured) bool {
+	noteAblations(obj)
 	entries := parseRealization(obj)
 	realizationCache.Store(key, entries)
 	if len(entries) == 0 {
@@ -549,14 +550,19 @@ func reconcileOnce(key, odagName string, entries []realizationEntry,
 			}
 			if posted[e.Object+"/"+n] {
 				// Re-enqueue only when the prior attempt is dead: a
-				// Pending or Transferring entry must never be reset (a
-				// re-POST restarts the copy from byte zero), but a
+				// Pending or Transferring entry is left alone (the agent
+				// joins a re-POST to the push in flight; posting again only
+				// churns its queue entry), but a
 				// Failed one must be retried — under intermittent
 				// connectivity (temporal relaying) the transfer that
 				// failed during a blackout succeeds when the next
 				// contact window opens.
 				if copyInFlight(nodeMap, nodes, odagName, e.Object, n) {
-					continue
+					// Ablation "repost": a repeated or newer request (a new
+					// generation) posts the copy again, which restarts it.
+					if !ablated(key, "repost") || specGen(key) <= postedGen(key, e.Object, n) {
+						continue
+					}
 				}
 				// The earlier readiness check may predate a transfer that
 				// completed since: ask again before sending a second copy.
@@ -569,6 +575,7 @@ func reconcileOnce(key, odagName string, entries []realizationEntry,
 				log.Printf("[realize] %s: %s: copy %s->%s: %v", key, e.Object, source, n, err)
 			} else {
 				posted[e.Object+"/"+n] = true
+				copyPostedGen.Store(key+"/"+e.Object+"/"+n, specGen(key))
 				log.Printf("[realize] %s: %s: copy enqueued %s->%s (origin %q)",
 					key, e.Object, source, n, e.Origin)
 			}
@@ -594,6 +601,14 @@ func reconcileOnce(key, odagName string, entries []realizationEntry,
 
 		for _, n := range e.Evict {
 			if !ready(n) {
+				// A copy still on its way to an evicted node (requested by an
+				// older generation) would land after the eviction: wait for it
+				// and evict it then. Not cancelled, because an agent's cancel
+				// of a consumer is sticky and would also stop a later copy that
+				// a newer generation wants there again.
+				if copyInFlight(nodeMap, nodes, odagName, e.Object, n) {
+					converged = false
+				}
 				continue // already gone (or agentless): idempotent
 			}
 			// Never remove the last installed copy while any consumer of
@@ -665,8 +680,8 @@ func writeObjectStatus(dynClient dynamic.Interface, namespace, odagName string,
 			} else if ni, ok := nodeMap[n]; ok && ni.ip != "" {
 				if isDataReady(ni.ip, odagName, e.Object) {
 					state = "Installed"
-				} else if evicted[n] {
-					state = "Evicted"
+				} else if evicted[n] && !copyInFlight(nodeMap, mapKeys(nodeMap), odagName, e.Object, n) {
+					state = "Evicted" // not while an older request's copy is still arriving
 				}
 			}
 			copies = append(copies, map[string]interface{}{"node": n, "state": state})
@@ -700,4 +715,13 @@ func forgetRealization(key string) {
 	realizationCache.Delete(key)
 	lastSpecGen.Delete(key)
 	planModels.Delete(key)
+}
+
+// mapKeys lists a node map's names.
+func mapKeys(m map[string]nodeInfo) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }

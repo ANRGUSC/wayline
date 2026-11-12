@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"sort"
 	"strconv"
@@ -87,6 +88,8 @@ func main() {
 	var dbPath string
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (leave empty for in-cluster)")
 	flag.StringVar(&dbPath, "db", envOrDefault("WL_PROFILER_DB", "/data/wl-profiler.db"), "profiler SQLite database path")
+	mode := flag.String("mode", envOrDefault("WL_MODE", "controller"),
+		"controller, or policy: run the reference policies (copies, repair, link re-planning) as a separate process")
 	flag.Parse()
 
 	cfg, err := buildConfig(kubeconfig)
@@ -101,6 +104,14 @@ func main() {
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		log.Fatalf("[odag-ctrl] failed to create dynamic client: %v", err)
+	}
+
+	if os.Getenv("WL_PPROF") != "" {
+		go func() { log.Println(http.ListenAndServe(os.Getenv("WL_PPROF"), nil)) }()
+	}
+	if *mode == "policy" {
+		runPolicyProcess(dynClient, client)
+		return
 	}
 
 	// Initialize profiler database.
@@ -126,7 +137,21 @@ func main() {
 	go pollRunningODAGs(dynClient, client)
 	go sweepOrphanData(dynClient, client)
 	go watchNodeHealth(dynClient, client)
+	go publishObservations(client)
 	watchPods(client, dynClient)
+}
+
+// runNodes reads spec.nodes, the nodes a run may use (nil: all).
+func runNodes(obj *unstructured.Unstructured) map[string]bool {
+	raw, found, _ := unstructured.NestedStringSlice(obj.Object, "spec", "nodes")
+	if !found || len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(raw))
+	for _, n := range raw {
+		out[n] = true
+	}
+	return out
 }
 
 // rebuildAssignmentCache reconstructs a run's task->node assignment map from
@@ -164,12 +189,18 @@ func rebuildAssignmentCache(obj *unstructured.Unstructured, client *kubernetes.C
 			placed[name] = node
 		}
 	}
-	// Fall back to single-node constraints for undispatched tasks.
+	// Undispatched tasks: the policy's placement (spec.placement) if it names
+	// one, else a single-node constraint. Without the first, a restarted
+	// controller never dispatched the not-yet-started tasks of a run placed by
+	// an outside policy (reconcilePlacement runs only on spec changes).
+	want := parsePlacement(obj)
 	for _, t := range extractTasks(obj) {
 		if _, ok := placed[t.Name]; ok {
 			continue
 		}
-		if len(t.Constraints) == 1 {
+		if n, ok := want[t.Name]; ok && n != "" {
+			placed[t.Name] = n
+		} else if len(t.Constraints) == 1 {
 			placed[t.Name] = t.Constraints[0]
 		}
 	}
@@ -188,6 +219,22 @@ func rebuildAssignmentCache(obj *unstructured.Unstructured, client *kubernetes.C
 	}
 }
 
+// copiesUnsettled reports whether the run's last object report has a copy
+// still Transferring.
+func copiesUnsettled(obj *unstructured.Unstructured) bool {
+	objects, _, _ := unstructured.NestedSlice(obj.Object, "status", "objects")
+	for _, raw := range objects {
+		o, _ := raw.(map[string]interface{})
+		copies, _ := o["copies"].([]interface{})
+		for _, c := range copies {
+			if m, _ := c.(map[string]interface{}); m != nil && m["state"] == "Transferring" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // reconcileStaleODAGs marks any ODAG stuck in Running/Scheduling/Pending with
 // no live task pods as Failed. Runs once at controller startup.
 func reconcileStaleODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
@@ -202,6 +249,12 @@ func reconcileStaleODAGs(dynClient dynamic.Interface, client *kubernetes.Clients
 		ns, name := obj.GetNamespace(), obj.GetName()
 		phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
 		if phase != "Running" && phase != "Scheduling" && phase != "Pending" {
+			// A finished run whose last report still has a copy in flight:
+			// settle it (see the finalized case below).
+			if copiesUnsettled(obj) && len(parseRealization(obj)) > 0 {
+				rebuildAssignmentCache(obj, client)
+				go reconcileRealization(dynClient, client, obj)
+			}
 			continue
 		}
 		pods, err := client.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{
@@ -220,6 +273,13 @@ func reconcileStaleODAGs(dynClient dynamic.Interface, client *kubernetes.Clients
 				okCount++
 			case corev1.PodFailed:
 				badCount++
+			}
+		}
+		if liveCount == 0 && hasWarmTasks(obj) {
+			// Warm calls are not pods: re-attach to those the runners hold.
+			rebuildAssignmentCache(obj, client)
+			if liveCount += recoverWarm(dynClient, client, obj); liveCount == 0 {
+				assignmentCache.Delete(ns + "/" + name) // nothing to resume: finalized below
 			}
 		}
 		if liveCount > 0 {
@@ -250,11 +310,29 @@ func reconcileStaleODAGs(dynClient dynamic.Interface, client *kubernetes.Clients
 		default:
 			updateODAGPhase(dynClient, ns, name, "Failed", "reconciled at controller startup: one or more pods failed")
 		}
+		// A revision can outlive the run's tasks: its copy may still be in
+		// flight (or have landed) after every pod finished. Without a pass
+		// here status.objects keeps the dead controller's last report
+		// (Transferring) forever, and an unfinished copy is never verified.
+		if len(parseRealization(obj)) > 0 {
+			rebuildAssignmentCache(obj, client)
+			go reconcileRealization(dynClient, client, obj)
+		}
 		stale++
 	}
 	if stale > 0 {
 		log.Printf("[odag-ctrl] startup reconcile: finalized %d stale ODAG(s)", stale)
 	}
+}
+
+// hasWarmTasks reports whether any task of the run names a warm runner.
+func hasWarmTasks(obj *unstructured.Unstructured) bool {
+	for _, t := range extractTasks(obj) {
+		if t.Runner != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func buildConfig(kubeconfig string) (*rest.Config, error) {
@@ -348,18 +426,49 @@ func pollRunningODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset)
 	}
 }
 
+// odagWatchTimeout bounds every ODAG watch: the server ends it after this
+// long and the loop lists and watches again, so a stream that stalls without
+// closing (seen under a 400-task run's status churn: new runs were never
+// deployed) costs at most this long, and the list in between catches every
+// run created meanwhile.
+const odagWatchTimeout = 60
+
 func watchODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
 	for {
+		// List, deploy what no watch has delivered yet, then watch from now.
+		// (Watching from the list's resource version delivers nothing on
+		// k3s with its SQLite datastore; a run created between the list and
+		// the watch is caught by the next list, at most odagWatchTimeout
+		// later, and deployODAG is idempotent.)
+		list, err := dynClient.Resource(odagGVR).Namespace("").List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			log.Printf("[odag-ctrl] error listing ODAGs: %v; retrying in 5s", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		for i := range list.Items {
+			obj := &list.Items[i]
+			key := obj.GetNamespace() + "/" + obj.GetName()
+			latestODAG.Store(key, obj)
+			if _, done := processedODAGs.Load(key); !done {
+				go deployODAG(dynClient, client, obj)
+			}
+		}
+		timeout := int64(odagWatchTimeout)
 		watcher, err := dynClient.Resource(odagGVR).Namespace("").Watch(
-			context.Background(), metav1.ListOptions{},
+			context.Background(), metav1.ListOptions{TimeoutSeconds: &timeout},
 		)
 		if err != nil {
 			log.Printf("[odag-ctrl] error watching ODAGs: %v; retrying in 5s", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		log.Println("[odag-ctrl] watching ODAG resources")
 		for event := range watcher.ResultChan() {
+			if event.Type == "ERROR" {
+				log.Printf("[odag-ctrl] ODAG watch error: %v; listing again", event.Object)
+				watcher.Stop()
+				break
+			}
 			obj, ok := event.Object.(*unstructured.Unstructured)
 			if !ok {
 				continue
@@ -402,14 +511,13 @@ func watchODAGs(dynClient dynamic.Interface, client *kubernetes.Clientset) {
 				statusRunners.Delete(key)
 				completedRuns.Delete(obj.GetUID())
 				forgetDispatches(key)
+				forgetAblations(key)
 				forgetReservations(key)
 				forgetInputWaits(key)
 				forgetWarm(key)
 				go gcDeletedRun(dynClient, client, obj)
 			}
 		}
-		log.Println("[odag-ctrl] ODAG watcher closed; reconnecting in 2s")
-		time.Sleep(2 * time.Second)
 	}
 }
 
@@ -464,6 +572,19 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 	if err != nil || len(nodeMap) == 0 {
 		updateODAGPhase(dynClient, namespace, odagName, "Failed", "failed to list schedulable nodes")
 		return
+	}
+	// spec.nodes confines the run to a set of nodes (a lane of the testbed,
+	// a tenant's share): the planner sees only those.
+	if allowed := runNodes(obj); len(allowed) > 0 {
+		for n := range nodeMap {
+			if !allowed[n] {
+				delete(nodeMap, n)
+			}
+		}
+		if len(nodeMap) == 0 {
+			updateODAGPhase(dynClient, namespace, odagName, "Failed", "none of spec.nodes is schedulable")
+			return
+		}
 	}
 
 	// Build runtime/dataSize/bandwidth resolvers from profiler + template config.
@@ -581,15 +702,31 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 	// reset arriving after a root task finished put its state back to
 	// Pending, so its warm call never completed and held its node's CPU
 	// for good (E17: a 60-task run hung behind a 0.2 s source task).
+	// One reset per (node, producer), in parallel: a 400-task run issued
+	// ~1,600 sequential requests here and started a minute after placement.
+	type resetKey struct{ ip, dep string }
+	resets := map[resetKey]bool{}
 	for _, task := range tasks {
 		childNi := assignMap[task.Name]
 		if childNi.ip == "" {
 			continue
 		}
 		for _, dep := range task.Dependencies {
-			resetTaskState(childNi.ip, odagName, dep)
+			resets[resetKey{childNi.ip, dep}] = true
 		}
 	}
+	var resetWG sync.WaitGroup
+	resetSem := make(chan struct{}, 64)
+	for k := range resets {
+		resetWG.Add(1)
+		resetSem <- struct{}{}
+		go func(k resetKey) {
+			defer resetWG.Done()
+			defer func() { <-resetSem }()
+			resetTaskState(k.ip, odagName, k.dep)
+		}(k)
+	}
+	resetWG.Wait()
 	assignmentCache.Store(key, assignMap)
 	// An explicitly declared order (frozen-schedule replay) takes the
 	// same path as an externally returned one.
@@ -611,13 +748,14 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 
 	writePredictedSchedule(dynClient, namespace, odagName, predicted, flows, scheduling)
 
-	// Keep the plan's cost model for the run: the plan-aware copy policy
-	// and node-loss recovery decide with the numbers that placed it.
+	// Keep the plan's cost model for the run and publish it: the
+	// controller judges transfers against it (linkstate.go), and policies
+	// outside the controller decide with the numbers that placed the run.
 	model := newPlanModel(tasks, assignMap, nodeMap, rtRes, dsRes, bwRes, predicted, flows)
 	model.deployed = time.Now()
 	model.policy = parseRealizationPolicy(obj)
 	planModels.Store(key, model)
-	applyPlanPolicy(dynClient, obj, model, policyContext{})
+	go publishPlan(client, namespace, odagName, obj.GetUID(), model)
 
 	log.Printf("[odag-ctrl] task placement for %s:", key)
 	for task, ni := range assignMap {
@@ -703,6 +841,7 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 
 	key := namespace + "/" + odagName
 	ownerUID := odagObj.GetUID()
+	noteAblations(odagObj)
 
 	// An outside policy's placement for tasks not started yet (placement.go).
 	reconcilePlacement(dynClient, client, namespace, odagName, odagObj)
@@ -717,6 +856,11 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 	// Extract tasks from the passed ODAG object (no extra API call needed).
 	tasks := extractTasks(odagObj)
 	realizationCache.Store(key, parseRealization(odagObj))
+	// A spec revision is taken up here too, from the run object this pass
+	// read, so enacting a policy's copies never depends on the watch
+	// delivering the change (a stalled watch cache delivered none for
+	// hours). reconcileRealization acts once per spec generation.
+	reconcileRealization(dynClient, client, odagObj)
 	// A copy waiting for its object follows the producer promptly: every
 	// dispatch pass (pod event, warm-call completion, sweep) wakes it.
 	if realizationPending(key) {
@@ -750,6 +894,12 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 	}
 
 	byReadiness := executorOrder(odagObj) == "readiness"
+	pull := runDataPlane(odagObj) == "pull"
+	if pull {
+		pullRuns.Store(odagName, true)
+	}
+	var pulls []realizationEntry
+	var pulled []string
 	var readyList []readyTask
 	dispatchReady := func(task taskSpec) {
 		dispatchTask(dynClient, client, namespace, odagName, key, ownerUID, odagObj, task, assignMap, tasks)
@@ -764,6 +914,11 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 		vertexNi := assignMap[task.Name]
 		if vertex[task.Name] {
 			vertexNi = vertexNode(namespace, odagName, task, assignMap)
+		}
+		// Nothing starts on a lost node; the task waits for a policy to
+		// place it elsewhere (or for the node to come back).
+		if nodeLost(vertexNi.name) {
+			continue
 		}
 		if (vertex[task.Name] || cached[task.Name] != (cacheEntry{})) &&
 			dataVertexExecuted(vertexNi, namespace, odagName, task.Name) {
@@ -812,6 +967,17 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 			}
 			if blocked {
 				continue
+			}
+		}
+
+		// A pull run: once every producer's output exists on the producer's
+		// node (the task is ready, as Ray and Dask define it), copy the
+		// inputs to this task's node; the gate below dispatches it when they
+		// are installed.
+		if pull && !vertex[task.Name] {
+			if entries, ready := pullInputs(namespace, odagName, key, task, tasks, assignMap, vertexNi); ready {
+				pulls = append(pulls, entries...)
+				pulled = append(pulled, task.Name)
 			}
 		}
 
@@ -917,6 +1083,17 @@ func processReadyTasks(dynClient dynamic.Interface, client *kubernetes.Clientset
 			dispatchReady(rt.task)
 		}
 	}
+	if len(pulls) > 0 {
+		// Marked issued only once the request is stored; a rejected patch is
+		// retried by the next pass.
+		if err := patchRealization(dynClient, namespace, odagName,
+			mergeRealization(parseRealization(odagObj), pulls, originPull)); err == nil {
+			for _, t := range pulled {
+				pullIssued.Store(key+"/"+t, true)
+			}
+			log.Printf("[odag-ctrl] %s: pull: copies of %s's inputs requested", key, strings.Join(pulled, ", "))
+		}
+	}
 
 	// Per-task statuses and overall completion, one pass at a time per run
 	// (statusworker.go). A data vertex has no pod, so completion counts pod
@@ -951,6 +1128,47 @@ func forgetReadySince(odagKey string) {
 }
 
 // executorOrder reads spec.executor.order ("" or "readiness").
+// runDataPlane is spec.dataPlane: "" (push: a producer's agent pushes each
+// output to its consumers' nodes when the producer ends) or "pull" (an
+// evaluation ablation: inputs move to a consumer's node once it is ready).
+func runDataPlane(obj *unstructured.Unstructured) string {
+	o, _, _ := unstructured.NestedString(obj.Object, "spec", "dataPlane")
+	return o
+}
+
+// pullRuns: runs with spec.dataPlane "pull" (buildEnvVars drops remote
+// successors from their producers' push lists). pullIssued: key/task of
+// consumers whose inputs have been requested.
+var pullRuns, pullIssued sync.Map
+
+// pullInputs: for a pull run, the copies that bring a task's inputs from
+// its producers' nodes once every producer's output is installed there (the
+// task is ready); ready is false while some producer has not finished, or
+// once the copies have been requested.
+func pullInputs(namespace, odagName, key string, task taskSpec, tasks []taskSpec, assignMap map[string]nodeInfo,
+	at nodeInfo) ([]realizationEntry, bool) {
+	if _, done := pullIssued.Load(key + "/" + task.Name); done || at.ip == "" || len(task.Dependencies) == 0 {
+		return nil, false
+	}
+	var out []realizationEntry
+	for _, dep := range task.Dependencies {
+		prod := assignMap[dep]
+		for _, o := range consumedKeys(task, dep) {
+			if prod.ip == "" || !isDataReady(prod.ip, odagName, o) {
+				return nil, false // not ready: a producer has not finished
+			}
+			if prod.name != at.name {
+				out = append(out, realizationEntry{Object: o, Copies: []string{at.name}, ServingCopy: prod.name,
+					Origin: originPull})
+			}
+		}
+	}
+	if len(out) == 0 {
+		pullIssued.Store(key+"/"+task.Name, true) // every input is local
+	}
+	return out, len(out) > 0
+}
+
 func executorOrder(obj *unstructured.Unstructured) string {
 	o, _, _ := unstructured.NestedString(obj.Object, "spec", "executor", "order")
 	return o
@@ -1496,17 +1714,24 @@ func taskRuntimeOn(task taskSpec, node string) string {
 	if v, ok := task.RuntimeProfile[node]; ok && node != "" {
 		return strconv.FormatFloat(v, 'f', -1, 64)
 	}
-	return fmt.Sprintf("%d", int(task.Runtime))
+	if task.Runtime == float64(int64(task.Runtime)) {
+		return fmt.Sprintf("%d", int(task.Runtime))
+	}
+	return strconv.FormatFloat(task.Runtime, 'f', -1, 64)
 }
 
 func buildEnvVars(odagName string, task taskSpec, assignMap map[string]nodeInfo, allTasks []taskSpec) []corev1.EnvVar {
 	outputDir := fmt.Sprintf("%s/%s/%s", dataOutputPath, odagName, task.Name)
+	_, pull := pullRuns.Load(odagName)
+	pushTo := func(succ string) bool { // a pull run pushes only to consumers on the producer's own node
+		return !pull || assignMap[succ].name == assignMap[task.Name].name
+	}
 
 	// Compute which tasks depend on this task (its successors).
 	var successorNames []string
 	for _, t := range allTasks {
 		for _, dep := range t.Dependencies {
-			if dep == task.Name {
+			if dep == task.Name && pushTo(t.Name) {
 				successorNames = append(successorNames, t.Name)
 				break
 			}
@@ -1569,7 +1794,7 @@ func buildEnvVars(odagName string, task taskSpec, assignMap map[string]nodeInfo,
 			var oSuccs []string
 			for _, t := range allTasks {
 				for _, in := range t.Inputs {
-					if in.Producer == task.Name && in.Object == out.Name {
+					if in.Producer == task.Name && in.Object == out.Name && pushTo(t.Name) {
 						oSuccs = append(oSuccs, t.Name)
 						ni := assignMap[t.Name]
 						sKey := strings.ToUpper(strings.ReplaceAll(t.Name, "-", "_"))
@@ -2106,6 +2331,15 @@ func podTaskStatus(pod corev1.Pod, odagName string, assignMap map[string]nodeInf
 	}
 	ts["phase"] = podPhase
 	ts["state"] = taskState
+	if podPhase != "Succeeded" {
+		node := pod.Spec.NodeName
+		if node == "" {
+			node = assignMap[taskName].name
+		}
+		if nodeLost(node) {
+			ts["lost"] = true // its node was lost before it finished
+		}
+	}
 	if ds := dataSizeMap[taskName]; ds != "" {
 		ts["dataSize"] = ds
 	}
@@ -2222,16 +2456,66 @@ func updateActualFlows(dynClient dynamic.Interface, namespace, odagName string, 
 		})
 	}
 
-	patch := map[string]any{
-		"status": map[string]any{
-			"actualNetworkFlows": entries,
-		},
+	st := map[string]any{"actualNetworkFlows": entries}
+	if len(entries) > flowsInStatusMax {
+		// A large run's flow records go to a ConfigMap of their own: the
+		// run object must stay well under the datastore's object limit
+		// (a 400-task run grew to 1.8 MB, and k3s stopped serving it).
+		var owner types.UID
+		for _, p := range pods {
+			for _, or := range p.OwnerReferences {
+				if or.Kind == "ODAG" {
+					owner = or.UID
+				}
+			}
+		}
+		ref := writeRunConfigMap(dynClient, namespace, odagName, owner, "wl-flows-", "flows.json", entries)
+		st = map[string]any{"actualNetworkFlows": nil, "actualNetworkFlowsRef": ref,
+			"actualNetworkFlowCount": len(entries)}
 	}
-	data, _ := json.Marshal(patch)
+	data, _ := json.Marshal(map[string]any{"status": st})
 	_, _ = dynClient.Resource(odagGVR).Namespace(namespace).Patch(
 		context.Background(), odagName, types.MergePatchType, data,
 		metav1.PatchOptions{}, "status",
 	)
+}
+
+// flowsInStatusMax: runs with more flow records than this keep them in a
+// ConfigMap (status carries a reference and the count).
+const flowsInStatusMax = 256
+
+var configMapGVR = schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
+
+// writeRunConfigMap stores one JSON document in a ConfigMap owned by the
+// run, named prefix+run, and returns "configmap/<name>".
+func writeRunConfigMap(dynClient dynamic.Interface, namespace, run string, owner types.UID,
+	prefix, key string, doc any) string {
+
+	name := prefix + run
+	if len(name) > 253 {
+		name = name[:253]
+	}
+	body, err := json.Marshal(doc)
+	if err != nil {
+		return ""
+	}
+	meta := map[string]any{"name": name, "namespace": namespace, "labels": map[string]any{"wl.io/run-of": run}}
+	if owner != "" {
+		meta["ownerReferences"] = []any{map[string]any{"apiVersion": "wl.io/v1", "kind": "ODAG",
+			"name": run, "uid": string(owner)}}
+	}
+	cm := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": meta, "data": map[string]any{key: string(body)}}}
+	res := dynClient.Resource(configMapGVR).Namespace(namespace)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := res.Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+		if _, err2 := res.Create(ctx, cm, metav1.CreateOptions{}); err2 != nil {
+			log.Printf("[odag-ctrl] %s/%s: write %s: %v / %v", namespace, run, name, err, err2)
+			return ""
+		}
+	}
+	return "configmap/" + name
 }
 
 func checkODAGCompletion(dynClient dynamic.Interface, client *kubernetes.Clientset, pods []corev1.Pod, namespace, odagName string, ownerUID types.UID, totalTasks int) {
@@ -2259,6 +2543,11 @@ func checkODAGCompletion(dynClient dynamic.Interface, client *kubernetes.Clients
 					break
 				}
 			}
+		}
+		// spec.retryPolicy.maxRetries: run the task again on its node, up to
+		// that many times, before the failure fails the run.
+		if retryTask(dynClient, client, namespace, odagName, ownerUID, taskName, pod) {
+			continue
 		}
 		msg := fmt.Sprintf("task %q failed (%s)", taskName, reason)
 		updateODAGPhase(dynClient, namespace, odagName, "Failed", msg)
@@ -2522,4 +2811,47 @@ func firstStartOf(pods []corev1.Pod) time.Time {
 
 func isAlreadyExists(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "already exists")
+}
+
+// taskRetries: "uid/task" -> retries used.
+var taskRetries sync.Map
+
+// retryTask clears a failed task's execution so the next dispatch pass
+// starts it again, while spec.retryPolicy.maxRetries allows (absent: none).
+func retryTask(dynClient dynamic.Interface, client *kubernetes.Clientset, namespace, odagName string,
+	uid types.UID, task string, pod corev1.Pod) bool {
+
+	obj, err := dynClient.Resource(odagGVR).Namespace(namespace).Get(context.Background(), odagName, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	maxR, found, _ := unstructured.NestedInt64(obj.Object, "spec", "retryPolicy", "maxRetries")
+	if !found || maxR <= 0 {
+		return false
+	}
+	k := string(uid) + "/" + task
+	used := 0
+	if v, ok := taskRetries.Load(k); ok {
+		used = v.(int)
+	}
+	if int64(used) >= maxR {
+		return false
+	}
+	key := namespace + "/" + odagName
+	raw, ok := assignmentCache.Load(key)
+	if !ok {
+		return false
+	}
+	v, _ := runRecoveries.LoadOrStore(key, &runRecovery{handled: map[string]string{}})
+	rr := v.(*runRecovery)
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	if rr.handled[task] == string(pod.UID) && pod.UID != "" {
+		return true // this failed execution was already cleared
+	}
+	taskRetries.Store(k, used+1)
+	clearExecution(client, namespace, odagName, uid, task, map[string]corev1.Pod{task: pod},
+		raw.(map[string]nodeInfo), rr)
+	log.Printf("[odag-ctrl] %s: task %s failed; retry %d of %d", key, task, used+1, maxR)
+	return true
 }

@@ -73,6 +73,9 @@ func newPlanModel(tasks []taskSpec, assignMap map[string]nodeInfo, nodeMap map[s
 			return rt(task, node)
 		}
 		if t := m.byName[task]; t != nil {
+			if v, ok := t.RuntimeProfile[node]; ok {
+				return v
+			}
 			return t.Runtime
 		}
 		return 0

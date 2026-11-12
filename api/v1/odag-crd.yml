@@ -130,20 +130,49 @@ spec:
                           type: string
                       origin:
                         type: string
-                        enum: ["", plan, static, recovery]
+                        enum: ["", plan, static, recovery, placement, pull]
                         description: >-
                           Who wrote the entry: empty for a user or external policy,
-                          "plan" for the plan-aware copy policy, "recovery" for
-                          node-loss recovery. The controller rewrites only its own.
+                          "plan" or "static" for the reference copy policies,
+                          "recovery" for the reference repair policy, "placement"
+                          for the controller when it enacts spec.placement, "pull"
+                          for the controller in a spec.dataPlane "pull" run.
                 placement:
                   type: object
                   description: >-
-                    External placement for tasks that have not started: task name
-                    to node name. The controller moves each such task to the named
-                    node (a started task keeps its node), re-sends its inputs from
-                    their producers' nodes, and records the move in status.recovery.
+                    Where a policy wants tasks to run: task name to node name. The
+                    controller moves each task that has not started, or whose
+                    execution was on a node since lost (it starts again there); a
+                    task started on a live node keeps its node and the entry is
+                    reported in status.placementRejected. Inputs already pushed are
+                    re-sent from their producers' nodes unless spec.realization
+                    brings them; every move is recorded in status.recovery.
                   additionalProperties:
                     type: string
+                rerun:
+                  type: object
+                  description: >-
+                    Finished tasks a policy wants run again (e.g. a producer whose
+                    every copy of an output was lost): task name to a generation
+                    number. The controller acts once per new generation.
+                  additionalProperties:
+                    type: integer
+                nodes:
+                  type: array
+                  description: >-
+                    The nodes this run may use (a lane of a testbed, a tenant's
+                    share). Empty: every schedulable node.
+                  items:
+                    type: string
+                dataPlane:
+                  type: string
+                  enum: ["", push, pull]
+                  description: >-
+                    How outputs reach remote consumers. Empty or "push" (default): a
+                    producer's agent pushes each output to its consumers' nodes when the
+                    producer ends. "pull" (an evaluation ablation): a consumer's inputs
+                    are copied to its node only once it is ready (every producer has
+                    ended), as frameworks that fetch inputs on demand do.
                 executor:
                   type: object
                   description: >-
@@ -158,7 +187,8 @@ spec:
                 realizationPolicy:
                   type: object
                   description: >-
-                    How the controller derives extra copies from the plan.
+                    Attaches the reference policies (run by the policy process,
+                    outside the controller) and their parameters.
                     planAware: for each consumer, consider losing its planned
                     node; copy an input to the node the consumer would move to
                     when the delay the copy avoids (beyond the consumer's slack)
@@ -176,6 +206,11 @@ spec:
                       description: >-
                         Keep decisions true as the run changes: re-plan around degraded links and
                         re-protect after a repair (default true). false keeps plan-time decisions.
+                    repair:
+                      type: boolean
+                      description: >-
+                        Re-place the run's unfinished work when a node it uses is lost (default
+                        true). Applied by the reference policy process, not the controller.
                     threshold:
                       type: number
                       minimum: 0
@@ -314,8 +349,8 @@ spec:
                         type: string
                         description: Expected output data size, e.g. "100MB". Used by scheduler for communication cost estimation.
                       runtime:
-                        type: integer
-                        description: Expected runtime in seconds. Used by scheduler for makespan estimation.
+                        type: number
+                        description: Expected runtime in seconds (fractions allowed). Used by scheduler for makespan estimation.
                       env:
                         type: array
                         items:
@@ -382,12 +417,33 @@ spec:
                     What the plan-aware policy decided: mode, threshold, number
                     and bytes of copies, and one decision per (object, consumer)
                     with the delay, slack and copy time behind it.
+                placementRejected:
+                  type: object
+                  description: >-
+                    spec.placement entries the controller did not enact, with the
+                    reason (the task started on a live node; the node is lost or
+                    unknown).
+                  additionalProperties:
+                    type: string
+                rerunEnacted:
+                  type: object
+                  description: >-
+                    Per task, the spec.rerun generation the controller has
+                    enacted. A request whose generation is above it has not
+                    taken effect yet.
+                  additionalProperties:
+                    type: integer
+                policy:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: >-
+                    Written by the policy process: its decisions, in order.
                 recovery:
                   type: array
                   description: >-
-                    One record per node-loss repair: when, which nodes were lost,
-                    which tasks moved where, which ran again, and which inputs
-                    were copied from surviving copies.
+                    One record per enacted placement change: when, which nodes
+                    were lost, which tasks moved where, which started again, which
+                    ran again, and which inputs were copied.
                   items:
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
@@ -429,6 +485,9 @@ spec:
                       state:
                         type: string
                         description: Granular task state reported by data-agent (Scheduled/Executing/Sending/DataReady/Done/Failed).
+                      lost:
+                        type: boolean
+                        description: The task's node was lost before it finished; it waits for a policy to place it.
                       node:
                         type: string
                       cachedFrom:
@@ -510,6 +569,14 @@ spec:
                   description: Actual makespan in seconds (set on completion).
                 message:
                   type: string
+                predictedNetworkFlowsRef:
+                  type: string
+                  description: Where predicted flows are kept when there are too many for the run object (the plan ConfigMap).
+                actualNetworkFlowsRef:
+                  type: string
+                  description: Where actual flows are kept when there are too many for the run object (a ConfigMap owned by the run).
+                actualNetworkFlowCount:
+                  type: integer
                 predictedTasks:
                   type: array
                   description: Per-task predicted schedule computed at deployment time.

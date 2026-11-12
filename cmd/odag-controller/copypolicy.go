@@ -46,7 +46,14 @@ const (
 
 	originPlan     = "plan"     // written by the plan-aware policy
 	originStatic   = "static"   // written by the static replication rule
-	originRecovery = "recovery" // written by node-loss recovery
+	originRecovery = "recovery" // written by a repair policy
+	// originPlacement: written by the controller when it enacts
+	// spec.placement (inputs of a moved task re-sent from its producer).
+	originPlacement = "placement"
+	// originPull: written by the controller for a run with spec.dataPlane
+	// "pull" (an evaluation ablation): a consumer's inputs are copied to its
+	// node when it becomes ready, instead of pushed when each producer ends.
+	originPull = "pull"
 )
 
 type realizationPolicy struct {
@@ -61,11 +68,16 @@ type realizationPolicy struct {
 	// around degraded links, re-protect after a repair). false freezes the
 	// copies chosen at plan time, as a plan-time-only system would.
 	Revise bool
+	// Repair: re-place the run's work when a node is lost (repair.go).
+	Repair bool
+	// Attached: the run asked for policies at all (spec.realizationPolicy
+	// is present). A run without it gets none.
+	Attached bool
 }
 
 func defaultRealizationPolicy() realizationPolicy {
 	return realizationPolicy{Threshold: 2, PodStartupS: 3, WarmStartupS: 0.1, MinGainS: 1,
-		Replicas: 2, Revise: true}
+		Replicas: 2, Revise: true, Repair: true}
 }
 
 func parseRealizationPolicy(obj *unstructured.Unstructured) realizationPolicy {
@@ -74,6 +86,7 @@ func parseRealizationPolicy(obj *unstructured.Unstructured) realizationPolicy {
 	if !found {
 		return p
 	}
+	p.Attached = true
 	p.Mode, _ = m["mode"].(string)
 	num := func(k string, dst *float64) {
 		switch v := m[k].(type) {
@@ -94,6 +107,9 @@ func parseRealizationPolicy(obj *unstructured.Unstructured) realizationPolicy {
 	}
 	if v, ok := m["revise"].(bool); ok {
 		p.Revise = v
+	}
+	if v, ok := m["repair"].(bool); ok {
+		p.Repair = v
 	}
 	if s, ok := m["maxCopyBytes"].(string); ok {
 		p.MaxCopyBytes = parseDataSizeBytes(s)
@@ -602,7 +618,7 @@ func mergeRealization(existing, ours []realizationEntry, origin string) []realiz
 	var out []realizationEntry
 	idx := map[string]int{}
 	for _, e := range existing {
-		if e.Origin == origin && origin != originRecovery {
+		if e.Origin == origin && !unionOrigin(origin) {
 			continue // the policy's own earlier entries are replaced
 		}
 		idx[e.Object] = len(out)
@@ -614,7 +630,7 @@ func mergeRealization(existing, ours []realizationEntry, origin string) []realiz
 		case !ok:
 			idx[e.Object] = len(out)
 			out = append(out, e)
-		case origin == originRecovery:
+		case unionOrigin(origin):
 			have := map[string]bool{}
 			for _, n := range out[i].Copies {
 				have[n] = true
@@ -635,8 +651,14 @@ func mergeRealization(existing, ours []realizationEntry, origin string) []realiz
 	return out
 }
 
+// unionOrigin: entries of this origin accumulate (a repair's or a move's
+// copies stay ordered) instead of replacing the origin's earlier entries.
+func unionOrigin(origin string) bool {
+	return origin == originRecovery || origin == originPlacement || origin == originPull
+}
+
 // patchRealization writes spec.realization (a merge patch replaces the list).
-func patchRealization(dynClient dynamic.Interface, namespace, name string, entries []realizationEntry) {
+func patchRealization(dynClient dynamic.Interface, namespace, name string, entries []realizationEntry) error {
 	items := make([]map[string]any, 0, len(entries))
 	for _, e := range entries {
 		it := map[string]any{"object": e.Object}
@@ -661,5 +683,7 @@ func patchRealization(dynClient dynamic.Interface, namespace, name string, entri
 	if _, err := dynClient.Resource(odagGVR).Namespace(namespace).Patch(context.Background(),
 		name, types.MergePatchType, data, metav1.PatchOptions{}); err != nil {
 		log.Printf("[policy] %s/%s: patch spec.realization: %v", namespace, name, err)
+		return err
 	}
+	return nil
 }

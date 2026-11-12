@@ -11,9 +11,10 @@ package main
 // transfers that completed (the sending agent records each), and transfers
 // still running well past their prediction (their link cannot be faster
 // than size/elapsed). A link is degraded while its latest evidence says so
-// and is younger than linkObsTTL; decisions that price transfers then use
-// the observed bandwidth, and runs with consumers waiting on the link are
-// re-planned (repairRun with a link trigger).
+// and is younger than linkObsTTL. The controller only observes: judgements
+// are published (observe.go), and a policy outside the controller decides
+// whether a consumer waiting on a degraded link moves or takes its input
+// from another copy.
 
 import (
 	"fmt"
@@ -148,9 +149,7 @@ func observeRunFlows(key string, flows []dataAgentFlow) {
 		obj := f.FromTask // the agent records the object key as FromTask
 		pred := m.predictedTransferS(obj, producerOf(obj), f.ToTask, f.SrcNode, f.DstNode)
 		if observeTransfer(f.SrcNode, f.DstNode, f.DataSize, pred, f.EndUnix-f.StartUnix, true, now) {
-			w.mu.Lock()
-			w.pending[linkKey(f.SrcNode, f.DstNode)] = now
-			w.mu.Unlock()
+			kickObservations()
 		}
 	}
 }
@@ -210,8 +209,9 @@ func lateInputs(key, odagName string, m *planModel, assign map[string]nodeInfo,
 }
 
 // checkRunLinks gathers link evidence for one run from a status pass's
-// snapshot and, when a consumer waits on a degraded link, re-plans the run
-// (at most every replanInterval).
+// snapshot: undelivered inputs whose transfer runs well past its prediction.
+// Evidence is gathered whatever policy the run has; acting on it is the
+// policy's business.
 func checkRunLinks(a statusArgs, pods []corev1.Pod, assignMap map[string]nodeInfo) {
 	key := a.namespace + "/" + a.odagName
 	v, ok := planModels.Load(key)
@@ -219,9 +219,6 @@ func checkRunLinks(a statusArgs, pods []corev1.Pod, assignMap map[string]nodeInf
 		return
 	}
 	m := v.(*planModel)
-	if !m.policy.Revise {
-		return // frozen: the run keeps its plan-time decisions
-	}
 	w := watchOf(key)
 	w.mu.Lock()
 	if w.busy {
@@ -240,22 +237,21 @@ func checkRunLinks(a statusArgs, pods []corev1.Pod, assignMap map[string]nodeInf
 			done[t] = true
 		}
 	}
-	now := time.Now()
-	slow := lateInputs(key, a.odagName, m, assignMap, done, dispatched, now)
-	w.mu.Lock()
-	for k, at := range w.pending {
-		if now.Sub(at) < linkObsTTL {
-			slow[k] = true
+	before := len(degradedNow(time.Now()))
+	lateInputs(key, a.odagName, m, assignMap, done, dispatched, time.Now())
+	if len(degradedNow(time.Now())) != before {
+		kickObservations()
+	}
+}
+
+// degradedNow lists the links currently judged degraded.
+func degradedNow(now time.Time) []string {
+	var out []string
+	linkLive.Range(func(k, v any) bool {
+		if o := v.(linkObs); o.degraded && now.Sub(o.at) < linkObsTTL {
+			out = append(out, k.(string))
 		}
-	}
-	due := len(slow) > 0 && now.Sub(w.lastRun) >= replanInterval
-	if due {
-		w.lastRun = now
-		w.pending = map[string]time.Time{}
-	}
-	w.mu.Unlock()
-	if due {
-		log.Printf("[links] %s: consumers wait on degraded link(s) %v; re-planning", key, sortedKeys(slow))
-		repairRun(a.dynClient, a.client, a.namespace, a.odagName, true)
-	}
+		return true
+	})
+	return out
 }

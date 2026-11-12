@@ -1,0 +1,45 @@
+# The reference policies (plan-aware copies, repair, link re-planning) as a
+# separate process. Same image as the controller, run with --mode=policy.
+# Set the image to the controller build in use.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wl-policy
+  namespace: wl-system
+  labels:
+    app: wl-policy
+spec:
+  replicas: 1
+  # One instance at a time: a rolling update ran the old and the new side by side, both dispatching and
+  # resetting task state for the same runs (no leader election), and wedged runs in flight during a deploy.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: wl-policy
+  template:
+    metadata:
+      labels:
+        app: wl-policy
+    spec:
+      serviceAccountName: wl-policy
+      # The policy process runs on the control node, never on a worker: a worker can fail during a run, and the
+      # policy must outlive it to repair the run.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: wl-policy
+        image: wl-odag-controller:latest
+        imagePullPolicy: Always
+        args: ["--mode=policy"]
+        resources:
+          requests:
+            cpu: 200m
+            memory: 128Mi
+          limits:
+            cpu: '4'
+            memory: 1Gi

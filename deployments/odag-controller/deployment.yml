@@ -7,6 +7,10 @@ metadata:
     app: odag-controller
 spec:
   replicas: 1
+  # One instance at a time: a rolling update ran the old and the new side by side, both dispatching and
+  # resetting task state for the same runs (no leader election), and wedged runs in flight during a deploy.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: odag-controller
@@ -24,8 +28,11 @@ spec:
         - key: node.kubernetes.io/unschedulable
           operator: Exists
           effect: NoSchedule
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
       nodeSelector:
-        kubernetes.io/hostname: anrg-2
+        node-role.kubernetes.io/control-plane: "true"
       containers:
         - name: odag-controller
           image: 192.168.1.163:5000/wl-odag-controller:latest

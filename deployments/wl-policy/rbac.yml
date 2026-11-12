@@ -1,0 +1,42 @@
+# The reference policy process acts on runs only through their spec, and
+# reads only what the controller publishes.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wl-policy
+  namespace: wl-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wl-policy
+rules:
+  # Runs: read them, write spec.placement / spec.rerun / spec.realization,
+  # and record decisions in status.policy.
+  - apiGroups: ["wl.io"]
+    resources: ["odags"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["wl.io"]
+    resources: ["odags/status"]
+    verbs: ["patch"]
+  # The published plans and observations.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  # Node capacities and data addresses.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wl-policy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: wl-policy
+subjects:
+  - kind: ServiceAccount
+    name: wl-policy
+    namespace: wl-system

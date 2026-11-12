@@ -41,6 +41,9 @@ func computePredictedSchedule(tasks []taskSpec, assignMap map[string]nodeInfo, r
 		if rtResolver != nil {
 			return rtResolver(taskName, nodeName)
 		}
+		if v, ok := taskByName[taskName].RuntimeProfile[nodeName]; ok {
+			return v
+		}
 		return taskByName[taskName].Runtime
 	}
 	resolveDataSizeBytes := func(taskName, nodeName string) int64 {
@@ -166,13 +169,17 @@ func writePredictedSchedule(dynClient dynamic.Interface, namespace, odagName str
 	if flows == nil {
 		flows = []predictedFlowEntry{}
 	}
-	patch := map[string]any{
-		"status": map[string]any{
-			"predictedTasks":        predicted,
-			"predictedNetworkFlows": flows,
-			"scheduling":            scheduling,
-		},
+	st := map[string]any{
+		"predictedTasks":        predicted,
+		"predictedNetworkFlows": flows,
+		"scheduling":            scheduling,
 	}
+	if len(flows) > flowsInStatusMax {
+		// Kept out of the run object; the plan ConfigMap (planpub.go) has them.
+		st["predictedNetworkFlows"] = nil
+		st["predictedNetworkFlowsRef"] = "configmap/" + planConfigMapName(odagName)
+	}
+	patch := map[string]any{"status": st}
 	data, _ := json.Marshal(patch)
 	_, _ = dynClient.Resource(odagGVR).Namespace(namespace).Patch(
 		context.Background(), odagName, types.MergePatchType, data,

@@ -463,6 +463,10 @@ func heftAssignTasks(tasks []taskSpec, nodeMap map[string]nodeInfo, rtResolver r
 		if rtResolver != nil {
 			return rtResolver(taskName, nodeName)
 		}
+		// No profiler: the spec's per-node runtime, else its scalar one.
+		if v, ok := taskByName[taskName].RuntimeProfile[nodeName]; ok {
+			return v
+		}
 		return taskByName[taskName].Runtime
 	}
 	resolveDataSizeBytes := func(taskName, nodeName string) int64 {

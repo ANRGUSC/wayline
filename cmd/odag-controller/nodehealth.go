@@ -8,10 +8,13 @@ package main
 // Running for minutes). The controller probes the agents of every node an
 // active run uses, each second. A node whose agent has not answered for
 // WL_NODE_LOSS_GRACE_S seconds (default 5), or whose Kubernetes Ready
-// condition is False or Unknown, is declared lost, and every active run is
-// handed to recovery (recovery.go). A lost node whose agent answers again
-// and whose Ready condition is True is usable by new placements; runs that
-// were already repaired do not move back. WL_NODE_LOSS=off disables it.
+// condition is False or Unknown, is declared lost. The controller does not
+// repair anything itself: it publishes the lost set (observe.go), stops
+// dispatching to the node, and marks the run's unfinished tasks there as
+// lost in status.tasks. A repair policy, outside the controller, decides
+// where they go (spec.placement) and what runs again (spec.rerun). A lost
+// node whose agent answers again and whose Ready condition is True is
+// usable by new placements. WL_NODE_LOSS=off disables detection.
 
 import (
 	"context"
@@ -151,10 +154,9 @@ func activeNodes() map[string]string {
 	return out
 }
 
-// watchNodeHealth probes active nodes every second and starts recovery on
-// every running run when a node is lost. While any node is lost it re-offers
-// every running run to recovery every few seconds, so a run whose repair
-// failed part-way (an API error) is repaired on a later tick.
+// watchNodeHealth probes active nodes every second and publishes every
+// change. On a loss it also runs a dispatch pass for every running run, so
+// the lost tasks show in status at once.
 func watchNodeHealth(dynClient dynamic.Interface, client *kubernetes.Clientset) {
 	if !nodeLossEnabled {
 		log.Printf("[health] node-loss detection disabled (WL_NODE_LOSS=off)")
@@ -163,7 +165,6 @@ func watchNodeHealth(dynClient dynamic.Interface, client *kubernetes.Clientset) 
 	log.Printf("[health] node-loss detection on (grace %s)", nodeLossGrace)
 	ready := map[string]bool{}
 	var readyAt time.Time
-	var lastSweep time.Time
 	for range time.Tick(time.Second) {
 		nodes := activeNodes()
 		if len(nodes) == 0 {
@@ -189,7 +190,7 @@ func watchNodeHealth(dynClient dynamic.Interface, client *kubernetes.Clientset) 
 			}(n, ip)
 		}
 		wg.Wait()
-		newlyLost := false
+		changed := false
 		for n, ok := range results {
 			k8sReady, known := ready[n]
 			if !known {
@@ -197,24 +198,34 @@ func watchNodeHealth(dynClient dynamic.Interface, client *kubernetes.Clientset) 
 			}
 			lostNow, restored := observeNode(n, ok, k8sReady, now)
 			if lostNow {
-				newlyLost = true
+				changed = true
 				log.Printf("[health] node %s LOST (agent answered: %v, Ready: %v)", n, ok, k8sReady)
 			}
 			if restored {
+				changed = true
 				log.Printf("[health] node %s is back (new placements may use it)", n)
 			}
 		}
-		if newlyLost || (len(lostNodeSet()) > 0 && now.Sub(lastSweep) >= 5*time.Second) {
-			lastSweep = now
+		if changed {
+			kickObservations()
 			runningODAGs.Range(func(k, _ any) bool {
 				parts := strings.SplitN(k.(string), "/", 2)
 				if len(parts) == 2 {
-					go recoverRun(dynClient, client, parts[0], parts[1])
+					go kickRun(dynClient, client, parts[0], parts[1])
 				}
 				return true
 			})
 		}
 	}
+}
+
+// kickRun runs one dispatch pass for a run.
+func kickRun(dynClient dynamic.Interface, client *kubernetes.Clientset, namespace, name string) {
+	obj, err := dynClient.Resource(odagGVR).Namespace(namespace).Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		return
+	}
+	processReadyTasks(dynClient, client, namespace, name, obj)
 }
 
 // nodeReadiness maps node name -> Ready condition is True.

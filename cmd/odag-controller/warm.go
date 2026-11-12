@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,6 +35,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -203,6 +205,7 @@ func watchWarm(dynClient dynamic.Interface, client *kubernetes.Clientset,
 		}
 	}
 	lastLive := time.Now()
+	exitedOK := 0
 	var unreachableSince time.Time
 	for {
 		time.Sleep(warmPollInterval)
@@ -231,6 +234,19 @@ func watchWarm(dynClient dynamic.Interface, client *kubernetes.Clientset,
 		}
 		if time.Since(lastLive) >= warmLivenessTick {
 			lastLive = time.Now()
+			// The call exited cleanly but its agent shows no final state (it
+			// may have dropped the state of a task whose outputs were all
+			// delivered): after two liveness ticks, the call succeeded.
+			if runnerExitedOK(inv.endpoint, odagName, taskName) {
+				if exitedOK++; exitedOK >= 2 {
+					inv.mu.Lock()
+					inv.finished = time.Now()
+					inv.phase = corev1.PodSucceeded
+					inv.reason = "Completed"
+					inv.mu.Unlock()
+					break
+				}
+			}
 			lost := runnerLost(inv.endpoint, odagName, taskName)
 			if lost == "RunnerUnreachable" && nodeLossEnabled {
 				// An unreachable runner may be a lost node. Node-loss
@@ -266,6 +282,120 @@ func watchWarm(dynClient dynamic.Interface, client *kubernetes.Clientset,
 	}
 }
 
+// recoverWarm re-attaches a restarted controller to a live run's warm calls.
+// An invocation lives only in controller memory, but the runner keeps every
+// call it accepted and the task's agent keeps the task's state, so a call that
+// was running when the old controller died, or that finished while no
+// controller watched, is presented again as a pod and watched to its end.
+// Without this a restarted controller found no pods and failed the run, and a
+// fresh dispatch would have reset the agent state of a call that had already
+// finished. The run's assignment must be cached (rebuildAssignmentCache).
+// Returns the number of calls recovered.
+func recoverWarm(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *unstructured.Unstructured) int {
+	ns := obj.GetNamespace()
+	if ns == "" {
+		ns = "default"
+	}
+	name, uid := obj.GetName(), obj.GetUID()
+	cur, ok := assignmentCache.Load(ns + "/" + name)
+	if !ok {
+		return 0
+	}
+	am := cur.(map[string]nodeInfo)
+	started := statusStartTimes(obj)
+	finished := statusFinished(obj)
+	n := 0
+	for _, t := range extractTasks(obj) {
+		ni, placed := am[t.Name]
+		if t.Runner == "" || !placed || ni.ip == "" {
+			continue
+		}
+		ep, err := runnerEndpoint(client, t.Runner, ni.name)
+		if err != nil || !runnerHas(ep, name, t.Name) {
+			continue
+		}
+		at, ok := started[t.Name] // keep the start the old controller reported
+		if !ok {
+			at = time.Now()
+		}
+		key := warmKey(ns, name, uid, t.Name)
+		inv := &warmInvocation{taskKey: ns + "/" + name + "/" + t.Name, cpuMillis: parseTaskCPUMillis(t.CPU),
+			node: ni.name, nodeIP: ni.ip, endpoint: ep, invoked: at, phase: corev1.PodRunning}
+		// A call the old controller saw succeed is over: its agent may already
+		// have dropped the task's state, so watching it would never end (and
+		// would hold the node's CPU account for good).
+		if end, done := finished[t.Name]; done {
+			inv.phase, inv.reason, inv.finished = corev1.PodSucceeded, "Completed", end
+		}
+		if _, loaded := warmInvocations.LoadOrStore(key, inv); loaded {
+			continue
+		}
+		claimDispatch(dispatchKey(ns, name, uid, t.Name)) // never dispatched again
+		if inv.phase == corev1.PodRunning {
+			go watchWarm(dynClient, client, ns, name, t.Name, key, inv)
+		}
+		n++
+	}
+	if n > 0 {
+		log.Printf("[odag-ctrl] startup: re-attached %d warm call(s) of %s/%s", n, ns, name)
+	}
+	return n
+}
+
+// statusFinished reads the tasks the run's status reports Succeeded, with
+// their completion time (now if none is recorded).
+func statusFinished(obj *unstructured.Unstructured) map[string]time.Time {
+	out := map[string]time.Time{}
+	tasks, _, _ := unstructured.NestedSlice(obj.Object, "status", "tasks")
+	for _, raw := range tasks {
+		t, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(t, "name")
+		phase, _, _ := unstructured.NestedString(t, "phase")
+		if name == "" || phase != "Succeeded" {
+			continue
+		}
+		end := time.Now()
+		if s, _, _ := unstructured.NestedString(t, "completionTime"); s != "" {
+			if at, err := time.Parse(time.RFC3339Nano, s); err == nil {
+				end = at
+			}
+		}
+		out[name] = end
+	}
+	return out
+}
+
+// runnerHas reports whether the runner at endpoint holds a call of the task.
+func runnerHas(endpoint, odagName, taskName string) bool {
+	resp, err := warmHTTP.Get(fmt.Sprintf("http://%s/invocations/%s/%s", endpoint, odagName, taskName))
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// statusStartTimes reads each task's reported start from the run's status.
+func statusStartTimes(obj *unstructured.Unstructured) map[string]time.Time {
+	out := map[string]time.Time{}
+	tasks, _, _ := unstructured.NestedSlice(obj.Object, "status", "tasks")
+	for _, raw := range tasks {
+		t, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(t, "name")
+		s, _, _ := unstructured.NestedString(t, "startTime")
+		if at, err := time.Parse(time.RFC3339Nano, s); err == nil && name != "" {
+			out[name] = at
+		}
+	}
+	return out
+}
+
 // current reports whether inv is still the run's invocation of the task
 // (recovery drops the invocation of a task it moves).
 func current(key string, inv *warmInvocation) bool {
@@ -293,6 +423,21 @@ func noteRunnerFailure(key string) bool {
 func runnerGivenUp(key string) bool {
 	v, ok := runnerFailures.Load(key)
 	return ok && time.Since(v.(time.Time)) >= runnerFallbackAfter
+}
+
+// runnerExitedOK reports whether the runner saw the call's process exit 0.
+func runnerExitedOK(endpoint, odagName, taskName string) bool {
+	resp, err := warmHTTP.Get(fmt.Sprintf("http://%s/invocations/%s/%s", endpoint, odagName, taskName))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var st struct {
+		State string `json:"state"`
+		Exit  *int   `json:"exit"`
+	}
+	return resp.StatusCode == http.StatusOK && json.NewDecoder(resp.Body).Decode(&st) == nil &&
+		st.State == "exited" && st.Exit != nil && *st.Exit == 0
 }
 
 // runnerLost reports why an invocation can no longer finish ("" if it can):
