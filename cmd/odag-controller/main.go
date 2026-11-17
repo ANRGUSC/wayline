@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"strconv"
@@ -508,7 +509,7 @@ func deployODAG(dynClient dynamic.Interface, client *kubernetes.Clientset, obj *
 				scheduling["fallbackError"] = err.Error()
 			} else {
 				assignMap = am
-				scheduling["externalEstimatedMakespan"] = plan.EstMakespan
+				maps.Copy(scheduling, plan.statusFields())
 			}
 			predicted, flows = computePredictedSchedule(tasks, assignMap, rtRes, dsRes, bwRes)
 			break

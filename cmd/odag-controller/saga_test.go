@@ -6,8 +6,10 @@ package main
 // plain `go test ./cmd/odag-controller` stays hermetic.
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"sort"
 	"strings"
@@ -279,5 +281,68 @@ func TestSchedulePlanOrdering(t *testing.T) {
 		if a.Task != want[i] {
 			t.Fatalf("n1 order = %v, want %v", byNode["n1"], want)
 		}
+	}
+}
+
+// TestSagaStatusFields: what the external scheduler predicted (per-task
+// estimates, cost-model fit, capacity model, SAGA version) and the node
+// capacities it was given reach status.scheduling. Hermetic: a stub
+// service stands in for the sidecar.
+func TestSagaStatusFields(t *testing.T) {
+	var got sagaScheduleRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"assignments": [
+			{"task": "A", "node": "n1", "estimatedStart": 0, "estimatedFinish": 5},
+			{"task": "B", "node": "n1", "estimatedStart": 5, "estimatedFinish": 7.5},
+			{"task": "C", "node": "n2", "estimatedStart": 6, "estimatedFinish": 11},
+			{"task": "D", "node": "n1", "estimatedStart": 12, "estimatedFinish": 13}],
+			"estimatedMakespan": 13, "algorithm": "heft", "costModelFitRMSE": 0.25,
+			"capacityModel": "cpu", "sagaVersion": "9.9.9"}`)
+	}))
+	defer srv.Close()
+
+	nodes := makeNodes("n1", "n2", "n3")
+	_, plan, err := sagaAssignTasks("heft", srv.URL, nil, diamondTasks(), nodes,
+		separableRT(), constDS(1_000_000), constBW(100e6))
+	if err != nil {
+		t.Fatalf("sagaAssignTasks: %v", err)
+	}
+	if len(got.ClusterState.Nodes) != 3 || got.ClusterState.Nodes[0].CPUMillis != 4000 {
+		t.Fatalf("request nodes = %+v", got.ClusterState.Nodes)
+	}
+
+	f := plan.statusFields()
+	if f["externalEstimatedMakespan"] != 13.0 || f["externalCostModelFitRMSE"] != 0.25 ||
+		f["externalCapacityModel"] != "cpu" || f["externalSagaVersion"] != "9.9.9" {
+		t.Errorf("status fields = %v", f)
+	}
+	// Round-trip through JSON, as the status patch does.
+	b, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back struct {
+		Assignments []sagaAssignment `json:"externalAssignments"`
+		Overrides   []sagaOverride   `json:"externalConstraintOverrides"`
+		CPU         map[string]int64 `json:"externalNodeCPUMillis"`
+	}
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Assignments) != 4 || back.Assignments[2] != (sagaAssignment{"C", "n2", 6, 11}) {
+		t.Errorf("externalAssignments = %+v", back.Assignments)
+	}
+	if back.Overrides == nil || len(back.Overrides) != 0 {
+		t.Errorf("externalConstraintOverrides = %v, want []", back.Overrides)
+	}
+	if back.CPU["n1"] != 4000 || len(back.CPU) != 3 {
+		t.Errorf("externalNodeCPUMillis = %v", back.CPU)
+	}
+	if want := []string{"A", "B", "D"}; fmt.Sprint(plan.Order["n1"]) != fmt.Sprint(want) {
+		t.Errorf("n1 order = %v, want %v", plan.Order["n1"], want)
 	}
 }

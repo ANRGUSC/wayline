@@ -16,9 +16,12 @@ package main
 //
 // Only the task->node assignment from the response is load-bearing: task
 // dispatch stays data-readiness-driven, and predicted times are recomputed
-// by computePredictedSchedule exactly as the random branch does. On any
-// sidecar error the caller falls back to the built-in HEFT scheduler, so a
-// dead sidecar degrades placement quality, never availability.
+// by computePredictedSchedule exactly as the random branch does. The
+// scheduler's own per-task estimates and model diagnostics are recorded in
+// status.scheduling (schedulePlan.statusFields) for analysis only. On any
+// sidecar error the caller falls back to random placement and records it in
+// status.scheduling (used: "random", fallbackError), so a dead sidecar
+// degrades placement quality, never availability, and never silently.
 
 import (
 	"bytes"
@@ -120,12 +123,53 @@ type schedulePlan struct {
 	Overrides int
 	// EstMakespan is the external scheduler's own makespan estimate.
 	EstMakespan float64
+	// What the external scheduler predicted and how it modelled the
+	// cluster, kept so status.scheduling can record it (statusFields).
+	// computePredictedSchedule re-predicts times under Wayline's own cost
+	// model, so without these the scheduler's prediction is lost.
+	Assignments      []sagaAssignment
+	CostModelFitRMSE float64
+	CapacityModel    string
+	SagaVersion      string
+	OverrideList     []sagaOverride
+	NodeCPUMillis    map[string]int64 // node capacity the scheduler was given
+}
+
+// statusFields is what an external schedule adds to status.scheduling, so
+// a run can be compared against the prediction that placed it without
+// re-running the scheduler: the per-task estimates, the cost-model fit, the
+// capacity model and the node capacities it was given.
+func (p schedulePlan) statusFields() map[string]any {
+	assignments := p.Assignments
+	if assignments == nil {
+		assignments = []sagaAssignment{}
+	}
+	overrides := p.OverrideList
+	if overrides == nil {
+		overrides = []sagaOverride{}
+	}
+	f := map[string]any{
+		"externalEstimatedMakespan":   p.EstMakespan,
+		"externalAssignments":         assignments,
+		"externalCostModelFitRMSE":    p.CostModelFitRMSE,
+		"externalConstraintOverrides": overrides,
+		"externalNodeCPUMillis":       p.NodeCPUMillis,
+	}
+	if p.CapacityModel != "" {
+		f["externalCapacityModel"] = p.CapacityModel
+	}
+	if p.SagaVersion != "" {
+		f["externalSagaVersion"] = p.SagaVersion
+	}
+	return f
 }
 
 type sagaScheduleResponse struct {
 	Assignments         []sagaAssignment `json:"assignments"`
 	EstimatedMakespan   float64          `json:"estimatedMakespan"`
 	CostModelFitRMSE    float64          `json:"costModelFitRMSE"`
+	CapacityModel       string           `json:"capacityModel"`
+	SagaVersion         string           `json:"sagaVersion"`
 	ConstraintOverrides []sagaOverride   `json:"constraintOverrides"`
 	Error               string           `json:"error"`
 }
@@ -309,6 +353,15 @@ func sagaAssignTasks(algorithm, baseURL string, options map[string]interface{},
 		name = baseURL
 	}
 	plan.EstMakespan = out.EstimatedMakespan
+	plan.Assignments = out.Assignments
+	plan.CostModelFitRMSE = out.CostModelFitRMSE
+	plan.CapacityModel = out.CapacityModel
+	plan.SagaVersion = out.SagaVersion
+	plan.OverrideList = out.ConstraintOverrides
+	plan.NodeCPUMillis = make(map[string]int64, len(req.ClusterState.Nodes))
+	for _, n := range req.ClusterState.Nodes {
+		plan.NodeCPUMillis[n.Name] = n.CPUMillis
+	}
 	log.Printf("[saga] %s placed %d tasks (makespan estimate %.1fs, "+
 		"cost-model fit RMSE %.3f, constraint overrides %d)",
 		name, len(assignMap), out.EstimatedMakespan, out.CostModelFitRMSE,
