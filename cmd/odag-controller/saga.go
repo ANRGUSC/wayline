@@ -90,6 +90,7 @@ type sagaBandwidthEntry struct {
 type sagaScheduleRequest struct {
 	Algorithm string                 `json:"algorithm"`
 	Options   map[string]interface{} `json:"options,omitempty"`
+	Model     map[string]interface{} `json:"model,omitempty"`
 	DAG       struct {
 		Tasks []sagaTaskRequest `json:"tasks"`
 	} `json:"dag"`
@@ -104,6 +105,9 @@ type sagaAssignment struct {
 	Node            string  `json:"node"`
 	EstimatedStart  float64 `json:"estimatedStart"`
 	EstimatedFinish float64 `json:"estimatedFinish"`
+	// Core is the scheduler's own processor within Node when it models a
+	// node as several (bridge model.nodeModel "cores"); informational.
+	Core string `json:"core,omitempty"`
 }
 
 type sagaOverride struct {
@@ -187,6 +191,15 @@ type sagaScheduleResponse struct {
 func sagaAssignTasks(algorithm, baseURL string, options map[string]interface{},
 	tasks []taskSpec, nodeMap map[string]nodeInfo,
 	rtRes runtimeResolver, dsRes dataSizeResolver, bwRes bandwidthResolver) (map[string]nodeInfo, schedulePlan, error) {
+	return sagaAssignTasksWithModel(algorithm, baseURL, options, nil, tasks, nodeMap, rtRes, dsRes, bwRes)
+}
+
+// sagaAssignTasksWithModel is sagaAssignTasks with the request's "model"
+// (schedulerConfig.model): how the external scheduler should model the
+// cluster. nil leaves it out, keeping the scheduler's default model.
+func sagaAssignTasksWithModel(algorithm, baseURL string, options, model map[string]interface{},
+	tasks []taskSpec, nodeMap map[string]nodeInfo,
+	rtRes runtimeResolver, dsRes dataSizeResolver, bwRes bandwidthResolver) (map[string]nodeInfo, schedulePlan, error) {
 
 	nodeNames := make([]string, 0, len(nodeMap))
 	for name := range nodeMap {
@@ -197,6 +210,7 @@ func sagaAssignTasks(algorithm, baseURL string, options map[string]interface{},
 	var req sagaScheduleRequest
 	req.Algorithm = algorithm
 	req.Options = options
+	req.Model = model
 	byName := make(map[string]taskSpec, len(tasks))
 	for _, t := range tasks {
 		byName[t.Name] = t

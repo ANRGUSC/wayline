@@ -262,6 +262,11 @@ type schedulerConfig struct {
 	// lowering of a graph whose application placement is pinned).
 	// Enacted with the same machinery as EnactOrder.
 	NodeOrder map[string][]string
+	// Model is passed to the external scheduler as the request's "model":
+	// how to model the cluster, e.g. {nodeModel: cores, cores: {node: C},
+	// selfBandwidth, intraBandwidth} (saga-sidecar/bridge.py). Unset keeps
+	// the scheduler's default model.
+	Model map[string]interface{}
 	// SpreadEpsilon (seconds): when > 0, candidate nodes within ε of the
 	// minimum EFT are treated as tied and the least-loaded is chosen.
 	// 0 preserves strict EFT selection (with least-loaded exact-tie break).
@@ -312,6 +317,9 @@ func extractSchedulerConfig(templateObj *unstructured.Unstructured) schedulerCon
 	}
 	if opts, ok := sc["options"].(map[string]interface{}); ok && len(opts) > 0 {
 		cfg.Options = opts
+	}
+	if m, ok := sc["model"].(map[string]interface{}); ok && len(m) > 0 {
+		cfg.Model = m
 	}
 	return cfg
 }

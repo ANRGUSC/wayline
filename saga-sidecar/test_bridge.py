@@ -7,6 +7,11 @@ import pytest
 
 import bridge
 
+# The default (capacity) model needs SAGA feature/capacity; with older SAGA the
+# bridge refuses it (see test_bridge_cores.py for what runs everywhere).
+pytestmark = pytest.mark.skipif(not bridge.SAGA_HAS_CAPACITY,
+                                reason="needs SAGA with the capacity model (feature/capacity)")
+
 
 def _request(algorithm="heft", tasks=None, nodes=None, bandwidth=None):
     if nodes is None:
@@ -40,13 +45,6 @@ def test_all_tasks_assigned_to_real_nodes():
     for a in result["assignments"]:
         assert a["node"] in node_names
     assert result["estimatedMakespan"] > 0
-
-
-def test_response_reports_saga_version():
-    import importlib.metadata
-
-    result = bridge.schedule_request(_request())
-    assert result["sagaVersion"] == importlib.metadata.version("anrg-saga")
 
 
 def test_super_nodes_stripped_multi_source_multi_sink():

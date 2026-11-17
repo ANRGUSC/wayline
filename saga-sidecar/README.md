@@ -39,6 +39,29 @@ pytest test_bridge.py                       # unit tests
 go test ./cmd/odag-controller -run TestSaga # Go integration tests (skip if sidecar down)
 ```
 
+## Node model (opt-in)
+
+By default a node is one SAGA node whose capacity is its free CPU. A request
+(or an ODAG's `spec.schedulerConfig.model`, which the controller forwards) can
+ask for the classic model instead, where every node is C one-task-at-a-time
+processors:
+
+```yaml
+schedulerConfig:
+  model:
+    nodeModel: cores                      # SAGA nodes "<node>/c<i>", capacity 1
+    cores: {node-a: 8, node-b: 8}         # default: floor(cpuMillis / 1000)
+    selfBandwidth: {node-a: 2.0e9}        # self-loop (same core), default 1e12
+    intraBandwidth: 1.0e9                 # between cores of one node, default 1e12
+```
+
+Assignments still name the node (placement) and add `core`; the controller
+keeps both in `status.scheduling.externalAssignments`. With SAGA from PyPI
+(no capacity model) only `cores` mode is accepted, and only when runtimes fit
+cost/speed exactly; the default model is refused rather than silently
+mis-modelled. `pytest test_bridge_cores.py` runs with any SAGA;
+`test_bridge.py` needs feature/capacity.
+
 ## Use the bridge offline
 
 The package installs the `bridge` and `server` modules, so another project

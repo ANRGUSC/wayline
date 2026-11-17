@@ -333,7 +333,7 @@ func TestSagaStatusFields(t *testing.T) {
 	if err := json.Unmarshal(b, &back); err != nil {
 		t.Fatal(err)
 	}
-	if len(back.Assignments) != 4 || back.Assignments[2] != (sagaAssignment{"C", "n2", 6, 11}) {
+	if len(back.Assignments) != 4 || back.Assignments[2] != (sagaAssignment{Task: "C", Node: "n2", EstimatedStart: 6, EstimatedFinish: 11}) {
 		t.Errorf("externalAssignments = %+v", back.Assignments)
 	}
 	if back.Overrides == nil || len(back.Overrides) != 0 {
@@ -344,5 +344,46 @@ func TestSagaStatusFields(t *testing.T) {
 	}
 	if want := []string{"A", "B", "D"}; fmt.Sprint(plan.Order["n1"]) != fmt.Sprint(want) {
 		t.Errorf("n1 order = %v, want %v", plan.Order["n1"], want)
+	}
+}
+
+// TestSagaModelReachesRequest: schedulerConfig.model is sent as the
+// request's "model" (omitted when unset), and a scheduler's per-task core
+// survives into status.scheduling.externalAssignments.
+func TestSagaModelReachesRequest(t *testing.T) {
+	var raw map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw = nil
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		fmt.Fprint(w, `{"assignments": [
+			{"task": "A", "node": "n1", "estimatedStart": 0, "estimatedFinish": 5, "core": "n1/c0"},
+			{"task": "B", "node": "n1", "estimatedStart": 5, "estimatedFinish": 7.5, "core": "n1/c1"},
+			{"task": "C", "node": "n1", "estimatedStart": 5, "estimatedFinish": 10, "core": "n1/c0"},
+			{"task": "D", "node": "n1", "estimatedStart": 10, "estimatedFinish": 11, "core": "n1/c0"}],
+			"estimatedMakespan": 11, "capacityModel": "cores"}`)
+	}))
+	defer srv.Close()
+	nodes := makeNodes("n1", "n2")
+	model := map[string]interface{}{"nodeModel": "cores", "cores": map[string]interface{}{"n1": 2.0, "n2": 2.0}}
+	_, plan, err := sagaAssignTasksWithModel("heft", srv.URL, nil, model, diamondTasks(), nodes,
+		separableRT(), constDS(1_000_000), constBW(100e6))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(raw["model"]) != fmt.Sprint(model) {
+		t.Errorf("request model = %v, want %v", raw["model"], model)
+	}
+	if plan.Assignments[1].Core != "n1/c1" || plan.statusFields()["externalCapacityModel"] != "cores" {
+		t.Errorf("plan = %+v", plan)
+	}
+	if want := []string{"A", "B", "C", "D"}; fmt.Sprint(plan.Order["n1"]) != fmt.Sprint(want) {
+		t.Errorf("n1 order = %v, want %v", plan.Order["n1"], want)
+	}
+	if _, _, err := sagaAssignTasks("heft", srv.URL, nil, diamondTasks(), nodes,
+		separableRT(), constDS(1_000_000), constBW(100e6)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["model"]; ok {
+		t.Errorf("model sent although unset: %v", raw["model"])
 	}
 }

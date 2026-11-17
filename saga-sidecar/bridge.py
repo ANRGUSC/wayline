@@ -44,6 +44,18 @@ Model-conversion rules (each guards a known SAGA trap):
     it). A request without node CPU figures falls back to the classic model:
     capacity 1, demand 1, one task at a time per node.
 
+  * Node model (request "model", optional; absent = everything above).
+    {"nodeModel": "cores"} makes each machine C SAGA nodes of capacity 1
+    named "<machine>/c<i>" (C = model.cores[machine], else floor(cpuMillis
+    / 1000)), each task demand 1: the classic one-task-per-processor model
+    of DAG scheduling. Assignments still name the machine (what the
+    controller places on) and add "core". model.selfBandwidth (a SAGA
+    node's self-loop: consecutive tasks on one core / one node) and
+    model.intraBandwidth (between cores of one machine), each a number or
+    {machine: bytes/s}, replace the 1e12 default. With the PyPI SAGA
+    (no capacity model) only "cores" mode is accepted, and only when the
+    runtimes fit cost/speed exactly, since SAGA then plans with cost/speed.
+
   * Constraints. A task's allowed nodes go to SAGA as
     TaskGraphNode.allowed_nodes, and every scheduler chooses only among
     them. The result is verified anyway; a violation fails the request.
@@ -59,6 +71,8 @@ import importlib.metadata
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+import math
+
 import numpy as np
 
 from saga import Network, NetworkNode, Schedule, Scheduler, TaskGraph, TaskGraphNode
@@ -69,6 +83,16 @@ SUPER_NODES = ("__super_source__", "__super_sink__")
 LOCAL_SPEED = 1e12  # bytes/sec for self-loops; large finite, never math.inf
 MIN_BANDWIDTH = 1.0  # bytes/sec floor so comm cost stays finite
 MIN_RUNTIME = 1e-6  # seconds floor so log() stays finite
+CORE_SEP = "/c"  # "<machine>/c<i>"; "/" cannot occur in a Kubernetes node name
+EXACT_FIT_RMSE = 1e-9
+
+# SAGA's capacity model (demand, exact per-node runtimes, allowed nodes,
+# node capacity) is on branch feature/capacity. Older SAGA silently ignores
+# those fields, so the bridge must know whether they take effect.
+SAGA_HAS_CAPACITY = (
+    all(f in TaskGraphNode.model_fields for f in ("demand", "runtimes", "allowed_nodes"))
+    and "capacity" in NetworkNode.model_fields
+)
 
 
 # ---------------------------------------------------------------------------
@@ -110,14 +134,8 @@ def _builtin_registry() -> Dict[str, "Scheduler"]:
         WBAScheduler,
     )
 
-    from saga.schedulers.contention import ContentionHeftScheduler, RoutingHeftScheduler
-
-    return {
+    registry = {
         "heft": HeftScheduler(),
-        # One transfer at a time per node interface; routing also relays via
-        # intermediate nodes (SAGA feature/contention-aware, feature/routing-aware).
-        "contention_heft": ContentionHeftScheduler(),
-        "routing_heft": RoutingHeftScheduler(),
         "cpop": CpopScheduler(),
         "peft": PEFTScheduler(),
         "minmin": MinMinScheduler(),
@@ -132,6 +150,16 @@ def _builtin_registry() -> Dict[str, "Scheduler"]:
         "fastest_node": FastestNodeScheduler(),
         "cpop_ranking": CpopScheduler(),  # alias kept for experiment scripts
     }
+    try:
+        from saga.schedulers.contention import ContentionHeftScheduler, RoutingHeftScheduler
+    except ImportError:  # SAGA without feature/contention-aware: the rest still work
+        logger.warning("saga.schedulers.contention not installed; contention_heft/routing_heft unavailable")
+    else:
+        # One transfer at a time per node interface; routing also relays via
+        # intermediate nodes (SAGA feature/contention-aware, feature/routing-aware).
+        registry["contention_heft"] = ContentionHeftScheduler()
+        registry["routing_heft"] = RoutingHeftScheduler()
+    return registry
 
 
 _SCHEDULERS: Optional[Dict[str, Scheduler]] = None
@@ -267,39 +295,88 @@ def _rank1_fit(rt: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
     return np.exp(log_cost), np.exp(log_speed), rmse
 
 
+def _per_machine(value: Any, machine: str, default: float) -> float:
+    """A model setting given as a number or as {machine: number}."""
+    if value is None:
+        return default
+    if isinstance(value, dict):
+        return float(value.get(machine, default))
+    return float(value)
+
+
+def machine_of(saga_node: str) -> str:
+    """SAGA node -> the machine it belongs to ("m/c3" -> "m"; "m" -> "m")."""
+    return saga_node.rpartition(CORE_SEP)[0] if CORE_SEP in saga_node else saga_node
+
+
 def build_saga_models(
-    dag: dict, cluster_state: dict
+    dag: dict, cluster_state: dict, model: Optional[dict] = None
 ) -> Tuple[TaskGraph, Network, List[str], float]:
     """Convert the Wayline request into SAGA TaskGraph + Network.
 
-    Returns (task_graph, network, node_names, cost_model_rmse).
+    Returns (task_graph, network, saga_node_names, cost_model_rmse). Without
+    a model (or nodeModel "capacity") the SAGA nodes are the machines; with
+    nodeModel "cores" they are "<machine>/c<i>" (see machine_of).
     """
+    model = model or {}
+    node_model = model.get("nodeModel", "capacity")
+    if node_model not in ("capacity", "cores"):
+        raise ValueError(f"unknown model.nodeModel {node_model!r}; use 'capacity' or 'cores'")
+    cores_mode = node_model == "cores"
     tasks: List[dict] = dag["tasks"]
     nodes = [n for n in cluster_state["nodes"] if n.get("ready", True)]
     if not nodes:
         raise ValueError("no ready nodes in clusterState")
-    node_names = [n["name"] for n in nodes]
+    machines = [n["name"] for n in nodes]
 
-    rt = _runtime_matrix(tasks, node_names)
+    rt = _runtime_matrix(tasks, machines)
     costs, speeds, rmse = _rank1_fit(rt)
+    if not SAGA_HAS_CAPACITY:
+        # Old SAGA ignores capacity/demand/runtimes: only a capacity-1 model
+        # whose runtimes ARE cost/speed is planned faithfully.
+        if not cores_mode:
+            raise RuntimeError(
+                "the installed SAGA has no capacity model (needs feature/capacity); "
+                "request model.nodeModel 'cores' or install it")
+        if rmse > EXACT_FIT_RMSE:
+            raise RuntimeError(
+                f"runtimes are not cost/speed (fit RMSE {rmse:.3g}) and the installed SAGA "
+                "cannot take exact per-node runtimes (needs feature/capacity)")
 
-    # Capacity in cores; classic model when node CPU is not reported.
-    capacity_known = all(float(n.get("cpuMillis") or 0) > 0 for n in nodes)
-    capacity = {n["name"]: (float(n["cpuMillis"]) / 1000.0 if capacity_known else 1.0) for n in nodes}
+    # SAGA nodes: (name, machine index, capacity)
+    if cores_mode:
+        saga_nodes = []
+        for j, n in enumerate(nodes):
+            default = math.floor(float(n.get("cpuMillis") or 0) / 1000.0)
+            count = int(_per_machine(model.get("cores"), n["name"], default))
+            if count < 1:
+                raise ValueError(f"model.cores gives {n['name']!r} no cores")
+            saga_nodes += [(f"{n['name']}{CORE_SEP}{i}", j, 1.0) for i in range(count)]
+        capacity_known = True
+    else:
+        # Capacity in cores; classic model when node CPU is not reported.
+        capacity_known = all(float(n.get("cpuMillis") or 0) > 0 for n in nodes)
+        saga_nodes = [(n["name"], j, float(n["cpuMillis"]) / 1000.0 if capacity_known else 1.0)
+                      for j, n in enumerate(nodes)]
+    saga_names = [name for name, _, _ in saga_nodes]
 
     # --- TaskGraph ---------------------------------------------------------
     tg_nodes = []
     for i, t in enumerate(tasks):
-        demand = float(t.get("cpuMillis") or 0) / 1000.0 if capacity_known else 1.0
-        if capacity_known and demand <= 0:
-            raise ValueError(f"task {t['name']!r} has no CPU request")
-        allowed = _allowed_nodes(t, node_names)
+        if cores_mode:
+            demand = 1.0
+        else:
+            demand = float(t.get("cpuMillis") or 0) / 1000.0 if capacity_known else 1.0
+            if capacity_known and demand <= 0:
+                raise ValueError(f"task {t['name']!r} has no CPU request")
+        allowed = _allowed_nodes(t, machines)
         tg_nodes.append(TaskGraphNode(
             name=t["name"],
             cost=float(costs[i]),
             demand=demand,
-            runtimes={n: float(rt[i, j]) for j, n in enumerate(node_names)},
-            allowed_nodes=set(allowed) if allowed is not None else None,
+            runtimes={name: float(rt[i, j]) for name, j, _ in saga_nodes},
+            allowed_nodes=({name for name, j, _ in saga_nodes if machines[j] in allowed}
+                           if allowed is not None else None),
         ))
     tg_edges = []
     task_index = {t["name"]: i for i, t in enumerate(tasks)}
@@ -334,20 +411,29 @@ def build_saga_models(
     for e in cluster_state.get("bandwidth", []) or []:
         bw[(e["from"], e["to"])] = float(e["bytesPerSec"])
 
-    net_nodes = [NetworkNode(name=n, speed=float(speeds[j]), capacity=capacity[n])
-                 for j, n in enumerate(node_names)]
+    def inter(u: str, v: str) -> float:
+        candidates = [x for x in (bw.get((u, v)), bw.get((v, u))) if x is not None and x > 0]
+        return max(min(candidates) if candidates else MIN_BANDWIDTH, MIN_BANDWIDTH)
+
+    net_nodes = [NetworkNode(name=name, speed=float(speeds[j]), capacity=cap)
+                 for name, j, cap in saga_nodes]
     net_edges = []
-    for j, u in enumerate(node_names):
-        net_edges.append((u, u, LOCAL_SPEED))  # explicit self-loop, finite
-        for v in node_names[j + 1 :]:
-            fwd = bw.get((u, v))
-            rev = bw.get((v, u))
-            candidates = [x for x in (fwd, rev) if x is not None and x > 0]
-            speed = min(candidates) if candidates else MIN_BANDWIDTH
-            net_edges.append((u, v, max(speed, MIN_BANDWIDTH)))
+    for k, (u, ju, _) in enumerate(saga_nodes):
+        mu = machines[ju]
+        # explicit self-loop, finite
+        net_edges.append((u, u, _per_machine(model.get("selfBandwidth"), mu, LOCAL_SPEED)))
+        for v, jv, _ in saga_nodes[k + 1 :]:
+            if jv == ju:
+                speed = _per_machine(model.get("intraBandwidth"), mu, LOCAL_SPEED)
+            else:
+                speed = inter(mu, machines[jv])
+            net_edges.append((u, v, speed))
+    for _, _, speed in net_edges:
+        if not speed > 0 or math.isinf(speed):
+            raise ValueError(f"link speeds must be finite and > 0, got {speed}")
     network = Network.create(nodes=net_nodes, edges=net_edges)
 
-    return task_graph, network, node_names, rmse
+    return task_graph, network, saga_names, rmse
 
 
 # ---------------------------------------------------------------------------
@@ -375,17 +461,23 @@ def schedule_request(request: dict) -> dict:
         return {"assignments": [], "estimatedMakespan": 0.0, "algorithm": algorithm}
 
     scheduler = get_scheduler(algorithm, options)
-    task_graph, network, node_names, rmse = build_saga_models(dag, cluster_state)
+    model = request.get("model") or {}
+    cores_mode = model.get("nodeModel") == "cores"
+    task_graph, network, _, rmse = build_saga_models(dag, cluster_state, model)
     sched: Schedule = scheduler.schedule(network, task_graph)
+    machine_names = [n["name"] for n in cluster_state["nodes"] if n.get("ready", True)]
 
-    # mapping: node -> [ScheduledTask]; invert, strip super nodes.
+    # mapping: node -> [ScheduledTask]; invert, strip super nodes. Placement
+    # is by machine; in "cores" mode the SAGA node is one of its cores.
     placement: Dict[str, str] = {}
+    saga_node: Dict[str, str] = {}
     times: Dict[str, Tuple[float, float]] = {}
     for node_name, scheduled in sched.mapping.items():
         for st in scheduled:
             if st.name in SUPER_NODES:
                 continue
-            placement[st.name] = node_name
+            placement[st.name] = machine_of(node_name)
+            saga_node[st.name] = node_name
             times[st.name] = (float(st.start), float(st.end))
 
     missing = [t["name"] for t in tasks if t["name"] not in placement]
@@ -396,22 +488,24 @@ def schedule_request(request: dict) -> dict:
     # returned estimate describe a schedule that does not run.
     violations = []
     for t in tasks:
-        allowed = _allowed_nodes(t, node_names)
+        allowed = _allowed_nodes(t, machine_names)
         if allowed is not None and placement[t["name"]] not in allowed:
             violations.append(f"{t['name']} on {placement[t['name']]} (allowed {sorted(allowed)})")
     if violations:
         raise RuntimeError(f"{algorithm} violated placement constraints: {violations}")
 
     makespan = float(sched.makespan) if placement else 0.0
-    assignments = [
-        {
+    assignments = []
+    for t in tasks:
+        a = {
             "task": t["name"],
             "node": placement[t["name"]],
             "estimatedStart": times.get(t["name"], (0.0, 0.0))[0],
             "estimatedFinish": times.get(t["name"], (0.0, 0.0))[1],
         }
-        for t in tasks
-    ]
+        if cores_mode:
+            a["core"] = saga_node[t["name"]]
+        assignments.append(a)
     result = {
         "assignments": assignments,
         "estimatedMakespan": makespan,
@@ -420,5 +514,8 @@ def schedule_request(request: dict) -> dict:
         "sagaVersion": saga_version(),
     }
     ready = [n for n in cluster_state["nodes"] if n.get("ready", True)]
-    result["capacityModel"] = "cpu" if all(float(n.get("cpuMillis") or 0) > 0 for n in ready) else "classic"
+    if cores_mode:
+        result["capacityModel"] = "cores"
+    else:
+        result["capacityModel"] = "cpu" if all(float(n.get("cpuMillis") or 0) > 0 for n in ready) else "classic"
     return result
