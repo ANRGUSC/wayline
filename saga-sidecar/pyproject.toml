@@ -3,9 +3,26 @@ name = "wl-saga-sidecar"
 version = "0.1.0"
 description = "SAGA scheduler sidecar for the Wayline odag-controller"
 requires-python = ">=3.12"
+# The bridge needs SAGA's capacity model (TaskGraphNode.demand/runtimes/
+# allowed_nodes, NetworkNode.capacity, saga.schedulers.contention), which
+# is on SAGA branch feature/capacity (2.2.0.dev1), not yet on PyPI. The
+# PyPI release installs and `import bridge` works, but scheduling fails
+# until that SAGA is installed (see Dockerfile).
 dependencies = [
     "anrg-saga>=2.1.0",
+    "numpy",
 ]
+
+# Installable (pip install ./saga-sidecar, or a uv path/git source with
+# subdirectory = "saga-sidecar") so other projects can `import bridge` and
+# schedule offline with exactly the conversion the controller uses. The
+# Docker image still copies bridge.py/server.py directly.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["bridge", "server"]
 
 [dependency-groups]
 dev = ["pytest>=8"]

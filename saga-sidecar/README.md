@@ -10,8 +10,9 @@ spec:
 ```
 
 `GET /algorithms` lists the roster. On any sidecar failure the controller
-falls back to the built-in HEFT scheduler (placement quality degrades,
-availability does not).
+falls back to random placement (placement quality degrades, availability
+does not) and records it in the run's `status.scheduling` (`used: random`,
+`fallbackError`).
 
 ## How it works
 
@@ -37,6 +38,23 @@ python server.py --port 8090
 pytest test_bridge.py                       # unit tests
 go test ./cmd/odag-controller -run TestSaga # Go integration tests (skip if sidecar down)
 ```
+
+## Use the bridge offline
+
+The package installs the `bridge` and `server` modules, so another project
+can schedule a request exactly as the controller would, without a cluster:
+
+```bash
+pip install ./saga-sidecar        # or, with uv:
+# [tool.uv.sources] wl-saga-sidecar = { git = "https://github.com/ANRGUSC/wayline", subdirectory = "saga-sidecar" }
+python -c 'import bridge, json; print(bridge.schedule_request(json.load(open("req.json"))))'
+```
+
+`req.json` is the body the controller POSTs (archived per call when
+`WL_SAGA_DUMP_DIR` is set). Install the same SAGA build as the sidecar image
+(see `Dockerfile`), and set `PYTHONHASHSEED=0` as the deployment does:
+SAGA breaks ties in string-hash order. The response reports `sagaVersion`,
+which the controller records in `status.scheduling.externalSagaVersion`.
 
 ## Deploy
 

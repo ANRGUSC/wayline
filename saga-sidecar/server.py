@@ -27,7 +27,8 @@ env vars make such code importable without rebuilding this image:
                            keep working.
 
 Errors return 4xx/5xx with a JSON {"error": ...} body; the Go side treats
-any non-200 as "fall back to the built-in HEFT scheduler".
+any non-200 as "fall back to random placement" (recorded in the run's
+status.scheduling as used: random + fallbackError).
 
 Run: python server.py [--port 8090]
 """

@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import collections
 import importlib
+import importlib.metadata
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -205,6 +206,15 @@ def get_scheduler(name: str, options: Optional[Dict[str, Any]] = None) -> Schedu
         "For a scheduler of your own, give its dotted path "
         "(e.g. 'mypkg.schedulers.MyScheduler')."
     )
+
+
+def saga_version() -> str:
+    """Installed anrg-saga version, reported with every schedule so a run
+    records which SAGA planned it (offline replays must match it)."""
+    try:
+        return importlib.metadata.version("anrg-saga")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +417,7 @@ def schedule_request(request: dict) -> dict:
         "estimatedMakespan": makespan,
         "algorithm": algorithm,
         "costModelFitRMSE": rmse,
+        "sagaVersion": saga_version(),
     }
     ready = [n for n in cluster_state["nodes"] if n.get("ready", True)]
     result["capacityModel"] = "cpu" if all(float(n.get("cpuMillis") or 0) > 0 for n in ready) else "classic"

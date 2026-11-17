@@ -42,6 +42,13 @@ def test_all_tasks_assigned_to_real_nodes():
     assert result["estimatedMakespan"] > 0
 
 
+def test_response_reports_saga_version():
+    import importlib.metadata
+
+    result = bridge.schedule_request(_request())
+    assert result["sagaVersion"] == importlib.metadata.version("anrg-saga")
+
+
 def test_super_nodes_stripped_multi_source_multi_sink():
     # Two sources, two sinks -> SAGA injects __super_source__/__super_sink__.
     tasks = [
