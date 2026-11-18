@@ -365,11 +365,18 @@ func timingsFile(rel string) string {
 // marker). Source is "local" for an SDK install on the producing node and
 // "remote" for an agent-to-agent push, in which case FromNode names the
 // sender.
+//
+// ReceiveStartUnix (instrumentation only) is when this agent began handling
+// the PUT that installed the copy: for a remote install, when the pushed
+// bytes started arriving on THIS node (this node's clock), so
+// UnixTime - ReceiveStartUnix is the receive + install time seen by the
+// receiver. Unset for aliases and records written before it existed.
 type installRecord struct {
-	UnixTime float64 `json:"unixTime"`
-	Bytes    int64   `json:"bytes"`
-	Source   string  `json:"source"`
-	FromNode string  `json:"fromNode,omitempty"`
+	UnixTime         float64 `json:"unixTime"`
+	Bytes            int64   `json:"bytes"`
+	Source           string  `json:"source"`
+	FromNode         string  `json:"fromNode,omitempty"`
+	ReceiveStartUnix float64 `json:"receiveStartUnix,omitempty"`
 }
 
 // recordInstalled durably writes the install record. Best-effort: a failure
@@ -540,16 +547,27 @@ func listTransferStates(rel string) map[string]string {
 // flowRecord is a single completed (or failed) push from this node to one
 // downstream successor. Both timestamps are captured on the sender, so clock
 // drift across nodes never contaminates the duration.
+//
+// RequestUnix and HashedUnix are instrumentation only (sender's clock, unset
+// for resumed transfers): when the producer's POST /push reached this agent,
+// and when the agent had hashed the local file and began fanning out. So
+// HashedUnix - RequestUnix is the digest pass and StartUnix - HashedUnix the
+// wait for a push slot (maxConcurrentPushes).
 type flowRecord struct {
-	FromTask  string  `json:"fromTask"`
-	ToTask    string  `json:"toTask"`
-	SrcNode   string  `json:"srcNode"`
-	DstNode   string  `json:"dstNode"`
-	DataSize  int64   `json:"dataSize"`
-	StartUnix float64 `json:"startUnix"` // seconds since epoch (float, sub-millisecond precision)
-	EndUnix   float64 `json:"endUnix"`
-	Ok        bool    `json:"ok"`
+	FromTask    string  `json:"fromTask"`
+	ToTask      string  `json:"toTask"`
+	SrcNode     string  `json:"srcNode"`
+	DstNode     string  `json:"dstNode"`
+	DataSize    int64   `json:"dataSize"`
+	StartUnix   float64 `json:"startUnix"` // seconds since epoch (float, sub-millisecond precision)
+	EndUnix     float64 `json:"endUnix"`
+	Ok          bool    `json:"ok"`
+	RequestUnix float64 `json:"requestUnix,omitempty"`
+	HashedUnix  float64 `json:"hashedUnix,omitempty"`
 }
+
+// unixNow is the current time as float epoch seconds (instrumentation).
+func unixNow() float64 { return float64(time.Now().UnixNano()) / 1e9 }
 
 var flowsMu sync.Mutex
 
@@ -1341,6 +1359,7 @@ func main() {
 	// Reads local output file and pushes to each remote successor in a goroutine.
 	// Responds 200 immediately; the pod can exit right away.
 	http.HandleFunc("/push/", func(w http.ResponseWriter, r *http.Request) {
+		requestUnix := unixNow() // instrumentation only (flowRecord.RequestUnix)
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -1447,6 +1466,7 @@ func main() {
 
 			// Record actual output size.
 			_ = writeFile(bytesFile(rel), fmt.Sprintf("%d", size))
+			hashedUnix := unixNow() // instrumentation only (flowRecord.HashedUnix)
 
 			setSending(rel, true)
 			log.Printf("[data-agent/%s] PUSH %s/%s: pushing %d bytes (sha256=%s) to %d successor(s) (max-concurrent=%d)",
@@ -1504,9 +1524,11 @@ func main() {
 						SrcNode:   nodeName,
 						DstNode:   succ.Node,
 						DataSize:  size,
-						StartUnix: float64(start.UnixNano()) / 1e9,
-						EndUnix:   float64(end.UnixNano()) / 1e9,
-						Ok:        ok,
+						StartUnix:   float64(start.UnixNano()) / 1e9,
+						EndUnix:     float64(end.UnixNano()) / 1e9,
+						Ok:          ok,
+						RequestUnix: requestUnix,
+						HashedUnix:  hashedUnix,
 					})
 				}(succ)
 			}
@@ -2002,6 +2024,7 @@ func main() {
 		fullPath := filepath.Join(dataDir, segs[0], segs[1], "output")
 		switch r.Method {
 		case http.MethodPut:
+			receiveStartUnix := unixNow() // instrumentation only (installRecord.ReceiveStartUnix)
 			metricPutTotal.Add(1)
 			// Idempotency fast-path: if the caller supplied an
 			// X-Wayline-Content-SHA256 and the output is already installed
@@ -2091,10 +2114,11 @@ func main() {
 				src, fromNode = "remote", sn
 			}
 			recordInstalled(rel, installRecord{
-				UnixTime: float64(time.Now().UnixNano()) / 1e9,
-				Bytes:    n,
-				Source:   src,
-				FromNode: fromNode,
+				UnixTime:         float64(time.Now().UnixNano()) / 1e9,
+				Bytes:            n,
+				Source:           src,
+				FromNode:         fromNode,
+				ReceiveStartUnix: receiveStartUnix,
 			})
 			setReadySync(rel, meta)
 			log.Printf("[data-agent/%s] PUT %s (%d bytes, sha256=%s, durable=%v) → ReadyLocal", nodeName, r.URL.Path, n, computedDigest, durable)

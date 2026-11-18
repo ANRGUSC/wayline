@@ -1658,15 +1658,18 @@ func queryTaskBytes(nodeIP, odagName, taskName string) int64 {
 }
 
 // dataAgentFlow is one per-push flow record returned by data-agent /flows/<odag>.
+// RequestUnix / HashedUnix are instrumentation only (0 from older agents).
 type dataAgentFlow struct {
-	FromTask  string  `json:"fromTask"`
-	ToTask    string  `json:"toTask"`
-	SrcNode   string  `json:"srcNode"`
-	DstNode   string  `json:"dstNode"`
-	DataSize  int64   `json:"dataSize"`
-	StartUnix float64 `json:"startUnix"`
-	EndUnix   float64 `json:"endUnix"`
-	Ok        bool    `json:"ok"`
+	FromTask    string  `json:"fromTask"`
+	ToTask      string  `json:"toTask"`
+	SrcNode     string  `json:"srcNode"`
+	DstNode     string  `json:"dstNode"`
+	DataSize    int64   `json:"dataSize"`
+	StartUnix   float64 `json:"startUnix"`
+	EndUnix     float64 `json:"endUnix"`
+	Ok          bool    `json:"ok"`
+	RequestUnix float64 `json:"requestUnix,omitempty"`
+	HashedUnix  float64 `json:"hashedUnix,omitempty"`
 }
 
 // deleteFlows truncates the flow log for an ODAG on one node's data-agent.
@@ -1732,25 +1735,42 @@ func queryTimings(nodeIP, odagName, taskName string) map[string]interface{} {
 	return out
 }
 
-// queryInstalled returns the epoch-seconds timestamp at which taskName's
-// output became readable on the node at nodeIP, or 0 if unknown.
-func queryInstalled(nodeIP, odagName, taskName string) float64 {
-	url := fmt.Sprintf("http://%s:%d/installed/%s/%s", nodeIP, dataAgentPort, odagName, taskName)
+// installedRecord is a data agent's install record for one object on its
+// node (GET /installed/<odag>/<key>; data-agent installRecord).
+type installedRecord struct {
+	UnixTime         float64 `json:"unixTime"`
+	Bytes            int64   `json:"bytes"`
+	Source           string  `json:"source"`
+	FromNode         string  `json:"fromNode,omitempty"`
+	ReceiveStartUnix float64 `json:"receiveStartUnix,omitempty"`
+}
+
+// queryInstalledRecord returns the install record of object key on the node
+// at nodeIP, or nil if there is none (or the agent is unreachable).
+func queryInstalledRecord(nodeIP, odagName, key string) *installedRecord {
+	url := fmt.Sprintf("http://%s:%d/installed/%s/%s", nodeIP, dataAgentPort, odagName, key)
 	resp, err := httpClient.Get(url)
 	if err != nil {
-		return 0
+		return nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0
+		return nil
 	}
-	var rec struct {
-		UnixTime float64 `json:"unixTime"`
-	}
+	var rec installedRecord
 	if err := json.NewDecoder(resp.Body).Decode(&rec); err != nil {
-		return 0
+		return nil
 	}
-	return rec.UnixTime
+	return &rec
+}
+
+// queryInstalled returns the epoch-seconds timestamp at which taskName's
+// output became readable on the node at nodeIP, or 0 if unknown.
+func queryInstalled(nodeIP, odagName, taskName string) float64 {
+	if rec := queryInstalledRecord(nodeIP, odagName, taskName); rec != nil {
+		return rec.UnixTime
+	}
+	return 0
 }
 
 // unixToRFC3339 renders epoch seconds (float) as an RFC3339Nano UTC string,
@@ -1761,40 +1781,66 @@ func unixToRFC3339(t float64) string {
 	return time.Unix(sec, nsec).UTC().Format(time.RFC3339Nano)
 }
 
-// inputsReadyTime returns when the LAST dependency of taskName finished
-// installing on the node where taskName runs — the moment the controller's
-// data-readiness gate could open. Returns "" for source tasks, and for
-// tasks where any dependency's install record is missing (partial data is
-// worse than none for error attribution).
-func inputsReadyTime(taskName string, tasks []taskSpec, assignMap map[string]nodeInfo, odagName string) string {
-	var deps []string
-	for _, t := range tasks {
-		if t.Name == taskName {
-			deps = t.Dependencies
+// inputInstalls reports, for every object taskName consumes (its named
+// inputs, or each dependency's default output), when that object finished
+// installing on the node where taskName runs, from the install records the
+// data agent there already keeps. Status/measurement only: it reads the
+// same records the gate's readiness markers are written with, and decides
+// nothing. Returns one status entry per object (with installedUnix and
+// installedTime when the record exists), the latest install time, and
+// whether every object had a record (status.tasks[].inputsReadyTime is the
+// latest one, set only when complete: the moment the data-readiness gate
+// could open).
+func inputInstalls(taskName string, tasks []taskSpec, assignMap map[string]nodeInfo, odagName string) ([]map[string]interface{}, float64, bool) {
+	var task *taskSpec
+	for i := range tasks {
+		if tasks[i].Name == taskName {
+			task = &tasks[i]
 			break
 		}
 	}
-	if len(deps) == 0 {
-		return ""
+	if task == nil || len(task.Dependencies) == 0 {
+		return nil, 0, false
 	}
 	consumerIP := assignMap[taskName].ip
 	if consumerIP == "" {
-		return ""
+		return nil, 0, false
 	}
-	latest := 0.0
-	for _, dep := range deps {
+	var entries []map[string]interface{}
+	latest, complete := 0.0, true
+	for _, dep := range task.Dependencies {
 		// The relevant copy is the one on the CONSUMER's node: for a
 		// same-node edge that is the producer's local install, for a
-		// cross-node edge the receiving agent's install.
-		ts := queryInstalled(consumerIP, odagName, dep)
-		if ts <= 0 {
-			return ""
-		}
-		if ts > latest {
-			latest = ts
+		// cross-node edge the receiving agent's install. A named input is
+		// installed under its object key ("producer.object"), not under
+		// the producer's name.
+		for _, key := range consumedKeys(*task, dep) {
+			e := map[string]interface{}{"object": key, "producer": dep}
+			rec := queryInstalledRecord(consumerIP, odagName, key)
+			if rec == nil || rec.UnixTime <= 0 {
+				complete = false
+				entries = append(entries, e)
+				continue
+			}
+			e["installedUnix"] = rec.UnixTime
+			e["installedTime"] = unixToRFC3339(rec.UnixTime)
+			e["bytes"] = rec.Bytes
+			if rec.Source != "" {
+				e["source"] = rec.Source
+			}
+			if rec.FromNode != "" {
+				e["fromNode"] = rec.FromNode
+			}
+			if rec.ReceiveStartUnix > 0 {
+				e["receiveStartUnix"] = rec.ReceiveStartUnix
+			}
+			if rec.UnixTime > latest {
+				latest = rec.UnixTime
+			}
+			entries = append(entries, e)
 		}
 	}
-	return unixToRFC3339(latest)
+	return entries, latest, complete
 }
 
 // --------------------------------------------------------------------------
@@ -1986,10 +2032,13 @@ func podTaskStatus(pod corev1.Pod, odagName string, assignMap map[string]nodeInf
 			}
 		}
 		// Data-availability gate: when the last dependency's output
-		// finished installing on this task's node. Source tasks have no
-		// gate and are left unset.
-		if rt := inputsReadyTime(taskName, tasks, assignMap, odagName); rt != "" {
-			ts["inputsReadyTime"] = rt
+		// finished installing on this task's node, and (inputs) when each
+		// consumed object did. Source tasks have no gate and are left unset.
+		if ins, latest, complete := inputInstalls(taskName, tasks, assignMap, odagName); len(ins) > 0 {
+			ts["inputs"] = ins
+			if complete {
+				ts["inputsReadyTime"] = unixToRFC3339(latest)
+			}
 		}
 	}
 	return ts
@@ -2049,7 +2098,7 @@ func updateActualFlows(dynClient dynamic.Interface, namespace, odagName string, 
 
 	entries := make([]map[string]any, 0, len(all))
 	for _, f := range all {
-		entries = append(entries, map[string]any{
+		e := map[string]any{
 			"fromTask": f.FromTask,
 			"toTask":   f.ToTask,
 			"srcNode":  f.SrcNode,
@@ -2058,7 +2107,18 @@ func updateActualFlows(dynClient dynamic.Interface, namespace, odagName string, 
 			"start":    f.StartUnix - t0,
 			"end":      f.EndUnix - t0,
 			"ok":       f.Ok,
-		})
+			// Absolute sender-clock times (instrumentation): start/end
+			// above are relative to a whole-second pod startTime.
+			"startUnix": f.StartUnix,
+			"endUnix":   f.EndUnix,
+		}
+		if f.RequestUnix > 0 {
+			e["requestUnix"] = f.RequestUnix
+		}
+		if f.HashedUnix > 0 {
+			e["hashedUnix"] = f.HashedUnix
+		}
+		entries = append(entries, e)
 	}
 
 	patch := map[string]any{

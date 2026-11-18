@@ -456,6 +456,40 @@ spec:
                           task's node, i.e. when the data-readiness gate opened. Unset
                           for source tasks and when any dependency's install record is
                           missing.
+                      inputs:
+                        type: array
+                        description: >
+                          Instrumentation (status only): one entry per object this task
+                          consumes, with when it finished installing on this task's node
+                          (that node's clock), from the data agent's install record.
+                          inputsReadyTime is the latest of these.
+                        items:
+                          type: object
+                          properties:
+                            object:
+                              type: string
+                              description: Object key ("producer.object", or the producer for its default output).
+                            producer:
+                              type: string
+                            installedTime:
+                              type: string
+                              format: date-time
+                            installedUnix:
+                              type: number
+                              description: installedTime as epoch seconds (sub-millisecond).
+                            receiveStartUnix:
+                              type: number
+                              description: >
+                                When this node's agent began receiving the install (for a
+                                pushed copy, when the bytes started arriving), epoch seconds.
+                            bytes:
+                              type: integer
+                              format: int64
+                            source:
+                              type: string
+                              description: local (producer on this node), remote (pushed here) or alias.
+                            fromNode:
+                              type: string
                       startupSeconds:
                         type: number
                         description: >
@@ -579,6 +613,22 @@ spec:
                         format: int64
                       ok:
                         type: boolean
+                      startUnix:
+                        type: number
+                        description: Wire start, epoch seconds on the sender's clock (instrumentation).
+                      endUnix:
+                        type: number
+                        description: Wire end, epoch seconds on the sender's clock (instrumentation).
+                      requestUnix:
+                        type: number
+                        description: >
+                          When the producer's push request reached the sender's agent, epoch
+                          seconds (sender's clock; instrumentation, unset for resumed transfers).
+                      hashedUnix:
+                        type: number
+                        description: >
+                          When the sender's agent had hashed the local file and began fanning
+                          out the push, epoch seconds (sender's clock; instrumentation).
       subresources:
         status: {}
       additionalPrinterColumns:
